@@ -1,0 +1,46 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Model weights (download separately)
+*.pt
+*.onnx
+*.engine
+mobileclip_blt.ts
+
+# Videos and datasets
+test-videos/
+dataset/
+runs/
+
+# Runtime data
+backend/snapshots/
+backend/logs/
+backend/alerts.db
+backend/__pycache__/
+backend/.pytest_cache/
+
+# Config with secrets
+backend/config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+frontend/dist/
+
+# Claude
+.claude/

@@ -1,0 +1,100 @@
+{
+  "database": {
+    "url": "postgresql://localhost:5432/safetylens"
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": "",
+    "severities": ["P1", "P2"]
+  },
+  "global": {
+    "target_fps": 6,
+    "yolo_conf": 0.35,
+    "jpeg_quality": 60,
+    "inference_width": 640,
+    "device": "mps",
+    "alert_cooldown": 60
+  },
+  "vlm": {
+    "enabled": false,
+    "interval": 45,
+    "model": "qwen3-vl:8b",
+    "prompt": "You are a factory safety inspector AI. Analyze this warehouse/factory image and answer:\n1. Is the aisle/gangway clear and unobstructed? Is there any equipment, forklift, or material blocking the path?\n2. Are all visible workers wearing proper PPE (helmet, vest, goggles)?\n3. Is there safe distance between workers and any forklifts or heavy equipment?\n4. Are there any other safety hazards visible?\nBe specific and concise (3-4 sentences max). If there are violations, state them clearly.",
+    "temperature": 0.1,
+    "max_tokens": 300,
+    "violation_keywords": [
+      "not wearing", "missing", "blocked", "obstructed", "hazard",
+      "violation", "unsafe", "no helmet", "no vest", "forklift",
+      "too close", "proximity", "clearance"
+    ]
+  },
+  "cameras": {
+    "cam1": {
+      "name": "Welding Bay",
+      "video": "construction-workers-helmets.mp4",
+      "zone": "Welding Bay",
+      "demo": "yolo",
+      "rules": ["Person Detection", "Mobile Phone Usage"],
+      "enabled": true,
+      "fps": 6,
+      "stream_type": "file",
+      "alert_classes": ["mobile_phone", "animal_intrusion"]
+    },
+    "cam2": {
+      "name": "Warehouse Aisle",
+      "video": "warehouse-forklift-aisle.mp4",
+      "zone": "Warehouse",
+      "demo": "yolo",
+      "rules": ["Person Detection", "Mobile Phone Usage"],
+      "enabled": true,
+      "fps": 6,
+      "stream_type": "file",
+      "alert_classes": ["mobile_phone", "animal_intrusion"]
+    },
+    "cam3": {
+      "name": "Food Factory - PPE",
+      "video": "factory-workers-hairnet-wide.mp4",
+      "zone": "Food Production",
+      "demo": "yoloe",
+      "rules": ["Hairnet Detection", "Gloves Detection"],
+      "yoloe_classes": ["person", "hairnet", "gloves", "face mask", "apron"],
+      "enabled": true,
+      "fps": 6,
+      "stream_type": "file"
+    },
+    "cam4": {
+      "name": "TMEIC Main Gate",
+      "video": "tmeic/mf-main-gate-cam1-full.avi",
+      "zone": "Main Gate",
+      "demo": "yolo",
+      "rules": ["Person Detection", "Animal Intrusion", "Mobile Phone Usage"],
+      "enabled": true,
+      "fps": 4,
+      "stream_type": "file",
+      "alert_classes": ["mobile_phone", "animal_intrusion", "person_detected"]
+    },
+    "cam5": {
+      "name": "TMEIC PE Stores",
+      "video": "tmeic/pe-stores-cam01.avi",
+      "zone": "PE Stores",
+      "demo": "yolo",
+      "rules": ["Person Detection", "Mobile Phone Usage"],
+      "enabled": true,
+      "fps": 4,
+      "stream_type": "file",
+      "alert_classes": ["mobile_phone", "animal_intrusion"]
+    },
+    "cam6": {
+      "name": "TMEIC Stores Rack A",
+      "video": "tmeic/pe-stores-rack-a-full.avi",
+      "zone": "Stores Rack A",
+      "demo": "yoloe",
+      "rules": ["Person Detection", "Helmet Detection", "Safety Vest Detection"],
+      "yoloe_classes": ["person", "hard hat", "safety helmet", "safety vest", "high visibility vest"],
+      "enabled": true,
+      "fps": 4,
+      "stream_type": "file"
+    }
+  }
+}

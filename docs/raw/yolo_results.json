@@ -1,0 +1,23 @@
+{
+  "model": "yolov8n",
+  "training": {
+    "epochs": 50,
+    "img_size": 640,
+    "batch": 8,
+    "device": "mps (Apple M1 Pro)",
+    "training_time_seconds": 1845.5,
+    "training_time_minutes": 30.8
+  },
+  "metrics": {
+    "mAP50": 0.9531,
+    "mAP50_95": 0.8553,
+    "precision": 0.8683,
+    "recall": 0.938
+  },
+  "inference": {
+    "frames_tested": 20,
+    "total_time_seconds": 0.683,
+    "fps": 29.3,
+    "ms_per_frame": 34.2
+  }
+}

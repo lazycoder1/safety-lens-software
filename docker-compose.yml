@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: safetylens
+      POSTGRES_USER: safetylens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-safetylens}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safetylens"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${SAFETYLENS_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql://safetylens:${POSTGRES_PASSWORD:-safetylens}@db:5432/safetylens
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/api/generate}
+    volumes:
+      - snapshots:/app/backend/snapshots
+      - ./test-videos:/app/test-videos:ro
+      - ./backend/config.json:/app/backend/config.json
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  pgdata:
+  snapshots:

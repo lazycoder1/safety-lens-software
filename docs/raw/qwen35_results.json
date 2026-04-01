@@ -1,0 +1,51 @@
+{
+  "model": "qwen3.5:35b",
+  "note": "Text-only benchmark (no vision - qwen3.5 is text MoE, not VL). 5 frames only.",
+  "frames_tested": 5,
+  "successful": 5,
+  "failed": 0,
+  "latency_ms": {
+    "mean": 33814,
+    "median": 33760,
+    "min": 33547,
+    "max": 34174,
+    "stdev": 240
+  },
+  "tokens_per_second": {
+    "mean": 15.0,
+    "min": 14.0,
+    "max": 16.0
+  },
+  "detections_per_frame": {
+    "mean": 0.0,
+    "total": 0
+  },
+  "fps_equivalent": 0.0296,
+  "raw": [
+    {
+      "frame": "working-electronics-factory_f000247.jpg",
+      "latency_ms": 34174,
+      "num_detections": 0
+    },
+    {
+      "frame": "construction-workers-helmets_f000169.jpg",
+      "latency_ms": 33547,
+      "num_detections": 0
+    },
+    {
+      "frame": "businessman-talking-engineers_f000150.jpg",
+      "latency_ms": 33678,
+      "num_detections": 0
+    },
+    {
+      "frame": "engineers-electrical-equipment_f000850.jpg",
+      "latency_ms": 33909,
+      "num_detections": 0
+    },
+    {
+      "frame": "engineers-electrical-equipment_f000170.jpg",
+      "latency_ms": 33760,
+      "num_detections": 0
+    }
+  ]
+}

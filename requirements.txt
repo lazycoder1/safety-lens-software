@@ -1,0 +1,14 @@
+# SafetyLens backend dependencies
+fastapi==0.135.1
+uvicorn==0.41.0
+pydantic==2.12.5
+requests==2.32.5
+psycopg2-binary==2.9.11
+numpy==2.4.2
+opencv-python==4.13.0.92
+pillow==12.1.1
+ultralytics==8.4.25
+# PyTorch — CUDA 12.4 wheels
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.10.0
+torchvision==0.25.0
