@@ -23,6 +23,8 @@ export interface Alert {
   source: string
   description: string
   snapshotUrl: string | null
+  cleanSnapshotUrl: string | null
+  bboxes: Array<{ label: string; bbox: [number, number, number, number]; confidence: number }>
   acknowledgedBy?: string | null
   acknowledgedAt?: string | null
   resolvedAt?: string | null

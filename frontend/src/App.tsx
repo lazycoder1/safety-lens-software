@@ -1,5 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { Layout } from "@/components/Layout"
+import { ProtectedRoute } from "@/components/ProtectedRoute"
+import { Login } from "@/pages/Login"
+import { ChangePassword } from "@/pages/ChangePassword"
 import { LiveView } from "@/pages/LiveView"
 import { AlertCenter } from "@/pages/AlertCenter"
 import { Dashboard } from "@/pages/Dashboard"
@@ -14,12 +17,21 @@ import { SystemSettings } from "@/pages/SystemSettings"
 import { ZoneManagement } from "@/pages/ZoneManagement"
 import { AISearch } from "@/pages/AISearch"
 import { LicenseStatus } from "@/pages/LicenseStatus"
+import { UserManagement } from "@/pages/UserManagement"
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<Layout />}>
+        <Route path="/login" element={<Login />} />
+        <Route path="/change-password" element={<ChangePassword />} />
+        <Route
+          element={
+            <ProtectedRoute>
+              <Layout />
+            </ProtectedRoute>
+          }
+        >
           <Route path="/" element={<Navigate to="/live" replace />} />
           <Route path="/live" element={<LiveView />} />
           <Route path="/alerts" element={<AlertCenter />} />
@@ -37,6 +49,14 @@ export default function App() {
           <Route path="/configure/integrations" element={<Placeholder title="Integrations" />} />
           <Route path="/system/settings" element={<SystemSettings />} />
           <Route path="/system/license" element={<LicenseStatus />} />
+          <Route
+            path="/system/users"
+            element={
+              <ProtectedRoute requiredRole={["admin"]}>
+                <UserManagement />
+              </ProtectedRoute>
+            }
+          />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -13,14 +13,15 @@ import logging
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 import requests
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+import jwt
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -28,7 +29,9 @@ from ultralytics import YOLO
 
 from config_manager import get_config, load_config, save_config, update_config
 from logging_config import setup_logging
+import db
 import alert_store
+import auth_store
 import telegram_notifier
 
 logger = logging.getLogger("safetylens")
@@ -101,6 +104,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Paths that don't require authentication
+PUBLIC_PATHS = {"/api/auth/login", "/api/auth/register", "/api/health", "/docs", "/openapi.json"}
+PUBLIC_PREFIXES = ("/api/stream/", "/api/snapshots/")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Skip CORS preflight requests
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
+        return await call_next(request)
+    # Skip auth for WebSocket upgrade (handled in the WS endpoint)
+    if request.headers.get("upgrade", "").lower() == "websocket":
+        return await call_next(request)
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    try:
+        payload = auth_store.decode_token(auth[7:])
+        request.state.user = payload
+    except jwt.ExpiredSignatureError:
+        return JSONResponse({"detail": "Token expired"}, status_code=401)
+    except Exception:
+        return JSONResponse({"detail": "Invalid token"}, status_code=401)
+    return await call_next(request)
+
+
 # ── State ────────────────────────────────────────────────────────────────────
 
 alert_subscribers: list[WebSocket] = []
@@ -108,6 +140,7 @@ model: Optional[YOLO] = None
 yoloe_model: Optional[YOLO] = None
 yoloe_lock = threading.Lock()
 camera_frames: dict[str, Optional[bytes]] = {}
+camera_clean_frames: dict[str, Optional[bytes]] = {}
 camera_detections: dict[str, list] = {}
 vlm_last_results: dict[str, dict] = {}
 vlm_lock = threading.Lock()
@@ -120,6 +153,7 @@ vlm_threads: dict[str, tuple[threading.Thread, threading.Event]] = {}
 def load_model():
     global model, yoloe_model
     dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+    device = get_config()["global"]["device"]
 
     logger.info("Loading COCO pretrained YOLO26n", extra={"path": str(YOLO_MODEL_PATH)})
     model = YOLO(str(YOLO_MODEL_PATH))
@@ -127,14 +161,38 @@ def load_model():
     logger.info("YOLO26n model warmed up (80 COCO classes, NMS-free)")
 
     if YOLOE_MODEL_PATH.exists():
-        logger.info("Loading YOLOe (YOLO-World) model", extra={"path": str(YOLOE_MODEL_PATH)})
-        yoloe_model = YOLO(str(YOLOE_MODEL_PATH))
-        # MobileCLIP text encoder doesn't support MPS float64, so set classes on CPU first
-        yoloe_model.to("cpu")
-        yoloe_model.set_classes(["person"])
-        yoloe_model.to("mps")
-        yoloe_model.predict(dummy, verbose=False)  # warmup
-        logger.info("YOLOe model warmed up")
+        try:
+            logger.info("Loading YOLOe (YOLO-World) model", extra={"path": str(YOLOE_MODEL_PATH)})
+            # Copy models to local filesystem to avoid WSL mount read issues
+            import shutil, tempfile
+            tmpdir = Path(tempfile.gettempdir())
+            local_yoloe = tmpdir / YOLOE_MODEL_PATH.name
+            if not local_yoloe.exists() or local_yoloe.stat().st_size != YOLOE_MODEL_PATH.stat().st_size:
+                shutil.copy2(str(YOLOE_MODEL_PATH), str(local_yoloe))
+                logger.info("Copied YOLOe model to local path", extra={"path": str(local_yoloe)})
+            mobileclip_src = YOLOE_MODEL_PATH.parent / "backend" / "mobileclip_blt.ts"
+            if not mobileclip_src.exists():
+                mobileclip_src = Path(__file__).parent / "mobileclip_blt.ts"
+            local_mobileclip = tmpdir / "mobileclip_blt.ts"
+            if mobileclip_src.exists() and (not local_mobileclip.exists() or local_mobileclip.stat().st_size != mobileclip_src.stat().st_size):
+                shutil.copy2(str(mobileclip_src), str(local_mobileclip))
+                logger.info("Copied MobileCLIP to local path", extra={"path": str(local_mobileclip)})
+            yoloe_model = YOLO(str(local_yoloe))
+            # MobileCLIP text encoder doesn't support MPS float64, so set classes on CPU first
+            yoloe_model.to("cpu")
+            # Temporarily switch CWD so set_classes finds MobileCLIP from local fs
+            orig_cwd = os.getcwd()
+            os.chdir(str(tmpdir))
+            try:
+                yoloe_model.set_classes(["person"])
+            finally:
+                os.chdir(orig_cwd)
+            yoloe_model.to(device)
+            yoloe_model.predict(dummy, verbose=False)  # warmup
+            logger.info("YOLOe model warmed up")
+        except Exception:
+            logger.exception("Failed to load YOLOe model, continuing without it")
+            yoloe_model = None
     else:
         logger.warning("YOLOe model not found", extra={"path": str(YOLOE_MODEL_PATH)})
 
@@ -148,11 +206,13 @@ def create_alert(
     confidence: float,
     description: str = "",
     source: str = "YOLO",
+    bboxes: list[dict] | None = None,
 ) -> dict:
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
     # Capture snapshot from current frame
     snapshot_jpeg = camera_frames.get(camera_id)
+    clean_snapshot_jpeg = camera_clean_frames.get(camera_id)
     alert = alert_store.create_alert(
         camera_id=camera_id,
         camera_name=cam.get("name", camera_id),
@@ -163,6 +223,8 @@ def create_alert(
         description=description,
         source=source,
         snapshot_jpeg=snapshot_jpeg,
+        bboxes=bboxes,
+        clean_snapshot_jpeg=clean_snapshot_jpeg,
     )
     # Send Telegram notification (fire-and-forget, never blocks)
     try:
@@ -272,8 +334,30 @@ def draw_yoloe_detections(frame: np.ndarray, results, camera_id: str, class_name
     return annotated, detections
 
 
+PPE_GROUPS = {
+    "helmet": ["hard hat", "safety helmet"],
+    "safety vest": ["safety vest", "high visibility vest", "reflective vest", "fluorescent vest"],
+    "gloves": ["gloves"],
+    "hairnet": ["hairnet"],
+    "face mask": ["face mask"],
+    "apron": ["apron"],
+}
+
+
+def _ppe_center_inside_person(person_bbox: list, ppe_dets: list) -> bool:
+    """Check if the center of any PPE detection falls inside the person bbox."""
+    px1, py1, px2, py2 = person_bbox
+    for p in ppe_dets:
+        cx = (p["bbox"][0] + p["bbox"][2]) / 2.0
+        cy = (p["bbox"][1] + p["bbox"][3]) / 2.0
+        if px1 <= cx <= px2 and py1 <= cy <= py2:
+            return True
+    return False
+
+
 def check_yoloe_violations(detections: list, camera_id: str) -> list:
-    """Return candidate violation dicts (NOT yet persisted to DB)."""
+    """Return candidate violation dicts (NOT yet persisted to DB).
+    Per-person check: only flags persons whose bbox does not contain any matching PPE item."""
     candidates = []
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
@@ -283,16 +367,33 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
     if not persons:
         return candidates
 
-    ppe_classes = [c for c in yoloe_classes if c != "person"]
-    for ppe in ppe_classes:
-        found = [d for d in detections if d["class"] == ppe]
-        if len(found) == 0:
+    # Build set of PPE groups that this camera monitors
+    checked_groups: set[str] = set()
+    for cls in yoloe_classes:
+        if cls == "person":
+            continue
+        for group_name, group_classes in PPE_GROUPS.items():
+            if cls in group_classes:
+                checked_groups.add(group_name)
+
+    # Per-person check: for each PPE group, find persons without that PPE
+    for group_name in checked_groups:
+        group_classes = PPE_GROUPS[group_name]
+        ppe_dets = [d for d in detections if d["class"] in group_classes]
+
+        violating_persons = [
+            p for p in persons
+            if not _ppe_center_inside_person(p["bbox"], ppe_dets)
+        ]
+
+        if violating_persons:
+            print(f"[PPE DEBUG] cam={camera_id} group={group_name} persons={len(persons)} ppe_dets={len(ppe_dets)} ppe_classes={[d['class'] for d in ppe_dets]} violating={len(violating_persons)} all_classes={list({d['class'] for d in detections})}", flush=True)
             candidates.append({
                 "camera_id": camera_id,
-                "rule": f"Missing {ppe}",
+                "rule": f"Missing {group_name}",
                 "severity": "P2",
-                "confidence": max(d["confidence"] for d in persons),
-                "description": f"{len(persons)} worker(s) detected without {ppe}",
+                "confidence": max(p["confidence"] for p in violating_persons),
+                "description": f"{len(violating_persons)} worker(s) detected without {group_name}",
                 "source": "YOLOe",
             })
 
@@ -374,6 +475,57 @@ def check_zone_intrusions(detections: list, camera_id: str, frame_w: int, frame_
             })
 
     return candidates
+
+
+def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h: int) -> list[dict]:
+    """Extract and normalize bboxes relevant to a specific violation rule.
+    Returns list of {label, bbox: [x1_norm, y1_norm, x2_norm, y2_norm], confidence}."""
+    results = []
+
+    def normalize(bbox):
+        return [round(bbox[0] / frame_w, 4), round(bbox[1] / frame_h, 4),
+                round(bbox[2] / frame_w, 4), round(bbox[3] / frame_h, 4)]
+
+    if rule == "Mobile Phone Usage":
+        for d in detections:
+            if d["class"] == "cell phone":
+                results.append({"label": "Mobile Phone", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+    elif rule == "Animal Intrusion":
+        for d in detections:
+            if d["class"] in ("dog", "cat"):
+                results.append({"label": d["class"].title(), "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+    elif rule.startswith("Missing "):
+        ppe_item = rule.replace("Missing ", "")
+        ppe_classes = PPE_GROUPS.get(ppe_item, [ppe_item])
+        # Collect center points of all detected PPE items of this type
+        ppe_centers = []
+        for d in detections:
+            if d["class"] in ppe_classes:
+                cx = (d["bbox"][0] + d["bbox"][2]) / 2.0
+                cy = (d["bbox"][1] + d["bbox"][3]) / 2.0
+                ppe_centers.append((cx, cy))
+        for d in detections:
+            if d["class"] == "person":
+                px1, py1, px2, py2 = d["bbox"]
+                # Person is wearing this PPE if the center of any PPE item falls inside their bbox
+                has_ppe = any(px1 <= cx <= px2 and py1 <= cy <= py2 for cx, cy in ppe_centers)
+                if not has_ppe:
+                    results.append({"label": f"Missing {ppe_item.title()}", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+    elif rule == "Zone Intrusion":
+        for d in detections:
+            if d["class"] == "person":
+                results.append({"label": "Zone Intruder", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+    elif rule == "Person Detected":
+        for d in detections:
+            if d["class"] == "person":
+                results.append({"label": "Person", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+    elif rule == "Vehicle Detected":
+        for d in detections:
+            if d["class"] in ("truck", "car", "motorcycle"):
+                results.append({"label": d["class"].title(), "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+
+    return results
+
 
 # Per-severity cooldown multipliers (base_cooldown * multiplier)
 SEVERITY_COOLDOWN_MULT = {"P1": 1, "P2": 1, "P3": 2, "P4": 5}
@@ -509,7 +661,7 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
         with vlm_lock:
             vlm_last_results[camera_id] = {
                 "text": result,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "elapsed": round(elapsed, 1),
             }
 
@@ -551,6 +703,9 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     inference_width = g["inference_width"]
     device = g["device"]
     last_alert_by_rule: dict[str, float] = {}  # rule_name -> last fire time
+    active_violations: set[str] = set()  # currently active violation rules (fire once until cleared)
+    violation_streak: dict[str, int] = {}  # rule -> consecutive frames with violation
+    VIOLATION_THRESHOLD = 10  # must persist for N consecutive detection frames before firing (~5 seconds at 6fps/3rd frame)
     frame_counter = 0
     last_annotated = None
 
@@ -558,8 +713,14 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     if demo_mode == "yoloe" and yoloe_model is not None:
         with yoloe_lock:
             yoloe_model.to("cpu")
-            yoloe_model.set_classes(yoloe_classes)
-            yoloe_model.to("mps")
+            import tempfile
+            orig_cwd = os.getcwd()
+            os.chdir(tempfile.gettempdir())
+            try:
+                yoloe_model.set_classes(yoloe_classes)
+            finally:
+                os.chdir(orig_cwd)
+            yoloe_model.to(device)
             logger.info("YOLOe classes set", extra={"camera_id": camera_id})
 
     while not stop_event.is_set():
@@ -594,8 +755,14 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                             if current_classes != yoloe_classes:
                                 yoloe_classes = current_classes
                                 yoloe_model.to("cpu")
-                                yoloe_model.set_classes(yoloe_classes)
-                                yoloe_model.to("mps")
+                                import tempfile
+                                _cwd = os.getcwd()
+                                os.chdir(tempfile.gettempdir())
+                                try:
+                                    yoloe_model.set_classes(yoloe_classes)
+                                finally:
+                                    os.chdir(_cwd)
+                                yoloe_model.to(device)
                                 logger.info("YOLOe classes updated", extra={"camera_id": camera_id})
                             results = yoloe_model.predict(frame, conf=yolo_conf, verbose=False, device=device, imgsz=inference_width)
                         annotated, detections = draw_yoloe_detections(frame, results, camera_id, yoloe_classes)
@@ -617,8 +784,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 annotated = frame
                 camera_detections[camera_id] = []
 
-            # Check for violations (per-rule cooldown — only persist after cooldown)
-            now = time.time()
+            # Check for violations (state-based with streak: must persist N frames before firing)
             dets = camera_detections.get(camera_id, [])
             if len(dets) > 0:
                 if demo_mode == "yoloe":
@@ -630,13 +796,26 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 h_frame, w_frame = frame.shape[:2]
                 candidates.extend(check_zone_intrusions(dets, camera_id, w_frame, h_frame))
 
+                # Determine which violations are present this frame
+                current_violation_rules = {c["rule"] for c in candidates}
+
+                # Reset streak for violations that cleared this frame
+                for rule_key in list(violation_streak.keys()):
+                    if rule_key not in current_violation_rules:
+                        violation_streak.pop(rule_key, None)
+                # Clear active violations that are no longer detected
+                active_violations -= (active_violations - current_violation_rules)
+
                 for candidate in candidates:
                     rule_key = candidate["rule"]
-                    last_fire = last_alert_by_rule.get(rule_key, 0)
-                    sev_mult = SEVERITY_COOLDOWN_MULT.get(candidate["severity"], 1)
-                    effective_cooldown = alert_cooldown * sev_mult
-                    if now - last_fire > effective_cooldown:
-                        last_alert_by_rule[rule_key] = now
+                    if rule_key in active_violations:
+                        continue  # already fired, skip until cleared
+                    # Increment streak
+                    violation_streak[rule_key] = violation_streak.get(rule_key, 0) + 1
+                    if violation_streak[rule_key] >= VIOLATION_THRESHOLD:
+                        active_violations.add(rule_key)
+                        violation_streak.pop(rule_key, None)
+                        violation_bboxes = extract_violation_bboxes(candidate["rule"], dets, w_frame, h_frame)
                         alert = create_alert(
                             camera_id=candidate["camera_id"],
                             rule=candidate["rule"],
@@ -644,6 +823,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                             confidence=candidate["confidence"],
                             description=candidate["description"],
                             source=candidate["source"],
+                            bboxes=violation_bboxes,
                         )
                         try:
                             loop = asyncio.new_event_loop()
@@ -652,6 +832,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                             loop.close()
                         except Exception:
                             pass
+            else:
+                # No detections — clear all state
+                active_violations.clear()
+                violation_streak.clear()
 
             # Downscale to 854px wide before JPEG encode
             h, w = annotated.shape[:2]
@@ -659,11 +843,18 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 scale = 854.0 / w
                 new_w = 854
                 new_h = int(h * scale)
+                clean_resized = cv2.resize(frame, (new_w, new_h))
                 annotated = cv2.resize(annotated, (new_w, new_h))
+            else:
+                clean_resized = frame
 
             # Encode to JPEG
             _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
             camera_frames[camera_id] = buffer.tobytes()
+
+            # Store clean (unannotated) frame for violation snapshots
+            _, clean_buffer = cv2.imencode(".jpg", clean_resized, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            camera_clean_frames[camera_id] = clean_buffer.tobytes()
 
             # Frame rate control
             elapsed = time.time() - start_time
@@ -817,13 +1008,147 @@ class CameraUpdate(BaseModel):
 async def startup():
     setup_logging()
     logger.info("SafetyLens backend starting")
+    db.init_pool()
     alert_store.init_db()
+    auth_store.init_auth_db()
     load_model()
     load_config()
     cfg = get_config()
     for cam_id in cfg["cameras"]:
         start_camera(cam_id)
 
+
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    currentPassword: str
+    newPassword: str
+
+class UpdateRoleRequest(BaseModel):
+    role: str
+
+
+@app.post("/api/auth/login")
+async def api_login(body: LoginRequest):
+    user = auth_store.authenticate(body.username, body.password)
+    if not user:
+        return JSONResponse({"detail": "Invalid credentials or account not active"}, status_code=401)
+    token = auth_store.create_token(user["id"], user["username"], user["role"])
+    return {"token": token, "user": user}
+
+
+@app.post("/api/auth/register")
+async def api_register(body: RegisterRequest):
+    if len(body.username) < 3:
+        return JSONResponse({"detail": "Username must be at least 3 characters"}, status_code=400)
+    if len(body.password) < 6:
+        return JSONResponse({"detail": "Password must be at least 6 characters"}, status_code=400)
+    try:
+        auth_store.create_user(body.username, body.password)
+    except Exception as e:
+        if "duplicate key" in str(e) or "unique" in str(e).lower():
+            return JSONResponse({"detail": "Username already taken"}, status_code=409)
+        raise
+    return {"message": "Account created. Pending admin approval."}
+
+
+@app.get("/api/auth/me")
+async def api_me(request: Request):
+    user = auth_store.get_user(request.state.user["sub"])
+    if not user:
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    return {"user": user}
+
+
+@app.post("/api/auth/change-password")
+async def api_change_password(request: Request, body: ChangePasswordRequest):
+    user_id = request.state.user["sub"]
+    success = auth_store.change_password(user_id, body.currentPassword, body.newPassword)
+    if not success:
+        return JSONResponse({"detail": "Current password is incorrect"}, status_code=400)
+    user = auth_store.get_user(user_id)
+    token = auth_store.create_token(user["id"], user["username"], user["role"])
+    return {"token": token, "user": user}
+
+
+# ── Admin user management ─────────────────────────────────────────────────────
+
+@app.get("/api/admin/users")
+async def api_get_users(request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
+    return auth_store.get_users()
+
+
+@app.put("/api/admin/users/{user_id}/approve")
+async def api_approve_user(user_id: str, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
+    result = auth_store.update_user_status(user_id, "active")
+    if not result:
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    return result
+
+
+@app.put("/api/admin/users/{user_id}/reject")
+async def api_reject_user(user_id: str, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
+    result = auth_store.update_user_status(user_id, "rejected")
+    if not result:
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    return result
+
+
+@app.put("/api/admin/users/{user_id}/role")
+async def api_update_role(user_id: str, body: UpdateRoleRequest, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
+    if body.role not in ("admin", "operator", "viewer"):
+        return JSONResponse({"detail": "Invalid role"}, status_code=400)
+    result = auth_store.update_user_role(user_id, body.role)
+    if not result:
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    return result
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def api_delete_user(user_id: str, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
+    if user_id == request.state.user["sub"]:
+        return JSONResponse({"detail": "Cannot delete yourself"}, status_code=400)
+    if not auth_store.delete_user(user_id):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    return {"message": "User deleted"}
+
+
+class ResetPasswordRequest(BaseModel):
+    newPassword: str | None = None
+
+
+@app.put("/api/admin/users/{user_id}/reset-password")
+async def api_reset_password(user_id: str, body: ResetPasswordRequest, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
+    import secrets
+    new_password = body.newPassword or secrets.token_urlsafe(8)
+    if len(new_password) < 4:
+        return JSONResponse({"detail": "Password must be at least 4 characters"}, status_code=400)
+    if not auth_store.reset_password(user_id, new_password):
+        return JSONResponse({"detail": "User not found"}, status_code=404)
+    return {"message": "Password reset", "newPassword": new_password}
+
+
+# ── Stream & data endpoints ──────────────────────────────────────────────────
 
 @app.get("/api/stream/{camera_id}")
 async def stream(camera_id: str):
@@ -882,8 +1207,11 @@ async def get_alert_time_series(hours: int = Query(24)):
 
 
 @app.put("/api/alerts/{alert_id}/acknowledge")
-async def api_acknowledge_alert(alert_id: str):
-    result = alert_store.acknowledge_alert(alert_id)
+async def api_acknowledge_alert(alert_id: str, request: Request):
+    if request.state.user["role"] == "viewer":
+        return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
+    by = request.state.user.get("username", "Admin")
+    result = alert_store.acknowledge_alert(alert_id, by=by)
     if not result:
         return JSONResponse({"error": "Alert not found"}, status_code=404)
     await broadcast_alert({"type": "updated", "data": result})
@@ -891,7 +1219,9 @@ async def api_acknowledge_alert(alert_id: str):
 
 
 @app.put("/api/alerts/{alert_id}/resolve")
-async def api_resolve_alert(alert_id: str):
+async def api_resolve_alert(alert_id: str, request: Request):
+    if request.state.user["role"] == "viewer":
+        return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
     result = alert_store.resolve_alert(alert_id)
     if not result:
         return JSONResponse({"error": "Alert not found"}, status_code=404)
@@ -900,7 +1230,9 @@ async def api_resolve_alert(alert_id: str):
 
 
 @app.put("/api/alerts/{alert_id}/snooze")
-async def api_snooze_alert(alert_id: str, minutes: int = Query(15)):
+async def api_snooze_alert(alert_id: str, request: Request, minutes: int = Query(15)):
+    if request.state.user["role"] == "viewer":
+        return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
     result = alert_store.snooze_alert(alert_id, minutes)
     if not result:
         return JSONResponse({"error": "Alert not found"}, status_code=404)
@@ -909,7 +1241,9 @@ async def api_snooze_alert(alert_id: str, minutes: int = Query(15)):
 
 
 @app.put("/api/alerts/{alert_id}/false-positive")
-async def api_false_positive_alert(alert_id: str):
+async def api_false_positive_alert(alert_id: str, request: Request):
+    if request.state.user["role"] == "viewer":
+        return JSONResponse({"detail": "Insufficient permissions"}, status_code=403)
     result = alert_store.mark_false_positive(alert_id)
     if not result:
         return JSONResponse({"error": "Alert not found"}, status_code=404)
@@ -933,6 +1267,15 @@ async def get_vlm_latest():
 
 @app.websocket("/ws/alerts")
 async def websocket_alerts(ws: WebSocket):
+    token = ws.query_params.get("token")
+    if not token:
+        await ws.close(code=4001, reason="Missing token")
+        return
+    try:
+        auth_store.decode_token(token)
+    except Exception:
+        await ws.close(code=4001, reason="Invalid or expired token")
+        return
     await ws.accept()
     alert_subscribers.append(ws)
     logger.info("WebSocket connected", extra={"subscribers": len(alert_subscribers)})
@@ -970,7 +1313,9 @@ async def api_get_config():
 
 
 @app.put("/api/config/global")
-async def api_update_global(body: GlobalConfigUpdate):
+async def api_update_global(body: GlobalConfigUpdate, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     updates = body.model_dump(exclude_none=True)
     cfg["global"].update(updates)
@@ -980,7 +1325,9 @@ async def api_update_global(body: GlobalConfigUpdate):
 
 
 @app.put("/api/config/vlm")
-async def api_update_vlm(body: VlmConfigUpdate):
+async def api_update_vlm(body: VlmConfigUpdate, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     updates = body.model_dump(exclude_none=True)
     cfg["vlm"].update(updates)
@@ -989,7 +1336,9 @@ async def api_update_vlm(body: VlmConfigUpdate):
 
 
 @app.put("/api/config/telegram")
-async def api_update_telegram(body: TelegramConfigUpdate):
+async def api_update_telegram(body: TelegramConfigUpdate, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     if "telegram" not in cfg:
         cfg["telegram"] = {"enabled": False, "bot_token": "", "chat_id": "", "severities": ["P1", "P2"]}
@@ -1000,7 +1349,9 @@ async def api_update_telegram(body: TelegramConfigUpdate):
 
 
 @app.post("/api/config/telegram/test")
-async def api_test_telegram():
+async def api_test_telegram(request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     tg = cfg.get("telegram", {})
     result = telegram_notifier.test_connection(tg.get("bot_token", ""), tg.get("chat_id", ""))
@@ -1010,7 +1361,9 @@ async def api_test_telegram():
 # ── Camera CRUD endpoints ────────────────────────────────────────────────────
 
 @app.post("/api/cameras")
-async def api_add_camera(body: CameraCreate):
+async def api_add_camera(body: CameraCreate, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     # Auto-generate next cam ID
     existing_ids = [int(k.replace("cam", "")) for k in cfg["cameras"] if k.startswith("cam") and k[3:].isdigit()]
@@ -1025,7 +1378,9 @@ async def api_add_camera(body: CameraCreate):
 
 
 @app.put("/api/cameras/{cam_id}")
-async def api_update_camera(cam_id: str, body: CameraUpdate):
+async def api_update_camera(cam_id: str, body: CameraUpdate, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     if cam_id not in cfg["cameras"]:
         return JSONResponse({"error": "Camera not found"}, status_code=404)
@@ -1038,7 +1393,9 @@ async def api_update_camera(cam_id: str, body: CameraUpdate):
 
 
 @app.delete("/api/cameras/{cam_id}")
-async def api_delete_camera(cam_id: str):
+async def api_delete_camera(cam_id: str, request: Request):
+    if request.state.user["role"] != "admin":
+        return JSONResponse({"detail": "Admin access required"}, status_code=403)
     cfg = get_config()
     if cam_id not in cfg["cameras"]:
         return JSONResponse({"error": "Camera not found"}, status_code=404)

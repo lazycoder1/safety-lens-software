@@ -15,6 +15,7 @@ import {
 import { severityConfig } from "@/data/mock"
 import type { Severity, AlertStatus } from "@/data/mock"
 import { useAlertStore } from "@/stores/alertStore"
+import { useAuthStore } from "@/stores/authStore"
 import type { Alert } from "@/stores/alertStore"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
@@ -68,6 +69,8 @@ function timeAgo(iso: string): string {
 
 export function AlertCenter() {
   const { alerts, loading, fetchAlerts, acknowledge, snooze, resolve, markFalsePositive, addOrUpdateAlert } = useAlertStore()
+  const userRole = useAuthStore((s) => s.user?.role)
+  const canAct = userRole === "admin" || userRole === "operator"
 
   const [sevFilter, setSevFilter] = useState<Set<Severity>>(new Set())
   const [statusFilter, setStatusFilter] = useState<Set<AlertStatus>>(new Set())
@@ -402,7 +405,7 @@ export function AlertCenter() {
                       </td>
                       <td className="px-4 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1">
-                          {alert.status === "active" && (
+                          {canAct && alert.status === "active" && (
                             <Button
                               variant="ghost"
                               size="sm"
@@ -412,7 +415,7 @@ export function AlertCenter() {
                               Ack
                             </Button>
                           )}
-                          {(alert.status === "active" || alert.status === "acknowledged") && (
+                          {canAct && (alert.status === "active" || alert.status === "acknowledged") && (
                             <Button
                               variant="ghost"
                               size="sm"
@@ -640,7 +643,7 @@ export function AlertCenter() {
           </div>
 
           {/* Action buttons */}
-          <div className="border-t px-5 py-4 space-y-2">
+          {canAct && <div className="border-t px-5 py-4 space-y-2">
             {liveSelectedAlert.status === "active" && (
               <div className="flex gap-2">
                 <Button
@@ -711,7 +714,7 @@ export function AlertCenter() {
                 </>
               )}
             </div>
-          </div>
+          </div>}
         </div>
       )}
     </div>

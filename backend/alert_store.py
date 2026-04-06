@@ -1,68 +1,27 @@
 """
 Alert persistence with PostgreSQL for SafetyLens backend.
-Thread-safe via psycopg2 ThreadedConnectionPool.
 """
 
+import json
 import logging
-import os
-import threading
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-import psycopg2
-from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
+
+from db import get_conn
 
 logger = logging.getLogger("safetylens.alerts")
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
-_pool: pool.ThreadedConnectionPool | None = None
-_pool_lock = threading.Lock()
-
-
-def _get_database_url() -> str:
-    """Resolve database URL: env var > config > default."""
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
-    try:
-        from config_manager import get_config
-        cfg = get_config()
-        url = cfg.get("database", {}).get("url")
-        if url:
-            return url
-    except Exception:
-        pass
-    return "postgresql://localhost:5432/safetylens"
-
-
-@contextmanager
-def _get_conn():
-    """Check out a connection from the pool, return it when done."""
-    conn = _pool.getconn()
-    try:
-        yield conn
-    finally:
-        _pool.putconn(conn)
-
 
 def init_db():
-    """Initialize connection pool and create tables."""
-    global _pool
+    """Create alert tables (pool must already be initialized via db.init_pool)."""
     SNAPSHOTS_DIR.mkdir(exist_ok=True)
 
-    db_url = _get_database_url()
-    logger.info("Connecting to PostgreSQL", extra={"source": db_url.split("@")[-1] if "@" in db_url else db_url})
-
-    with _pool_lock:
-        if _pool is not None:
-            return
-        _pool = pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=db_url)
-
-    with _get_conn() as conn:
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -85,6 +44,9 @@ def init_db():
                     false_positive BOOLEAN NOT NULL DEFAULT FALSE
                 )
             """)
+            # Migration: add columns for violation bboxes and clean snapshots
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS bboxes JSONB DEFAULT '[]'")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS clean_snapshot_path TEXT")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)")
@@ -93,13 +55,6 @@ def init_db():
     logger.info("Database initialized")
 
 
-def close_pool():
-    """Graceful shutdown of the connection pool."""
-    global _pool
-    with _pool_lock:
-        if _pool is not None:
-            _pool.closeall()
-            _pool = None
 
 
 def create_alert(
@@ -112,23 +67,32 @@ def create_alert(
     description: str = "",
     source: str = "YOLO",
     snapshot_jpeg: bytes | None = None,
+    bboxes: list[dict] | None = None,
+    clean_snapshot_jpeg: bytes | None = None,
 ) -> dict:
     alert_id = str(uuid4())[:8]
-    timestamp = datetime.now().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     snapshot_path = None
+    clean_snapshot_path = None
+    bboxes = bboxes or []
 
     if snapshot_jpeg:
         snapshot_filename = f"{alert_id}.jpg"
         (SNAPSHOTS_DIR / snapshot_filename).write_bytes(snapshot_jpeg)
         snapshot_path = snapshot_filename
 
-    with _get_conn() as conn:
+    if clean_snapshot_jpeg:
+        clean_filename = f"{alert_id}_clean.jpg"
+        (SNAPSHOTS_DIR / clean_filename).write_bytes(clean_snapshot_jpeg)
+        clean_snapshot_path = clean_filename
+
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO alerts
-                   (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path)
-                   VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (alert_id, severity, rule, camera_id, camera_name, zone, round(confidence, 2), timestamp, source, description, snapshot_path),
+                   (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path)
+                   VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (alert_id, severity, rule, camera_id, camera_name, zone, round(confidence, 2), timestamp, source, description, snapshot_path, json.dumps(bboxes), clean_snapshot_path),
             )
         conn.commit()
 
@@ -137,6 +101,7 @@ def create_alert(
     return _build_dict(
         alert_id, severity, "active", rule, camera_id, camera_name, zone,
         round(confidence, 2), timestamp, source, description, snapshot_path,
+        bboxes=bboxes, clean_snapshot_path=clean_snapshot_path,
     )
 
 
@@ -163,14 +128,14 @@ def get_alerts(
     query = f"SELECT * FROM alerts WHERE {' AND '.join(clauses)} ORDER BY timestamp DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
-    with _get_conn() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query, params)
             return [_row_to_dict(row) for row in cur.fetchall()]
 
 
 def get_alert(alert_id: str) -> dict | None:
-    with _get_conn() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM alerts WHERE id = %s", (alert_id,))
             row = cur.fetchone()
@@ -178,8 +143,8 @@ def get_alert(alert_id: str) -> dict | None:
 
 
 def acknowledge_alert(alert_id: str, by: str = "Admin") -> dict | None:
-    now = datetime.now().isoformat()
-    with _get_conn() as conn:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE alerts SET status = 'acknowledged', acknowledged_by = %s, acknowledged_at = %s WHERE id = %s AND status = 'active'",
@@ -190,8 +155,8 @@ def acknowledge_alert(alert_id: str, by: str = "Admin") -> dict | None:
 
 
 def resolve_alert(alert_id: str) -> dict | None:
-    now = datetime.now().isoformat()
-    with _get_conn() as conn:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE alerts SET status = 'resolved', resolved_at = %s WHERE id = %s AND status IN ('active', 'acknowledged')",
@@ -202,8 +167,8 @@ def resolve_alert(alert_id: str) -> dict | None:
 
 
 def snooze_alert(alert_id: str, minutes: int = 15) -> dict | None:
-    until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
-    with _get_conn() as conn:
+    until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE alerts SET status = 'snoozed', snoozed_until = %s WHERE id = %s AND status IN ('active', 'acknowledged')",
@@ -214,8 +179,8 @@ def snooze_alert(alert_id: str, minutes: int = 15) -> dict | None:
 
 
 def mark_false_positive(alert_id: str) -> dict | None:
-    now = datetime.now().isoformat()
-    with _get_conn() as conn:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE alerts SET status = 'resolved', resolved_at = %s, false_positive = TRUE WHERE id = %s",
@@ -226,7 +191,7 @@ def mark_false_positive(alert_id: str) -> dict | None:
 
 
 def get_stats() -> dict:
-    with _get_conn() as conn:
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT COUNT(*) as cnt FROM alerts")
             total = cur.fetchone()["cnt"]
@@ -274,8 +239,8 @@ def get_stats() -> dict:
 
 def get_time_series(hours: int = 24) -> list[dict]:
     """Return hourly alert counts by severity for the last N hours."""
-    since = (datetime.now() - timedelta(hours=hours)).isoformat()
-    with _get_conn() as conn:
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """SELECT
@@ -303,6 +268,13 @@ def get_time_series(hours: int = 24) -> list[dict]:
 
 def _row_to_dict(row: dict) -> dict:
     snapshot = row["snapshot_path"]
+    raw_bboxes = row.get("bboxes")
+    if isinstance(raw_bboxes, str):
+        bboxes = json.loads(raw_bboxes)
+    elif isinstance(raw_bboxes, list):
+        bboxes = raw_bboxes
+    else:
+        bboxes = []
     return _build_dict(
         row["id"], row["severity"], row["status"], row["rule"],
         row["camera_id"], row["camera_name"], row["zone"],
@@ -310,6 +282,7 @@ def _row_to_dict(row: dict) -> dict:
         row["description"], snapshot,
         row.get("acknowledged_by"), row.get("acknowledged_at"),
         row.get("resolved_at"), row.get("snoozed_until"), bool(row.get("false_positive", False)),
+        bboxes=bboxes, clean_snapshot_path=row.get("clean_snapshot_path"),
     )
 
 
@@ -318,6 +291,7 @@ def _build_dict(
     confidence, timestamp, source, description, snapshot_path=None,
     acknowledged_by=None, acknowledged_at=None, resolved_at=None,
     snoozed_until=None, false_positive=False,
+    bboxes=None, clean_snapshot_path=None,
 ) -> dict:
     return {
         "id": id,
@@ -332,6 +306,8 @@ def _build_dict(
         "source": source,
         "description": description,
         "snapshotUrl": f"/api/snapshots/{snapshot_path}" if snapshot_path else None,
+        "cleanSnapshotUrl": f"/api/snapshots/{clean_snapshot_path}" if clean_snapshot_path else None,
+        "bboxes": bboxes or [],
         "acknowledgedBy": acknowledged_by,
         "acknowledgedAt": acknowledged_at,
         "resolvedAt": resolved_at,

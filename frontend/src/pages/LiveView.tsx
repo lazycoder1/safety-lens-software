@@ -1,42 +1,19 @@
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
-  Grid2X2,
-  Grid3X3,
   Maximize2,
-  Minimize2,
-  PanelRightOpen,
-  PanelRightClose,
-  CheckCircle2,
   AlertTriangle,
-  Activity,
   Brain,
   Cpu,
   WifiOff,
-  Clock,
+  Grid2x2,
+  Grid3x3,
 } from "lucide-react"
-import { severityConfig } from "@/data/mock"
-import type { Severity } from "@/data/mock"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { toast } from "sonner"
-import { API_BASE, WS_BASE } from "@/lib/api"
-import { playP1AlertSound } from "@/lib/alertSound"
-
-interface LiveAlert {
-  id: string
-  severity: Severity
-  status: string
-  rule: string
-  cameraId: string
-  cameraName: string
-  zone: string
-  confidence: number
-  timestamp: string
-  source: string
-  description: string
-}
+import { API_BASE, getCameras as fetchCameras, getToken } from "@/lib/api"
+import { useAlertStore } from "@/stores/alertStore"
+import { useAlertConnection } from "@/components/AlertProvider"
 
 interface CameraInfo {
   id: string
@@ -49,55 +26,33 @@ interface CameraInfo {
   yoloe_classes?: string[]
 }
 
-const severityVariantMap: Record<Severity, "critical" | "high" | "warning" | "info"> = {
-  P1: "critical",
-  P2: "high",
-  P3: "warning",
-  P4: "info",
-}
-
-function timeAgo(isoString: string): string {
-  const seconds = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  return `${Math.floor(minutes / 60)}h ago`
-}
-
 export function LiveView() {
   const [searchParams, setSearchParams] = useSearchParams()
   const focusedCamId = searchParams.get("cam")
   const [gridCols, setGridCols] = useState(2)
-  const [panelOpen, setPanelOpen] = useState(true)
   const [cameras, setCameras] = useState<CameraInfo[]>([])
-  const [liveAlerts, setLiveAlerts] = useState<LiveAlert[]>([])
   const [vlmResult, setVlmResult] = useState<{ text: string; timestamp: string; elapsed: number } | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-  const [connected, setConnected] = useState(true)
-  const [clock, setClock] = useState(() => new Date().toLocaleTimeString("en-IN", { hour12: false }))
+  const connected = useAlertConnection((s) => s.connected)
+  const alerts = useAlertStore((s) => s.alerts)
 
   const focusCamera = (camId: string) => setSearchParams({ cam: camId })
   const unfocusCamera = () => setSearchParams({})
   const displayedCameras = focusedCamId ? cameras.filter((c) => c.id === focusedCamId) : cameras
 
-  // Clock tick
-  useEffect(() => {
-    const id = setInterval(() => setClock(new Date().toLocaleTimeString("en-IN", { hour12: false })), 1000)
-    return () => clearInterval(id)
-  }, [])
-
   // Fetch cameras on mount
   useEffect(() => {
-    fetch(`${API_BASE}/api/cameras`)
-      .then((r) => r.json())
-      .then((data) => { setCameras(data); setConnected(true) })
-      .catch(() => { setCameras([]); setConnected(false) })
+    fetchCameras()
+      .then((data) => setCameras(data))
+      .catch(() => setCameras([]))
   }, [])
 
   // Poll VLM result (backend returns { cam_id: { text, timestamp, elapsed } })
   useEffect(() => {
+    const token = getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers["Authorization"] = `Bearer ${token}`
     const interval = setInterval(() => {
-      fetch(`${API_BASE}/api/vlm/latest`)
+      fetch(`${API_BASE}/api/vlm/latest`, { headers })
         .then((r) => r.json())
         .then((data) => {
           // Find the most recent VLM result across all cameras
@@ -115,153 +70,12 @@ export function LiveView() {
     return () => clearInterval(interval)
   }, [])
 
-  // WebSocket for alerts
-  useEffect(() => {
-    let retryDelay = 2000
-    let cancelled = false
-
-    function connect() {
-      if (cancelled) return
-      const ws = new WebSocket(`${WS_BASE}/ws/alerts`)
-      wsRef.current = ws
-
-      ws.onopen = () => {
-        setConnected(true)
-        retryDelay = 2000
-      }
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data)
-        if (msg.type === "alert") {
-          const alert = msg.data as LiveAlert
-          setLiveAlerts((prev) => [alert, ...prev].slice(0, 100))
-
-          // Fire toast
-          const sev = severityConfig[alert.severity as Severity]
-          toast.custom(
-            () => (
-              <div className="flex gap-0 bg-white rounded-lg shadow-lg border overflow-hidden max-w-sm">
-                <div className="w-1.5 shrink-0" style={{ backgroundColor: sev?.color || "#666" }} />
-                <div className="px-3 py-2.5 flex-1">
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-xs font-semibold text-[var(--color-text-primary)]">{alert.rule}</span>
-                    <Badge variant={severityVariantMap[alert.severity as Severity] || "default"}>
-                      {alert.severity}
-                    </Badge>
-                  </div>
-                  <p className="text-[11px] text-[var(--color-text-secondary)]">{alert.cameraName}</p>
-                  {alert.description && (
-                    <p className="text-[10px] text-[var(--color-text-tertiary)] mt-1 line-clamp-2">{alert.description}</p>
-                  )}
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      {alert.source} | {Math.round(alert.confidence * 100)}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ),
-            { duration: alert.severity === "P1" ? 30000 : 8000 }
-          )
-
-          if (alert.severity === "P1") {
-            playP1AlertSound()
-          }
-        }
-      }
-
-      ws.onclose = () => {
-        setConnected(false)
-        if (!cancelled) {
-          setTimeout(connect, retryDelay)
-          retryDelay = Math.min(retryDelay * 1.5, 15000)
-        }
-      }
-
-      ws.onerror = () => {
-        ws.close()
-      }
-    }
-
-    connect()
-    return () => {
-      cancelled = true
-      wsRef.current?.close()
-    }
-  }, [])
-
-  const acknowledge = useCallback((alertId: string) => {
-    setLiveAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, status: "acknowledged" } : a)))
-    wsRef.current?.send(JSON.stringify({ type: "acknowledge", alertId }))
-    toast.success("Alert acknowledged")
-  }, [])
-
-  const activeAlerts = liveAlerts.filter((a) => a.status === "active")
+  const activeAlerts = alerts.filter((a) => a.status === "active")
 
   return (
     <div className="flex h-full overflow-hidden">
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Toolbar */}
-        <div className="flex items-center justify-between border-b px-4 py-2.5 bg-white">
-          <div className="flex items-center gap-1.5">
-            {focusedCamId ? (
-              <button
-                onClick={unfocusCamera}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] transition-colors cursor-pointer"
-              >
-                <Minimize2 size={16} />
-                Back to Grid
-              </button>
-            ) : (
-              <>
-                <span className="text-sm font-medium text-[var(--color-text-secondary)] mr-2">Grid</span>
-                {[
-                  { cols: 1, label: "1x1", icon: Maximize2 },
-                  { cols: 2, label: "2x2", icon: Grid2X2 },
-                  { cols: 3, label: "3x3", icon: Grid3X3 },
-                ].map((opt) => {
-                  const Icon = opt.icon
-                  return (
-                    <button
-                      key={opt.cols}
-                      onClick={() => setGridCols(opt.cols)}
-                      className={cn(
-                        "inline-flex items-center justify-center w-8 h-8 rounded-[var(--radius-md)] transition-colors cursor-pointer",
-                        gridCols === opt.cols
-                          ? "bg-[var(--color-text-primary)] text-white"
-                          : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
-                      )}
-                      title={opt.label}
-                    >
-                      <Icon size={16} />
-                    </button>
-                  )
-                })}
-              </>
-            )}
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 text-xs font-mono text-[var(--color-text-secondary)]">
-              <Clock size={14} />
-              <span>{clock}</span>
-            </div>
-            <div className="w-px h-4 bg-[var(--color-border-default)]" />
-            <div className="flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
-              <Activity size={14} className={connected ? "text-[var(--color-success)]" : "text-[var(--color-critical)]"} />
-              <span>{cameras.length} cameras</span>
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setPanelOpen(!panelOpen)}
-              title={panelOpen ? "Hide alerts panel" : "Show alerts panel"}
-            >
-              {panelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
-            </Button>
-          </div>
-        </div>
 
         {/* Connection lost banner */}
         {!connected && (
@@ -270,6 +84,38 @@ export function LiveView() {
             Connection to backend lost. Retrying...
           </div>
         )}
+
+        {/* Layout toolbar */}
+        <div className="flex items-center gap-2 px-4 py-1.5 bg-[var(--color-bg-secondary)]">
+          <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400 mr-1">Grid</span>
+          {focusedCamId && (
+            <button
+              onClick={unfocusCamera}
+              className="inline-flex items-center justify-center rounded-md p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-700 dark:hover:text-neutral-300 transition-colors cursor-pointer"
+              title="Exit fullscreen"
+            >
+              <Maximize2 size={15} />
+            </button>
+          )}
+          {[
+            { cols: 2, icon: Grid2x2 },
+            { cols: 3, icon: Grid3x3 },
+          ].map(({ cols, icon: Icon }) => (
+            <button
+              key={cols}
+              onClick={() => { setGridCols(cols); if (focusedCamId) unfocusCamera() }}
+              className={cn(
+                "inline-flex items-center justify-center rounded-md p-1.5 transition-colors cursor-pointer",
+                gridCols === cols && !focusedCamId
+                  ? "bg-neutral-200 dark:bg-neutral-700 text-neutral-900 dark:text-white"
+                  : "text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-700 dark:hover:text-neutral-300"
+              )}
+              title={`${cols}×${cols} grid`}
+            >
+              <Icon size={15} />
+            </button>
+          ))}
+        </div>
 
         {/* Camera grid */}
         <div className="flex-1 overflow-auto p-4 bg-[var(--color-bg-secondary)]">
@@ -403,98 +249,6 @@ export function LiveView() {
         )}
       </div>
 
-      {/* Right panel - Live Alerts */}
-      {panelOpen && (
-        <div className="w-80 border-l bg-white flex flex-col shrink-0">
-          <div className="flex items-center justify-between px-4 py-3 border-b">
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Live Alerts</h2>
-              {activeAlerts.length > 0 && (
-                <span className="inline-flex items-center justify-center min-w-[20px] h-5 rounded-full bg-red-600 text-white text-[10px] font-bold px-1.5">
-                  {activeAlerts.length}
-                </span>
-              )}
-            </div>
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              {liveAlerts.length} total
-            </span>
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {activeAlerts.length === 0 && liveAlerts.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12 text-[var(--color-text-secondary)]">
-                <CheckCircle2 size={32} className="mb-2 opacity-40" />
-                <span className="text-sm">No alerts yet</span>
-                <span className="text-xs text-[var(--color-text-tertiary)] mt-1">Waiting for detections...</span>
-              </div>
-            )}
-
-            {liveAlerts.map((alert) => {
-              const sev = severityConfig[alert.severity as Severity]
-              const isActive = alert.status === "active"
-              return (
-                <div
-                  key={alert.id}
-                  className={cn(
-                    "border-b last:border-b-0 transition-colors",
-                    isActive ? "bg-white hover:bg-[var(--color-bg-secondary)]" : "bg-[var(--color-bg-secondary)] opacity-60"
-                  )}
-                >
-                  <div className="flex gap-0">
-                    <div className="w-1 shrink-0" style={{ backgroundColor: sev?.color || "#999" }} />
-                    <div className="flex-1 px-3 py-2.5">
-                      <div className="flex items-start justify-between gap-2 mb-1">
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold text-[var(--color-text-primary)] truncate">
-                            {alert.rule}
-                          </p>
-                          <p className="text-[11px] text-[var(--color-text-secondary)] truncate">
-                            {alert.cameraName}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
-                          {alert.source.includes("VLM") && (
-                            <Brain size={12} className="text-purple-500" />
-                          )}
-                          <Badge variant={severityVariantMap[alert.severity as Severity] || "default"}>
-                            {alert.severity}
-                          </Badge>
-                        </div>
-                      </div>
-
-                      {alert.description && (
-                        <p className="text-[10px] text-[var(--color-text-tertiary)] line-clamp-2 mb-1.5">
-                          {alert.description}
-                        </p>
-                      )}
-
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 text-[10px] text-[var(--color-text-tertiary)]">
-                          <span>{timeAgo(alert.timestamp)}</span>
-                          <span>|</span>
-                          <span>{alert.source}</span>
-                          <span>|</span>
-                          <span>{Math.round(alert.confidence * 100)}%</span>
-                        </div>
-                        {isActive && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-[10px] h-5 px-1.5"
-                            onClick={() => acknowledge(alert.id)}
-                          >
-                            Ack
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

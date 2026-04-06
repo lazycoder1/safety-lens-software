@@ -1,6 +1,27 @@
-import { useState } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { NavLink } from "react-router-dom"
+import { create } from "zustand"
 import { cn } from "@/lib/utils"
+import { useAuthStore } from "@/stores/authStore"
+import { getUsers } from "@/lib/api"
+
+interface PendingCountStore {
+  count: number
+  refresh: () => Promise<void>
+}
+
+export const usePendingCount = create<PendingCountStore>((set) => ({
+  count: 0,
+  refresh: async () => {
+    try {
+      const data = await getUsers()
+      const users = data.users ?? data
+      set({ count: users.filter((u: any) => u.status === "pending").length })
+    } catch {
+      // ignore
+    }
+  },
+}))
 import {
   Monitor,
   AlertTriangle,
@@ -21,42 +42,66 @@ import {
   Key,
 } from "lucide-react"
 
-const navGroups = [
-  {
-    label: "Monitoring",
-    items: [
-      { to: "/live", icon: Monitor, label: "Live View" },
-      { to: "/alerts", icon: AlertTriangle, label: "Alert Center" },
-    ],
-  },
-  {
-    label: "Analytics",
-    items: [
-      { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-      { to: "/search", icon: Search, label: "AI Search" },
-    ],
-  },
-  {
-    label: "Configuration",
-    items: [
-      { to: "/configure/cameras", icon: Camera, label: "Cameras" },
-      { to: "/configure/rules", icon: Scan, label: "Rules Engine" },
-      { to: "/configure/alerts", icon: Bell, label: "Alert Routing" },
-      { to: "/configure/plates", icon: Car, label: "Vehicle Plates" },
-      { to: "/configure/faces", icon: Users, label: "Faces" },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      { to: "/system/settings", icon: Settings, label: "Settings" },
-      { to: "/system/license", icon: Key, label: "License" },
-    ],
-  },
-]
-
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
+  const user = useAuthStore((s) => s.user)
+  const pendingCount = usePendingCount((s) => s.count)
+  const refreshPending = usePendingCount((s) => s.refresh)
+
+  useEffect(() => {
+    if (user?.role !== "admin") return
+    refreshPending()
+    const interval = setInterval(refreshPending, 30000)
+    return () => clearInterval(interval)
+  }, [user?.role, refreshPending])
+
+  const navGroups = useMemo(() => {
+    const role = user?.role
+    const groups = [
+      {
+        label: "Monitoring",
+        items: [
+          { to: "/live", icon: Monitor, label: "Live View" },
+          { to: "/alerts", icon: AlertTriangle, label: "Alert Center" },
+        ],
+      },
+      {
+        label: "Analytics",
+        items: [
+          { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+          { to: "/search", icon: Search, label: "AI Search" },
+        ],
+      },
+    ]
+
+    // Configuration — admin only
+    if (role === "admin") {
+      groups.push({
+        label: "Configuration",
+        items: [
+          { to: "/configure/cameras", icon: Camera, label: "Cameras" },
+          { to: "/configure/rules", icon: Scan, label: "Rules Engine" },
+          { to: "/configure/alerts", icon: Bell, label: "Alert Routing" },
+          { to: "/configure/plates", icon: Car, label: "Vehicle Plates" },
+          { to: "/configure/faces", icon: Users, label: "Faces" },
+        ],
+      })
+    }
+
+    // System — admin and operator (User Management admin only)
+    if (role === "admin" || role === "operator") {
+      const systemItems = [
+        { to: "/system/settings", icon: Settings, label: "Settings" },
+        { to: "/system/license", icon: Key, label: "License" },
+      ]
+      if (role === "admin") {
+        systemItems.push({ to: "/system/users", icon: Shield, label: "User Management", badge: pendingCount })
+      }
+      groups.push({ label: "System", items: systemItems })
+    }
+
+    return groups
+  }, [user?.role, pendingCount])
 
   return (
     <aside
@@ -96,7 +141,12 @@ export function Sidebar() {
                 title={collapsed ? item.label : undefined}
               >
                 <item.icon className="w-4 h-4 shrink-0" />
-                {!collapsed && <span>{item.label}</span>}
+                {!collapsed && <span className="flex-1">{item.label}</span>}
+                {!collapsed && "badge" in item && (item as any).badge > 0 && (
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-amber-500 text-white text-[10px] font-bold px-1">
+                    {(item as any).badge}
+                  </span>
+                )}
               </NavLink>
             ))}
           </div>

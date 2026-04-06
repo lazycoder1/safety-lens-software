@@ -5,13 +5,116 @@ export const WS_BASE =
   import.meta.env.VITE_WS_URL ||
   `ws://${window.location.hostname}:8000`
 
+const TOKEN_KEY = "safetylens_token"
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setToken(token: string) {
+  localStorage.setItem(TOKEN_KEY, token)
+}
+
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY)
+}
+
 async function request(path: string, options?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, options)
+  const token = getToken()
+  const headers: Record<string, string> = {
+    ...(options?.headers as Record<string, string>),
+  }
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+  }
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
+  if (res.status === 401 && !path.startsWith("/api/auth/")) {
+    clearToken()
+    window.location.href = "/login"
+    throw new Error("Session expired")
+  }
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
-    throw new Error(`API ${res.status}: ${text}`)
+    const text = await res.text().catch(() => "")
+    let message: string
+    try {
+      const json = JSON.parse(text)
+      message = json.detail || json.message || json.error || ""
+    } catch {
+      message = ""
+    }
+    if (!message) {
+      if (res.status === 401) message = "Invalid credentials or account not active"
+      else if (res.status === 403) message = "You don't have permission to do that"
+      else if (res.status === 404) message = "Resource not found"
+      else if (res.status === 409) message = "This action conflicts with existing data"
+      else if (res.status >= 500) message = "Server error — please try again later"
+      else message = "Something went wrong"
+    }
+    throw new Error(message)
   }
   return res.json()
+}
+
+// Auth
+export async function apiLogin(username: string, password: string) {
+  return request("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  })
+}
+
+export async function apiRegister(username: string, password: string) {
+  return request("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  })
+}
+
+export async function apiChangePassword(currentPassword: string, newPassword: string) {
+  return request("/api/auth/change-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  })
+}
+
+export async function getMe() {
+  return request("/api/auth/me")
+}
+
+// Admin user management
+export async function getUsers() {
+  return request("/api/admin/users")
+}
+
+export async function approveUser(id: string) {
+  return request(`/api/admin/users/${id}/approve`, { method: "PUT" })
+}
+
+export async function rejectUser(id: string) {
+  return request(`/api/admin/users/${id}/reject`, { method: "PUT" })
+}
+
+export async function updateUserRole(id: string, role: string) {
+  return request(`/api/admin/users/${id}/role`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  })
+}
+
+export async function deleteUser(id: string) {
+  return request(`/api/admin/users/${id}`, { method: "DELETE" })
+}
+
+export async function resetUserPassword(id: string, newPassword?: string) {
+  return request(`/api/admin/users/${id}/reset-password`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ newPassword: newPassword || null }),
+  })
 }
 
 // Config
