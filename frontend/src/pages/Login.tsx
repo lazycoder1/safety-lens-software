@@ -2,6 +2,8 @@ import { useState, FormEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { Eye, EyeOff, ShieldCheck, Loader2 } from "lucide-react"
 import { useAuthStore } from "@/stores/authStore"
+import { PasswordInput } from "@/components/ui/PasswordInput"
+import { isPasswordValid } from "@/lib/passwordValidation"
 
 export function Login() {
   const navigate = useNavigate()
@@ -46,8 +48,8 @@ export function Login() {
         setError("Passwords do not match")
         return
       }
-      if (password.length < 6) {
-        setError("Password must be at least 6 characters")
+      if (!isPasswordValid(password)) {
+        setError("Password does not meet strength requirements")
         return
       }
     }
@@ -113,27 +115,37 @@ export function Login() {
             </div>
 
             {/* Password */}
-            <div>
-              <label className="block text-sm font-medium text-neutral-700 mb-1">Password</label>
-              <div className="relative">
-                <input
-                  type={showPassword ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400"
-                  placeholder="Enter password"
-                  autoComplete={mode === "login" ? "current-password" : "new-password"}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
-                  tabIndex={-1}
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
+            {mode === "register" ? (
+              <PasswordInput
+                value={password}
+                onChange={setPassword}
+                label="Password"
+                placeholder="Enter password"
+                autoComplete="new-password"
+              />
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1">Password</label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full rounded-lg border border-neutral-300 px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400"
+                    placeholder="Enter password"
+                    autoComplete="current-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
+                    tabIndex={-1}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Confirm Password (register only) */}
             {mode === "register" && (

@@ -2,6 +2,8 @@ import { useState, FormEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { ShieldCheck, Loader2, Eye, EyeOff, X } from "lucide-react"
 import { useAuthStore } from "@/stores/authStore"
+import { PasswordInput } from "@/components/ui/PasswordInput"
+import { isPasswordValid } from "@/lib/passwordValidation"
 
 export function ChangePassword() {
   const navigate = useNavigate()
@@ -13,7 +15,6 @@ export function ChangePassword() {
   const [confirmPassword, setConfirmPassword] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [showNew, setShowNew] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
 
   function handleClose() {
@@ -29,8 +30,8 @@ export function ChangePassword() {
       return
     }
 
-    if (newPassword.length < 6) {
-      setError("New password must be at least 6 characters")
+    if (!isPasswordValid(newPassword)) {
+      setError("Password does not meet strength requirements")
       return
     }
 
@@ -92,26 +93,13 @@ export function ChangePassword() {
             </div>
 
             {/* New Password */}
-            <div>
-              <label className="block text-sm font-medium text-neutral-700 mb-1">New Password</label>
-              <div className="relative">
-                <input
-                  type={showNew ? "text" : "password"}
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400"
-                  placeholder="At least 6 characters"
-                  autoComplete="new-password"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowNew(!showNew)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 cursor-pointer"
-                >
-                  {showNew ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-            </div>
+            <PasswordInput
+              value={newPassword}
+              onChange={setNewPassword}
+              label="New Password"
+              placeholder="Enter new password"
+              autoComplete="new-password"
+            />
 
             {/* Confirm New Password */}
             <div>

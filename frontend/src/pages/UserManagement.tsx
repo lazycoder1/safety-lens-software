@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react"
-import { CheckCircle2, XCircle, Trash2, KeyRound, Copy, X, Loader2 } from "lucide-react"
+import { CheckCircle2, XCircle, Trash2, KeyRound, Copy, X, Loader2, RefreshCw } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -7,6 +7,8 @@ import { getUsers, approveUser, rejectUser, updateUserRole, deleteUser, resetUse
 import { useAuthStore } from "@/stores/authStore"
 import { usePendingCount } from "@/components/Sidebar"
 import { toast } from "sonner"
+import { PasswordInput } from "@/components/ui/PasswordInput"
+import { isPasswordValid, generateStrongPassword } from "@/lib/passwordValidation"
 
 interface ManagedUser {
   id: string
@@ -121,6 +123,10 @@ export function UserManagement() {
 
   async function handleResetSubmit() {
     if (!resetModal) return
+    if (resetPasswordInput && !isPasswordValid(resetPasswordInput)) {
+      setResetError("Password does not meet strength requirements")
+      return
+    }
     setResetSubmitting(true)
     setResetError(null)
     try {
@@ -334,22 +340,29 @@ export function UserManagement() {
 
               {!resetResult ? (
                 <>
-                  <div>
-                    <label className="block text-sm font-medium text-[var(--color-text-primary)] mb-1">New Password</label>
-                    <input
-                      type="text"
-                      value={resetPasswordInput}
-                      onChange={(e) => setResetPasswordInput(e.target.value)}
-                      placeholder="Leave empty to auto-generate"
-                      className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-400"
-                    />
-                  </div>
+                  <PasswordInput
+                    value={resetPasswordInput}
+                    onChange={setResetPasswordInput}
+                    label="New Password"
+                    placeholder="Type a password or generate one"
+                    showStrengthMeter={resetPasswordInput.length > 0}
+                    showRequirements={resetPasswordInput.length > 0}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full"
+                    onClick={() => setResetPasswordInput(generateStrongPassword())}
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                    Generate Strong Password
+                  </Button>
                   {resetError && <p className="text-sm text-red-600">{resetError}</p>}
                   <Button
                     variant="primary"
                     className="w-full"
                     onClick={handleResetSubmit}
-                    disabled={resetSubmitting}
+                    disabled={resetSubmitting || (resetPasswordInput.length > 0 && !isPasswordValid(resetPasswordInput))}
                   >
                     {resetSubmitting && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
                     Reset Password

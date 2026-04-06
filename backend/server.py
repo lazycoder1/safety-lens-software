@@ -1049,8 +1049,9 @@ async def api_login(body: LoginRequest):
 async def api_register(body: RegisterRequest):
     if len(body.username) < 3:
         return JSONResponse({"detail": "Username must be at least 3 characters"}, status_code=400)
-    if len(body.password) < 6:
-        return JSONResponse({"detail": "Password must be at least 6 characters"}, status_code=400)
+    valid, err = auth_store.validate_password(body.password)
+    if not valid:
+        return JSONResponse({"detail": err}, status_code=400)
     try:
         auth_store.create_user(body.username, body.password)
     except Exception as e:
@@ -1070,6 +1071,9 @@ async def api_me(request: Request):
 
 @app.post("/api/auth/change-password")
 async def api_change_password(request: Request, body: ChangePasswordRequest):
+    valid, err = auth_store.validate_password(body.newPassword)
+    if not valid:
+        return JSONResponse({"detail": err}, status_code=400)
     user_id = request.state.user["sub"]
     success = auth_store.change_password(user_id, body.currentPassword, body.newPassword)
     if not success:
@@ -1139,10 +1143,13 @@ class ResetPasswordRequest(BaseModel):
 async def api_reset_password(user_id: str, body: ResetPasswordRequest, request: Request):
     if request.state.user["role"] != "admin":
         return JSONResponse({"detail": "Admin access required"}, status_code=403)
-    import secrets
-    new_password = body.newPassword or secrets.token_urlsafe(8)
-    if len(new_password) < 4:
-        return JSONResponse({"detail": "Password must be at least 4 characters"}, status_code=400)
+    if body.newPassword:
+        valid, err = auth_store.validate_password(body.newPassword)
+        if not valid:
+            return JSONResponse({"detail": err}, status_code=400)
+        new_password = body.newPassword
+    else:
+        new_password = auth_store.generate_strong_password()
     if not auth_store.reset_password(user_id, new_password):
         return JSONResponse({"detail": "User not found"}, status_code=404)
     return {"message": "Password reset", "newPassword": new_password}

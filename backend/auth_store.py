@@ -51,6 +51,42 @@ def _verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
+_SPECIAL_CHARS = r"!@#$%^&*()\-_+=\[\]{}|;:,.<>?"
+
+
+def validate_password(password: str) -> tuple[bool, str | None]:
+    """Validate password strength. Returns (is_valid, error_message)."""
+    import re
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters"
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least one uppercase letter"
+    if not re.search(r"[a-z]", password):
+        return False, "Password must contain at least one lowercase letter"
+    if not re.search(r"[0-9]", password):
+        return False, "Password must contain at least one digit"
+    if not re.search(rf"[{_SPECIAL_CHARS}]", password):
+        return False, "Password must contain at least one special character"
+    return True, None
+
+
+def generate_strong_password(length: int = 16) -> str:
+    """Generate a password that meets all strength requirements."""
+    import random
+    import string
+    specials = "!@#$%^&*()-_+=[]{}|;:,.<>?"
+    chars = string.ascii_letters + string.digits + specials
+    password = [
+        random.choice(string.ascii_uppercase),
+        random.choice(string.ascii_lowercase),
+        random.choice(string.digits),
+        random.choice(specials),
+    ]
+    password += [random.choice(chars) for _ in range(length - 4)]
+    random.shuffle(password)
+    return "".join(password)
+
+
 # ── Database ────────────────────────────────────────────────────────────────
 
 def init_auth_db():
