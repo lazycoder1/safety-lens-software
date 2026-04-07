@@ -1,15 +1,6 @@
 import { create } from "zustand"
 import { apiLogin, apiRegister, apiChangePassword, getMe, setToken, clearToken, getToken } from "@/lib/api"
-
-export interface User {
-  id: string
-  username: string
-  role: "admin" | "operator" | "viewer"
-  status: string
-  mustChangePassword: boolean
-  createdAt: string
-  lastLogin: string | null
-}
+import type { User } from "@/types"
 
 interface AuthStore {
   token: string | null

@@ -32,9 +32,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY yolo26n.pt yoloe-11s-seg.pt ./
 
 # Copy backend code
-COPY backend/server.py backend/alert_store.py backend/config_manager.py \
-     backend/telegram_notifier.py backend/logging_config.py \
-     backend/migrate_sqlite_to_pg.py ./backend/
+COPY backend/ ./backend/
 
 # Copy built frontend into backend for serving
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist

@@ -1,17 +1,5 @@
-export type Severity = "P1" | "P2" | "P3" | "P4"
-export type AlertStatus = "active" | "acknowledged" | "resolved" | "snoozed"
-export type CameraStatus = "online" | "offline" | "error"
-
-export interface Camera {
-  id: string
-  name: string
-  zone: string
-  status: CameraStatus
-  rtspUrl: string
-  rulesCount: number
-  thumbnail: string
-  assignedRuleIds: string[]
-}
+import type { Severity, AlertStatus, CameraStatus, DetectionRule } from "@/types"
+export type { Severity, AlertStatus, CameraStatus }
 
 export interface PipelineStage {
   id: string
@@ -24,7 +12,18 @@ export interface PipelineStage {
   rules: string[]
 }
 
-export interface Alert {
+interface MockCamera {
+  id: string
+  name: string
+  zone: string
+  status: CameraStatus
+  rtspUrl: string
+  rulesCount: number
+  thumbnail: string
+  assignedRuleIds: string[]
+}
+
+interface MockAlert {
   id: string
   severity: Severity
   status: AlertStatus
@@ -37,19 +36,6 @@ export interface Alert {
   acknowledgedBy?: string
   acknowledgedAt?: Date
   thumbnail: string
-}
-
-export interface DetectionRule {
-  id: string
-  name: string
-  model: "YOLOE" | "YOLO26" | "YOLO-pose" | "VLM"
-  promptType: "text" | "visual" | "internal"
-  prompts: string[]
-  confidenceThreshold: number
-  severity: Severity
-  enabled: boolean
-  camerasCount: number
-  category: string
 }
 
 export interface Zone {
@@ -79,7 +65,7 @@ export const zones: Zone[] = [
   { id: "z6", name: "Main Entrance", riskLevel: "general", camerasCount: 2, activeRules: 3, color: "#059669" },
 ]
 
-export const cameras: Camera[] = [
+export const cameras: MockCamera[] = [
   { id: "c1", name: "Welding Bay - Entry", zone: "Welding Bay", status: "online", rtspUrl: "rtsp://admin:pass@192.168.1.101:554/stream1", rulesCount: 5, thumbnail: PLACEHOLDER_IMG, assignedRuleIds: ["r1", "r2", "r3", "r6", "r10"] },
   { id: "c2", name: "Welding Bay - Overview", zone: "Welding Bay", status: "online", rtspUrl: "rtsp://admin:pass@192.168.1.102:554/stream1", rulesCount: 6, thumbnail: PLACEHOLDER_IMG, assignedRuleIds: ["r1", "r2", "r3", "r5", "r6", "r10"] },
   { id: "c3", name: "Welding Bay - Workstation A", zone: "Welding Bay", status: "online", rtspUrl: "rtsp://admin:pass@192.168.1.103:554/stream1", rulesCount: 4, thumbnail: PLACEHOLDER_IMG, assignedRuleIds: ["r1", "r2", "r6", "r10"] },
@@ -109,7 +95,7 @@ function randomDate(hoursBack: number): Date {
   return new Date(Date.now() - Math.random() * hoursBack * 60 * 60 * 1000)
 }
 
-export const alerts: Alert[] = Array.from({ length: 50 }, (_, i) => {
+export const alerts: MockAlert[] = Array.from({ length: 50 }, (_, i) => {
   const cam = cameras[Math.floor(Math.random() * cameras.length)]
   const rule = rules[Math.floor(Math.random() * rules.length)]
   const severity = rule === "Person Fall" || rule === "Fire/Smoke" ? "P1" : rule === "Animal Detected" || rule === "Gangway Blocked" ? "P3" : severities[Math.floor(Math.random() * 2)]
@@ -168,13 +154,6 @@ export const violationTrend = Array.from({ length: 24 }, (_, i) => ({
   "Zone Intrusion": Math.floor(Math.random() * 3),
   "Other": Math.floor(Math.random() * 4),
 }))
-
-export const severityConfig: Record<Severity, { label: string; color: string; bg: string; textColor: string }> = {
-  P1: { label: "Critical", color: "#dc2626", bg: "#fef2f2", textColor: "#991b1b" },
-  P2: { label: "High", color: "#f97316", bg: "#fff7ed", textColor: "#9a3412" },
-  P3: { label: "Medium", color: "#f59e0b", bg: "#fffbeb", textColor: "#92400e" },
-  P4: { label: "Low", color: "#2563eb", bg: "#eff6ff", textColor: "#1e40af" },
-}
 
 export const pipelineStages: PipelineStage[] = [
   {

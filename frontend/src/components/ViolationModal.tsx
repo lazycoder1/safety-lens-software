@@ -1,18 +1,10 @@
 import { useEffect, useCallback } from "react"
 import { create } from "zustand"
 import { X, ShieldAlert } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
-import { severityConfig } from "@/data/mock"
-import type { Alert } from "@/stores/alertStore"
-import type { Severity } from "@/data/mock"
+import { severityConfig } from "@/lib/constants"
+import { SeverityBadge } from "@/components/ui/SeverityBadge"
+import type { Alert, Severity } from "@/types"
 import { API_BASE } from "@/lib/api"
-
-const severityVariantMap: Record<Severity, "critical" | "high" | "warning" | "info"> = {
-  P1: "critical",
-  P2: "high",
-  P3: "warning",
-  P4: "info",
-}
 
 interface ViolationModalStore {
   alert: Alert | null
@@ -69,9 +61,7 @@ export function ViolationModal() {
           <div className="flex items-center gap-3">
             <ShieldAlert size={20} style={{ color: sev?.color || "#666" }} />
             <span className="font-semibold text-[var(--color-text-primary)]">{alert.rule}</span>
-            <Badge variant={severityVariantMap[alert.severity as Severity] || "default"}>
-              {alert.severity} &middot; {sev?.label}
-            </Badge>
+            <SeverityBadge severity={alert.severity as Severity} />
           </div>
           <button
             onClick={close}

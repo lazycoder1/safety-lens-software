@@ -24,12 +24,13 @@ import config_manager
 config_manager.CONFIG_PATH = _test_config
 
 # Mock YOLO so server doesn't try to load real models
-with mock.patch("server.load_model"):
+with mock.patch("state.load_model"):
     import server
+    import state
 
 # Use TestClient (no real model loading)
-server.model = None
-server.yoloe_model = None
+state.model = None
+state.yoloe_model = None
 
 
 @pytest.fixture(autouse=True)
@@ -55,11 +56,11 @@ def fresh_state():
     config_manager.load_config()
 
     # Clear server state
-    server.camera_threads.clear()
-    server.vlm_threads.clear()
-    server.camera_frames.clear()
-    server.camera_detections.clear()
-    server.alert_subscribers.clear()
+    state.camera_threads.clear()
+    state.vlm_threads.clear()
+    state.camera_frames.clear()
+    state.camera_detections.clear()
+    state.alert_subscribers.clear()
 
     yield
 
@@ -305,7 +306,7 @@ def test_get_config():
 
 # ── PUT /api/config/global ───────────────────────────────────────────────────
 
-@mock.patch("server.restart_all_cameras")
+@mock.patch("routers.config.restart_all_cameras")
 def test_update_global_config(mock_restart):
     resp = client.put("/api/config/global", json={"target_fps": 10})
     assert resp.status_code == 200
@@ -313,7 +314,7 @@ def test_update_global_config(mock_restart):
     mock_restart.assert_called_once()
 
 
-@mock.patch("server.restart_all_cameras")
+@mock.patch("routers.config.restart_all_cameras")
 def test_update_global_partial(mock_restart):
     resp = client.put("/api/config/global", json={"yolo_conf": 0.5})
     assert resp.status_code == 200
@@ -343,7 +344,7 @@ def test_telegram_config_endpoint():
     assert data["chat_id"] == "456"
 
 
-@mock.patch("server.telegram_notifier.test_connection")
+@mock.patch("telegram_notifier.test_connection")
 def test_telegram_test_endpoint(mock_test):
     mock_test.return_value = {"ok": True}
     resp = client.post("/api/config/telegram/test")
@@ -372,7 +373,8 @@ def test_list_videos(tmp_path):
     (tmp_path / "b.avi").touch()
     (tmp_path / "c.mp4").touch()
     (tmp_path / "readme.txt").touch()
-    server.VIDEO_DIR = tmp_path
+    from routers import misc
+    misc.VIDEO_DIR = tmp_path
     resp = client.get("/api/videos")
     assert resp.status_code == 200
     videos = resp.json()
@@ -384,7 +386,8 @@ def test_list_videos(tmp_path):
 
 def test_videos_includes_avi(tmp_path):
     (tmp_path / "test.avi").touch()
-    server.VIDEO_DIR = tmp_path
+    from routers import misc
+    misc.VIDEO_DIR = tmp_path
     resp = client.get("/api/videos")
     assert resp.status_code == 200
     assert "test.avi" in resp.json()
@@ -392,7 +395,7 @@ def test_videos_includes_avi(tmp_path):
 
 # ── Camera CRUD ──────────────────────────────────────────────────────────────
 
-@mock.patch("server.start_camera")
+@mock.patch("routers.cameras.start_camera")
 def test_add_camera(mock_start):
     resp = client.post("/api/cameras", json={
         "name": "New Cam", "video": "test.mp4", "zone": "ZoneX",
@@ -405,7 +408,7 @@ def test_add_camera(mock_start):
     mock_start.assert_called_once()
 
 
-@mock.patch("server.restart_camera")
+@mock.patch("routers.cameras.restart_camera")
 def test_update_camera(mock_restart):
     resp = client.put("/api/cameras/cam1", json={"name": "Updated Name"})
     assert resp.status_code == 200
@@ -418,7 +421,7 @@ def test_update_camera_not_found():
     assert resp.status_code == 404
 
 
-@mock.patch("server.stop_camera")
+@mock.patch("routers.cameras.stop_camera")
 def test_delete_camera(mock_stop):
     resp = client.delete("/api/cameras/cam1")
     assert resp.status_code == 200

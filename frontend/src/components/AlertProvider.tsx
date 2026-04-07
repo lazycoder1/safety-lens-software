@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react"
 import { create } from "zustand"
 import { useAlertStore } from "@/stores/alertStore"
 import { useAuthStore } from "@/stores/authStore"
-import type { Alert } from "@/stores/alertStore"
+import type { Alert } from "@/types"
 import { WS_BASE } from "@/lib/api"
 
 interface AlertConnectionStore {

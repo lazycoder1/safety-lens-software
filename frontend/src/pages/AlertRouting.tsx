@@ -12,8 +12,9 @@ import {
   Loader2,
   Zap,
 } from "lucide-react"
-import { cameras, detectionRules, severityConfig } from "@/data/mock"
-import type { Severity } from "@/data/mock"
+import { cameras, detectionRules } from "@/data/mock"
+import { severityConfig, severityVariantMap } from "@/lib/constants"
+import type { Severity } from "@/types"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -94,13 +95,6 @@ interface TestAlertConfig {
 interface TestResult {
   channel: string
   success: boolean
-}
-
-const severityVariantMap: Record<Severity, "critical" | "high" | "warning" | "info"> = {
-  P1: "critical",
-  P2: "high",
-  P3: "warning",
-  P4: "info",
 }
 
 /* ------------------------------------------------------------------ */

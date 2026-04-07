@@ -1,18 +1,15 @@
-"""Tests for check_violations and check_yoloe_violations from server.py."""
+"""Tests for check_violations and check_yoloe_violations from detection.py."""
 
 from unittest import mock
 
 import pytest
 
-# We need to mock heavy imports (YOLO, cv2, etc.) before importing server
-# Import check_violations and related objects directly
-with mock.patch("server.load_model"):
-    from server import (
-        check_violations,
-        check_yoloe_violations,
-        COCO_ALERT_RULES,
-        SEVERITY_COOLDOWN_MULT,
-    )
+from detection import (
+    check_violations,
+    check_yoloe_violations,
+    SEVERITY_COOLDOWN_MULT,
+)
+from routers.safety_rules import DEFAULT_SAFETY_RULES
 
 
 def _det(cls, conf=0.8):
@@ -20,13 +17,27 @@ def _det(cls, conf=0.8):
     return {"class": cls, "confidence": conf}
 
 
+def _cfg_with_alert_classes(cam_id, alert_classes):
+    """Build a mock config using old alert_classes (backward compat path)."""
+    return {
+        "cameras": {cam_id: {"alert_classes": alert_classes}},
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
+    }
+
+
+def _cfg_with_safety_rule_ids(cam_id, rule_ids):
+    """Build a mock config using new safety_rule_ids."""
+    return {
+        "cameras": {cam_id: {"safety_rule_ids": rule_ids}},
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
+    }
+
+
 # ── check_violations — mobile phone ─────────────────────────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_mobile_phone(mock_cfg):
-    mock_cfg.return_value = {
-        "cameras": {"cam1": {"alert_classes": ["mobile_phone", "animal_intrusion"]}}
-    }
+    mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["mobile_phone", "animal_intrusion"])
     dets = [_det("person"), _det("cell phone", 0.75)]
     violations = check_violations(dets, "cam1")
     assert len(violations) == 1
@@ -37,11 +48,9 @@ def test_check_violations_mobile_phone(mock_cfg):
 
 # ── check_violations — animal intrusion ──────────────────────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_animal_intrusion(mock_cfg):
-    mock_cfg.return_value = {
-        "cameras": {"cam1": {"alert_classes": ["mobile_phone", "animal_intrusion"]}}
-    }
+    mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["mobile_phone", "animal_intrusion"])
     dets = [_det("person"), _det("dog", 0.65)]
     violations = check_violations(dets, "cam1")
     assert len(violations) == 1
@@ -51,11 +60,9 @@ def test_check_violations_animal_intrusion(mock_cfg):
 
 # ── check_violations — person_detected when enabled ──────────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_person_detected_when_enabled(mock_cfg):
-    mock_cfg.return_value = {
-        "cameras": {"cam1": {"alert_classes": ["person_detected"]}}
-    }
+    mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["person_detected"])
     dets = [_det("person", 0.9)]
     violations = check_violations(dets, "cam1")
     assert len(violations) == 1
@@ -65,11 +72,12 @@ def test_check_violations_person_detected_when_enabled(mock_cfg):
 
 # ── check_violations — person_detected NOT in defaults ───────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_person_detected_when_disabled(mock_cfg):
     """Default camera config does NOT include person_detected."""
     mock_cfg.return_value = {
-        "cameras": {"cam1": {}}  # no alert_classes => defaults to mobile_phone + animal_intrusion
+        "cameras": {"cam1": {}},  # no alert_classes/safety_rule_ids => defaults to mobile_phone + animal_intrusion
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
     }
     dets = [_det("person", 0.9)]
     violations = check_violations(dets, "cam1")
@@ -79,23 +87,19 @@ def test_check_violations_person_detected_when_disabled(mock_cfg):
 
 # ── check_violations — no detections ─────────────────────────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_no_detections_returns_empty(mock_cfg):
-    mock_cfg.return_value = {
-        "cameras": {"cam1": {"alert_classes": ["mobile_phone", "animal_intrusion"]}}
-    }
+    mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["mobile_phone", "animal_intrusion"])
     violations = check_violations([], "cam1")
     assert violations == []
 
 
 # ── check_violations — alert_classes filtering ───────────────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_alert_classes_filtering(mock_cfg):
     """Only rules in alert_classes should fire."""
-    mock_cfg.return_value = {
-        "cameras": {"cam1": {"alert_classes": ["animal_intrusion"]}}
-    }
+    mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["animal_intrusion"])
     # Both phone and dog present, but only animal_intrusion enabled
     dets = [_det("person"), _det("cell phone", 0.8), _det("dog", 0.7)]
     violations = check_violations(dets, "cam1")
@@ -103,11 +107,9 @@ def test_check_violations_alert_classes_filtering(mock_cfg):
     assert violations[0]["rule"] == "Animal Intrusion"
 
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_violations_vehicle_detected(mock_cfg):
-    mock_cfg.return_value = {
-        "cameras": {"cam1": {"alert_classes": ["vehicle_detected"]}}
-    }
+    mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["vehicle_detected"])
     dets = [_det("truck", 0.85)]
     violations = check_violations(dets, "cam1")
     assert len(violations) == 1
@@ -132,10 +134,11 @@ def test_severity_cooldown_multipliers():
 
 # ── check_yoloe_violations ───────────────────────────────────────────────────
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_yoloe_violations_missing_ppe(mock_cfg):
     mock_cfg.return_value = {
-        "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet", "gloves"]}}
+        "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet", "gloves"]}},
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
     }
     # person detected but no hairnet, no gloves
     dets = [_det("person", 0.9)]
@@ -146,10 +149,11 @@ def test_check_yoloe_violations_missing_ppe(mock_cfg):
     assert "Missing gloves" in rules
 
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_yoloe_violations_no_persons(mock_cfg):
     mock_cfg.return_value = {
-        "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet"]}}
+        "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet"]}},
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
     }
     # No person detected — no violations even if no hairnet
     dets = [_det("hairnet", 0.8)]
@@ -157,10 +161,11 @@ def test_check_yoloe_violations_no_persons(mock_cfg):
     assert violations == []
 
 
-@mock.patch("server.get_config")
+@mock.patch("detection.get_config")
 def test_check_yoloe_violations_all_ppe_present(mock_cfg):
     mock_cfg.return_value = {
-        "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet", "gloves"]}}
+        "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet", "gloves"]}},
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
     }
     dets = [_det("person", 0.9), _det("hairnet", 0.85), _det("gloves", 0.8)]
     violations = check_yoloe_violations(dets, "cam3")

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react"
 import { CheckCircle2, Brain, PanelRightOpen, PanelRightClose } from "lucide-react"
-import { severityConfig } from "@/data/mock"
-import type { Severity } from "@/data/mock"
-import { cn } from "@/lib/utils"
+import { severityConfig, severityVariantMap } from "@/lib/constants"
+import type { Severity } from "@/types"
+import { cn, timeAgo } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
@@ -10,22 +10,6 @@ import { useAlertStore } from "@/stores/alertStore"
 import { useAuthStore } from "@/stores/authStore"
 import { useViolationModal } from "@/components/ViolationModal"
 import { playP1AlertSound } from "@/lib/alertSound"
-
-const severityVariantMap: Record<Severity, "critical" | "high" | "warning" | "info"> = {
-  P1: "critical",
-  P2: "high",
-  P3: "warning",
-  P4: "info",
-}
-
-function timeAgo(isoString: string): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(isoString).getTime()) / 1000))
-  if (seconds < 5) return "just now"
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  return `${Math.floor(minutes / 60)}h ago`
-}
 
 export function LiveAlertsPanel() {
   const [panelOpen, setPanelOpen] = useState(true)

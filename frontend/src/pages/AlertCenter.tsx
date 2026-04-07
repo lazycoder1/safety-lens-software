@@ -12,13 +12,14 @@ import {
   RefreshCw,
   Loader2,
 } from "lucide-react"
-import { severityConfig } from "@/data/mock"
-import type { Severity, AlertStatus } from "@/data/mock"
+import { severityConfig, severityOrder } from "@/lib/constants"
+import type { Severity, AlertStatus, Alert } from "@/types"
 import { useAlertStore } from "@/stores/alertStore"
 import { useAuthStore } from "@/stores/authStore"
-import type { Alert } from "@/stores/alertStore"
-import { cn } from "@/lib/utils"
+import { cn, timeAgo, formatTime } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
+import { SeverityBadge } from "@/components/ui/SeverityBadge"
+import { StatusBadge } from "@/components/ui/StatusBadge"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
 import { API_BASE, WS_BASE } from "@/lib/api"
@@ -26,20 +27,6 @@ import { playP1AlertSound } from "@/lib/alertSound"
 
 const severities: Severity[] = ["P1", "P2", "P3", "P4"]
 const statuses: AlertStatus[] = ["active", "acknowledged", "resolved", "snoozed"]
-
-const severityVariantMap: Record<Severity, "critical" | "high" | "warning" | "info"> = {
-  P1: "critical",
-  P2: "high",
-  P3: "warning",
-  P4: "info",
-}
-
-const statusVariantMap: Record<AlertStatus, "critical" | "high" | "warning" | "success" | "info" | "default"> = {
-  active: "critical",
-  acknowledged: "info",
-  resolved: "success",
-  snoozed: "warning",
-}
 
 const statusIcons: Record<AlertStatus, typeof AlertTriangle> = {
   active: AlertTriangle,
@@ -50,22 +37,6 @@ const statusIcons: Record<AlertStatus, typeof AlertTriangle> = {
 
 type SortField = "timestamp" | "severity" | "confidence"
 type SortDir = "asc" | "desc"
-
-const severityOrder: Record<Severity, number> = { P1: 0, P2: 1, P3: 2, P4: 3 }
-
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
-}
-
-function timeAgo(iso: string): string {
-  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
-}
 
 export function AlertCenter() {
   const { alerts, loading, fetchAlerts, acknowledge, snooze, resolve, markFalsePositive, addOrUpdateAlert } = useAlertStore()
@@ -398,10 +369,10 @@ export function AlertCenter() {
                         {alert.source}
                       </td>
                       <td className="px-4 py-2.5">
-                        <Badge variant={statusVariantMap[alert.status]} className="capitalize gap-1">
+                        <StatusBadge status={alert.status} className="gap-1">
                           <StatusIcon size={10} />
                           {alert.status}
-                        </Badge>
+                        </StatusBadge>
                       </td>
                       <td className="px-4 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1">
@@ -496,14 +467,10 @@ export function AlertCenter() {
                   <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
                     {liveSelectedAlert.rule}
                   </h3>
-                  <Badge variant={severityVariantMap[liveSelectedAlert.severity]}>
-                    {liveSelectedAlert.severity} - {severityConfig[liveSelectedAlert.severity].label}
-                  </Badge>
+                  <SeverityBadge severity={liveSelectedAlert.severity} />
                 </div>
                 <div className="flex items-center gap-2">
-                  <Badge variant={statusVariantMap[liveSelectedAlert.status]} className="capitalize">
-                    {liveSelectedAlert.status}
-                  </Badge>
+                  <StatusBadge status={liveSelectedAlert.status} />
                   {liveSelectedAlert.falsePositive && (
                     <Badge variant="default" className="text-[10px]">False positive</Badge>
                   )}

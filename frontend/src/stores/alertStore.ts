@@ -6,31 +6,7 @@ import {
   snoozeAlert as apiSnooze,
   markFalsePositive as apiFalsePositive,
 } from "@/lib/api"
-
-export type Severity = "P1" | "P2" | "P3" | "P4"
-export type AlertStatus = "active" | "acknowledged" | "resolved" | "snoozed"
-
-export interface Alert {
-  id: string
-  severity: Severity
-  status: AlertStatus
-  rule: string
-  cameraId: string
-  cameraName: string
-  zone: string
-  confidence: number
-  timestamp: string
-  source: string
-  description: string
-  snapshotUrl: string | null
-  cleanSnapshotUrl: string | null
-  bboxes: Array<{ label: string; bbox: [number, number, number, number]; confidence: number }>
-  acknowledgedBy?: string | null
-  acknowledgedAt?: string | null
-  resolvedAt?: string | null
-  snoozedUntil?: string | null
-  falsePositive?: boolean
-}
+import type { Alert } from "@/types"
 
 interface AlertStore {
   alerts: Alert[]

@@ -15,10 +15,10 @@ import {
   ToggleRight,
 } from "lucide-react"
 import { pipelineStages } from "@/data/mock"
-import { severityConfig } from "@/data/mock"
-import type { Severity } from "@/data/mock"
+import type { Severity, DetectionRule } from "@/types"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
+import { SeverityBadge } from "@/components/ui/SeverityBadge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { getDetectionRules, toggleDetectionRule, createDetectionRule, getCameras } from "@/lib/api"
@@ -29,19 +29,6 @@ import { getDetectionRules, toggleDetectionRule, createDetectionRule, getCameras
 
 type Mode = "simple" | "advanced" | "pipeline"
 type SensitivityLevel = "Low" | "Medium" | "High"
-
-interface DetectionRule {
-  id: string
-  name: string
-  model: string
-  promptType: string
-  prompts: string[]
-  confidenceThreshold: number
-  severity: Severity
-  enabled: boolean
-  camerasCount: number
-  category: string
-}
 
 interface PresetScenario {
   id: string
@@ -163,13 +150,6 @@ const modelBadgeVariant: Record<string, "critical" | "high" | "warning" | "info"
   YOLO26: "success",
   "YOLO-pose": "high",
   VLM: "warning",
-}
-
-const severityVariantMap: Record<Severity, "critical" | "high" | "warning" | "info"> = {
-  P1: "critical",
-  P2: "high",
-  P3: "warning",
-  P4: "info",
 }
 
 /* ------------------------------------------------------------------ */
@@ -879,9 +859,7 @@ export function DetectionRules() {
                           {Math.round(rule.confidenceThreshold * 100)}%
                         </td>
                         <td className="px-4 py-3">
-                          <Badge variant={severityVariantMap[rule.severity]}>
-                            {rule.severity} {severityConfig[rule.severity].label}
-                          </Badge>
+                          <SeverityBadge severity={rule.severity} />
                         </td>
                         <td className="px-4 py-3 text-center text-[var(--color-text-secondary)]">
                           {rule.camerasCount}

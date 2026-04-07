@@ -275,6 +275,67 @@ export async function createDetectionRule(rule: {
   })
 }
 
+// Safety Rules
+import type { PPERule, SafetyRule } from "@/types"
+
+export async function getSafetyRules(): Promise<SafetyRule[]> {
+  return request("/api/safety-rules")
+}
+
+export async function createSafetyRule(rule: { name: string; type: string; classes: string[]; model: string; severity: string }): Promise<SafetyRule> {
+  return request("/api/safety-rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rule),
+  })
+}
+
+export async function updateSafetyRule(id: string, updates: Partial<SafetyRule>): Promise<SafetyRule> {
+  return request(`/api/safety-rules/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  })
+}
+
+export async function toggleSafetyRule(id: string): Promise<SafetyRule> {
+  return request(`/api/safety-rules/${id}/toggle`, { method: "PUT" })
+}
+
+export async function deleteSafetyRule(id: string): Promise<void> {
+  return request(`/api/safety-rules/${id}`, { method: "DELETE" })
+}
+
+// PPE Rules (deprecated — use Safety Rules)
+
+export async function getPPERules(): Promise<PPERule[]> {
+  return request("/api/ppe-rules")
+}
+
+export async function createPPERule(rule: { name: string; yoloe_classes: string[]; severity: string }): Promise<PPERule> {
+  return request("/api/ppe-rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rule),
+  })
+}
+
+export async function updatePPERule(id: string, updates: Partial<PPERule>): Promise<PPERule> {
+  return request(`/api/ppe-rules/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  })
+}
+
+export async function togglePPERule(id: string): Promise<PPERule> {
+  return request(`/api/ppe-rules/${id}/toggle`, { method: "PUT" })
+}
+
+export async function deletePPERule(id: string): Promise<void> {
+  return request(`/api/ppe-rules/${id}`, { method: "DELETE" })
+}
+
 // Videos
 export async function getVideos(): Promise<string[]> {
   return request("/api/videos")

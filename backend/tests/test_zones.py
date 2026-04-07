@@ -22,11 +22,13 @@ alert_store.SNAPSHOTS_DIR = _test_snapshots
 import config_manager
 config_manager.CONFIG_PATH = _test_config
 
-with mock.patch("server.load_model"):
+with mock.patch("state.load_model"):
     import server
+    import state
+    from detection import point_in_polygon, check_zone_intrusions
 
-server.model = None
-server.yoloe_model = None
+state.model = None
+state.yoloe_model = None
 
 from fastapi.testclient import TestClient
 
@@ -46,9 +48,9 @@ def fresh_state():
     if _test_config.exists():
         _test_config.unlink()
     config_manager.load_config()
-    server.camera_threads.clear()
-    server.camera_frames.clear()
-    server.camera_detections.clear()
+    state.camera_threads.clear()
+    state.camera_frames.clear()
+    state.camera_detections.clear()
     yield
 
 
@@ -150,18 +152,18 @@ def test_add_multiple_zones():
 
 def test_point_in_polygon_inside():
     polygon = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
-    assert server.point_in_polygon(0.5, 0.5, polygon) is True
+    assert point_in_polygon(0.5, 0.5, polygon) is True
 
 
 def test_point_in_polygon_outside():
     polygon = [[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]]
-    assert server.point_in_polygon(0.8, 0.8, polygon) is False
+    assert point_in_polygon(0.8, 0.8, polygon) is False
 
 
 def test_point_in_polygon_triangle():
     polygon = [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]
-    assert server.point_in_polygon(0.5, 0.3, polygon) is True
-    assert server.point_in_polygon(0.9, 0.9, polygon) is False
+    assert point_in_polygon(0.5, 0.3, polygon) is True
+    assert point_in_polygon(0.9, 0.9, polygon) is False
 
 
 # ── Zone Intrusion Detection Tests ───────────────────────────────────────────
@@ -178,7 +180,7 @@ def test_check_zone_intrusions_person_in_zone():
     config_manager.save_config(cfg)
 
     dets = [{"class": "person", "confidence": 0.9, "bbox": [100, 100, 200, 200]}]
-    candidates = server.check_zone_intrusions(dets, cam_id, 640, 480)
+    candidates = check_zone_intrusions(dets, cam_id, 640, 480)
     assert len(candidates) == 1
     assert candidates[0]["rule"] == "Zone Intrusion"
     assert candidates[0]["severity"] == "P1"
@@ -198,7 +200,7 @@ def test_check_zone_intrusions_person_outside_zone():
 
     # Person in bottom-right
     dets = [{"class": "person", "confidence": 0.9, "bbox": [500, 400, 600, 450]}]
-    candidates = server.check_zone_intrusions(dets, cam_id, 640, 480)
+    candidates = check_zone_intrusions(dets, cam_id, 640, 480)
     assert len(candidates) == 0
 
 
@@ -213,7 +215,7 @@ def test_check_zone_intrusions_disabled():
     config_manager.save_config(cfg)
 
     dets = [{"class": "person", "confidence": 0.9, "bbox": [100, 100, 200, 200]}]
-    candidates = server.check_zone_intrusions(dets, cam_id, 640, 480)
+    candidates = check_zone_intrusions(dets, cam_id, 640, 480)
     assert len(candidates) == 0
 
 
@@ -228,6 +230,6 @@ def test_check_zone_intrusions_caution_zone():
     config_manager.save_config(cfg)
 
     dets = [{"class": "person", "confidence": 0.9, "bbox": [100, 100, 200, 200]}]
-    candidates = server.check_zone_intrusions(dets, cam_id, 640, 480)
+    candidates = check_zone_intrusions(dets, cam_id, 640, 480)
     assert len(candidates) == 1
     assert candidates[0]["severity"] == "P2"  # caution = P2, not P1
