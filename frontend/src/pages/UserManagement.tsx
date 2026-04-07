@@ -105,6 +105,26 @@ export function UserManagement() {
     }
   }
 
+  // Delete confirmation modal state
+  const [deleteModal, setDeleteModal] = useState<{ userId: string; username: string } | null>(null)
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false)
+
+  async function confirmDelete() {
+    if (!deleteModal) return
+    setDeleteSubmitting(true)
+    try {
+      await deleteUser(deleteModal.userId)
+      toast.success("User deleted")
+      setDeleteModal(null)
+      fetchUsers()
+      refreshPending()
+    } catch {
+      toast.error("Failed to delete user")
+    } finally {
+      setDeleteSubmitting(false)
+    }
+  }
+
   // Reset password modal state
   const [resetModal, setResetModal] = useState<{ userId: string; username: string } | null>(null)
   const [resetPasswordInput, setResetPasswordInput] = useState("")
@@ -147,20 +167,12 @@ export function UserManagement() {
     }
   }
 
-  async function handleDelete(id: string, username: string) {
+  function handleDelete(id: string, username: string) {
     if (currentUser?.id === id) {
       toast.error("You cannot delete your own account")
       return
     }
-    if (!window.confirm(`Delete user "${username}"? This cannot be undone.`)) return
-    try {
-      await deleteUser(id)
-      toast.success("User deleted")
-      fetchUsers()
-      refreshPending()
-    } catch {
-      toast.error("Failed to delete user")
-    }
+    setDeleteModal({ userId: id, username })
   }
 
   function UserRow({ user }: { user: ManagedUser }) {
@@ -321,6 +333,34 @@ export function UserManagement() {
           </table>
         </div>
       </Card>
+
+      {/* Delete Confirmation Modal */}
+      {deleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => !deleteSubmitting && setDeleteModal(null)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm mx-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b">
+              <h3 className="font-semibold text-[var(--color-text-primary)]">Delete User</h3>
+              <button onClick={() => setDeleteModal(null)} disabled={deleteSubmitting} className="p-1 rounded-lg hover:bg-neutral-100 text-neutral-400 hover:text-neutral-600 cursor-pointer disabled:opacity-50">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              <p className="text-sm text-[var(--color-text-secondary)]">
+                Are you sure you want to delete <strong>{deleteModal.username}</strong>? This action cannot be undone.
+              </p>
+              <div className="flex gap-3 justify-end">
+                <Button variant="secondary" onClick={() => setDeleteModal(null)} disabled={deleteSubmitting}>
+                  Cancel
+                </Button>
+                <Button variant="danger" onClick={confirmDelete} disabled={deleteSubmitting}>
+                  {deleteSubmitting && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+                  Delete
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Reset Password Modal */}
       {resetModal && (
