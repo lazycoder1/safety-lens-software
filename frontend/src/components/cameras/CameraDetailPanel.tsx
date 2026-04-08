@@ -58,7 +58,7 @@ export function CameraDetailPanel({
   const derivedClasses = Array.from(
     new Set(
       safetyRules
-        .filter((r) => safetyRuleIds.includes(r.id) && r.enabled && r.type === "ppe")
+        .filter((r) => safetyRuleIds.includes(r.id) && r.enabled)
         .flatMap((r) => r.classes)
     )
   )

@@ -3,8 +3,10 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from dependencies import require_admin
 
 from config_manager import get_config, save_config
 from video_processing import restart_camera
@@ -131,7 +133,7 @@ def derive_yoloe_classes(safety_rule_ids: list[str], cfg: dict) -> list[str]:
     classes = ["person"]
     for rid in safety_rule_ids:
         rule = rule_map.get(rid)
-        if rule and rule.get("type") == "ppe" and rule.get("enabled", True):
+        if rule and rule.get("enabled", True):
             classes.extend(rule["classes"])
     return list(dict.fromkeys(classes))  # deduplicate, preserve order
 
@@ -228,3 +230,40 @@ async def api_delete_safety_rule(rule_id: str):
     save_config(cfg)
     logger.info("Safety rule deleted", extra={"rule_id": rule_id})
     return {"deleted": rule_id}
+
+
+class RuleCameraAssign(BaseModel):
+    camera_ids: list[str]
+
+
+@router.put("/safety-rules/{rule_id}/cameras", dependencies=[Depends(require_admin)])
+async def api_assign_rule_cameras(rule_id: str, body: RuleCameraAssign):
+    cfg = get_config()
+    rules = _ensure_safety_rules(cfg)
+    if not any(r["id"] == rule_id for r in rules):
+        raise HTTPException(status_code=404, detail="Safety rule not found")
+
+    desired = set(body.camera_ids)
+    changed_cams: list[str] = []
+
+    for cam_id, cam in cfg.get("cameras", {}).items():
+        rule_ids = cam.get("safety_rule_ids", [])
+        had_rule = rule_id in rule_ids
+
+        if cam_id in desired and not had_rule:
+            rule_ids.append(rule_id)
+            cam["safety_rule_ids"] = rule_ids
+            changed_cams.append(cam_id)
+        elif cam_id not in desired and had_rule:
+            cam["safety_rule_ids"] = [rid for rid in rule_ids if rid != rule_id]
+            changed_cams.append(cam_id)
+
+        if cam_id in changed_cams and cam.get("demo") == "yoloe":
+            cam["yoloe_classes"] = derive_yoloe_classes(cam["safety_rule_ids"], cfg)
+
+    save_config(cfg)
+    for cam_id in changed_cams:
+        restart_camera(cam_id)
+
+    logger.info("Rule camera assignment updated", extra={"rule_id": rule_id, "cameras": list(desired), "changed": changed_cams})
+    return {"rule_id": rule_id, "camera_ids": list(desired), "changed": changed_cams}

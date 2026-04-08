@@ -17,6 +17,7 @@ from config_manager import load_config, get_config
 from constants import PUBLIC_PATHS, PUBLIC_PREFIXES, FRONTEND_DIR
 from logging_config import setup_logging
 from routers import register_routers
+from routers.safety_rules import _ensure_safety_rules
 from video_processing import start_camera
 import db
 import alert_store
@@ -77,6 +78,7 @@ async def startup():
     state.load_model()
     load_config()
     cfg = get_config()
+    _ensure_safety_rules(cfg)
     for cam_id in cfg["cameras"]:
         start_camera(cam_id)
 

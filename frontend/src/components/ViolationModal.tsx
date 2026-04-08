@@ -1,6 +1,7 @@
-import { useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { create } from "zustand"
-import { X, ShieldAlert } from "lucide-react"
+import { X, ShieldAlert, ImageOff } from "lucide-react"
+import { cn } from "@/lib/utils"
 import { severityConfig } from "@/lib/constants"
 import { SeverityBadge } from "@/components/ui/SeverityBadge"
 import type { Alert, Severity } from "@/types"
@@ -35,14 +36,54 @@ export function ViolationModal() {
     }
   }, [alert, handleKeyDown])
 
+  const [imgError, setImgError] = useState(false)
+  const [imgLoaded, setImgLoaded] = useState(false)
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+
+  // Fetch snapshot as blob to avoid browser connection limit (MJPEG streams consume all 6 connections)
+  useEffect(() => {
+    setImgError(false)
+    setImgLoaded(false)
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl)
+      setBlobUrl(null)
+    }
+
+    if (!alert) return
+
+    const url = alert.cleanSnapshotUrl
+      ? `${API_BASE}${alert.cleanSnapshotUrl}`
+      : alert.snapshotUrl
+        ? `${API_BASE}${alert.snapshotUrl}`
+        : null
+
+    if (!url) return
+
+    const controller = new AbortController()
+    fetch(url, { signal: controller.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error("Failed to load")
+        return r.blob()
+      })
+      .then((blob) => {
+        const objUrl = URL.createObjectURL(blob)
+        setBlobUrl(objUrl)
+        setImgLoaded(true)
+      })
+      .catch((e) => {
+        if (e.name !== "AbortError") setImgError(true)
+      })
+
+    return () => {
+      controller.abort()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alert?.id])
+
   if (!alert) return null
 
   const sev = severityConfig[alert.severity as Severity]
-  const imageUrl = alert.cleanSnapshotUrl
-    ? `${API_BASE}${alert.cleanSnapshotUrl}`
-    : alert.snapshotUrl
-      ? `${API_BASE}${alert.snapshotUrl}`
-      : null
+  const hasSnapshot = !!(alert.cleanSnapshotUrl || alert.snapshotUrl)
   const bboxes = alert.bboxes || []
   const ts = new Date(alert.timestamp)
   const timeStr = ts.toLocaleString()
@@ -73,15 +114,22 @@ export function ViolationModal() {
 
         {/* Image with bbox overlays */}
         <div className="px-5 py-4">
-          {imageUrl ? (
+          {hasSnapshot && !imgError ? (
             <div className="relative w-full">
-              <img
-                src={imageUrl}
-                alt={`Violation: ${alert.rule}`}
-                className="w-full rounded-lg"
-                draggable={false}
-              />
-              {bboxes.map((b, i) => {
+              {!imgLoaded && (
+                <div className="flex items-center justify-center h-48 bg-neutral-100 rounded-lg text-neutral-400 text-sm">
+                  Loading snapshot...
+                </div>
+              )}
+              {blobUrl && (
+                <img
+                  src={blobUrl}
+                  alt={`Violation: ${alert.rule}`}
+                  className="w-full rounded-lg"
+                  draggable={false}
+                />
+              )}
+              {imgLoaded && bboxes.map((b, i) => {
                 const [x1, y1, x2, y2] = b.bbox
                 return (
                   <div key={i}>
@@ -118,8 +166,9 @@ export function ViolationModal() {
               })}
             </div>
           ) : (
-            <div className="flex items-center justify-center h-48 bg-neutral-100 rounded-lg text-neutral-400">
-              No snapshot available
+            <div className="flex flex-col items-center justify-center h-48 bg-neutral-100 rounded-lg text-neutral-400 gap-2">
+              <ImageOff size={24} />
+              <span className="text-sm">{imgError ? "Failed to load snapshot" : "No snapshot available"}</span>
             </div>
           )}
         </div>

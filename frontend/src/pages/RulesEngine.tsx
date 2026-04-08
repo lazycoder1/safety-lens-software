@@ -10,6 +10,7 @@ import {
   Clock,
   Zap,
   X,
+  Video,
 } from "lucide-react"
 import * as Switch from "@radix-ui/react-switch"
 import * as Tabs from "@radix-ui/react-tabs"
@@ -32,6 +33,7 @@ import {
   toggleSafetyRule,
   deleteSafetyRule,
   getCameras,
+  assignRuleCameras,
 } from "@/lib/api"
 import type { SafetyRule, Severity, Camera } from "@/types"
 import { toast } from "sonner"
@@ -121,6 +123,9 @@ function SafetyRulesTab() {
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [assigningRuleId, setAssigningRuleId] = useState<string | null>(null)
+  const [assignedCameraIds, setAssignedCameraIds] = useState<string[]>([])
+  const [assignSaving, setAssignSaving] = useState(false)
 
   // form state
   const [formName, setFormName] = useState("")
@@ -240,6 +245,35 @@ function SafetyRulesTab() {
       toast.error(err.message || "Failed to delete rule")
     }
     setDeleteTarget(null)
+  }
+
+  function openAssignModal(ruleId: string) {
+    const assigned = cameras
+      .filter((c) => (c.safety_rule_ids || []).includes(ruleId))
+      .map((c) => c.id)
+    setAssignedCameraIds(assigned)
+    setAssigningRuleId(ruleId)
+  }
+
+  function toggleCameraAssign(camId: string) {
+    setAssignedCameraIds((prev) =>
+      prev.includes(camId) ? prev.filter((id) => id !== camId) : [...prev, camId]
+    )
+  }
+
+  async function saveAssignment() {
+    if (!assigningRuleId) return
+    setAssignSaving(true)
+    try {
+      await assignRuleCameras(assigningRuleId, assignedCameraIds)
+      await fetchData()
+      toast.success("Camera assignment updated")
+      setAssigningRuleId(null)
+    } catch (err: any) {
+      toast.error(err.message || "Failed to update assignment")
+    } finally {
+      setAssignSaving(false)
+    }
   }
 
   if (loading) {
@@ -417,7 +451,15 @@ function SafetyRulesTab() {
                   <td className="px-4 py-3">
                     <SeverityBadge severity={rule.severity} />
                   </td>
-                  <td className="px-4 py-3 text-[var(--color-text-secondary)]">{getCameraCount(rule.id)}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => openAssignModal(rule.id)}
+                      className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[var(--radius-md)] text-sm text-[var(--color-info)] hover:bg-[var(--color-info-bg)] transition-colors cursor-pointer"
+                    >
+                      <Video className="h-3.5 w-3.5" />
+                      {getCameraCount(rule.id)}
+                    </button>
+                  </td>
                   <td className="px-4 py-3">
                     <Switch.Root
                       checked={rule.enabled}
@@ -479,6 +521,69 @@ function SafetyRulesTab() {
             <div className="flex items-center justify-end gap-2">
               <Button variant="secondary" size="sm" onClick={() => setDeleteTarget(null)}>Cancel</Button>
               <Button variant="danger" size="sm" onClick={confirmDelete}>Delete</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* camera assignment modal */}
+      {assigningRuleId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <Card className="w-full max-w-md space-y-4 shadow-lg">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                Assign Cameras — {rules.find((r) => r.id === assigningRuleId)?.name}
+              </h2>
+              <button
+                onClick={() => setAssigningRuleId(null)}
+                className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              Select which cameras should run this detection rule.
+            </p>
+            <div className="max-h-64 overflow-y-auto space-y-1">
+              {cameras.length === 0 ? (
+                <p className="py-4 text-center text-sm text-[var(--color-text-tertiary)]">No cameras configured.</p>
+              ) : (
+                cameras.map((cam) => (
+                  <label
+                    key={cam.id}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-[var(--radius-md)] hover:bg-[var(--color-bg-secondary)] cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={assignedCameraIds.includes(cam.id)}
+                      onChange={() => toggleCameraAssign(cam.id)}
+                      className="h-4 w-4 rounded border-[var(--color-border-default)] text-[var(--color-info)] accent-[var(--color-info)] cursor-pointer"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <span className="text-sm font-medium text-[var(--color-text-primary)]">{cam.name}</span>
+                      <span className="ml-2 text-xs text-[var(--color-text-tertiary)]">{cam.zone}</span>
+                    </div>
+                    <span
+                      className={cn(
+                        "inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium",
+                        cam.status === "online"
+                          ? "bg-[var(--color-success-bg)] text-[var(--color-success)]"
+                          : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]"
+                      )}
+                    >
+                      {cam.status}
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <Button variant="secondary" size="sm" onClick={() => setAssigningRuleId(null)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={saveAssignment} disabled={assignSaving}>
+                {assignSaving ? "Saving..." : "Save"}
+              </Button>
             </div>
           </Card>
         </div>

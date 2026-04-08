@@ -306,6 +306,14 @@ export async function deleteSafetyRule(id: string): Promise<void> {
   return request(`/api/safety-rules/${id}`, { method: "DELETE" })
 }
 
+export async function assignRuleCameras(ruleId: string, cameraIds: string[]) {
+  return request(`/api/safety-rules/${ruleId}/cameras`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ camera_ids: cameraIds }),
+  })
+}
+
 // PPE Rules (deprecated — use Safety Rules)
 
 export async function getPPERules(): Promise<PPERule[]> {

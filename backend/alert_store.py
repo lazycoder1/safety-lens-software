@@ -77,14 +77,21 @@ def create_alert(
     bboxes = bboxes or []
 
     if snapshot_jpeg:
-        snapshot_filename = f"{alert_id}.jpg"
-        (SNAPSHOTS_DIR / snapshot_filename).write_bytes(snapshot_jpeg)
-        snapshot_path = snapshot_filename
+        try:
+            SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+            snapshot_filename = f"{alert_id}.jpg"
+            (SNAPSHOTS_DIR / snapshot_filename).write_bytes(snapshot_jpeg)
+            snapshot_path = snapshot_filename
+        except Exception:
+            logger.exception("Failed to write snapshot")
 
     if clean_snapshot_jpeg:
-        clean_filename = f"{alert_id}_clean.jpg"
-        (SNAPSHOTS_DIR / clean_filename).write_bytes(clean_snapshot_jpeg)
-        clean_snapshot_path = clean_filename
+        try:
+            clean_filename = f"{alert_id}_clean.jpg"
+            (SNAPSHOTS_DIR / clean_filename).write_bytes(clean_snapshot_jpeg)
+            clean_snapshot_path = clean_filename
+        except Exception:
+            logger.exception("Failed to write clean snapshot")
 
     with get_conn() as conn:
         with conn.cursor() as cur:

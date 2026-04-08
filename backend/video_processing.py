@@ -40,12 +40,15 @@ def create_alert(
     description: str = "",
     source: str = "YOLO",
     bboxes: list[dict] | None = None,
-) -> dict:
+) -> dict | None:
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
-    # Capture snapshot from current frame
+    # Capture snapshot from current frame — skip alert if no frame available yet
     snapshot_jpeg = state.camera_frames.get(camera_id)
     clean_snapshot_jpeg = state.camera_clean_frames.get(camera_id)
+    if not snapshot_jpeg:
+        logger.debug("Skipping alert — no frame captured yet", extra={"camera_id": camera_id, "rule": rule})
+        return None
     alert = alert_store.create_alert(
         camera_id=camera_id,
         camera_name=cam.get("name", camera_id),
@@ -160,10 +163,11 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
             description=result[:200],
             source=f"VLM ({vlm_cfg['model']})",
         )
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
-        loop.close()
+        if alert:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
+            loop.close()
 
 
 # ── Video Processing Threads ────────────────────────────────────────────────
@@ -272,6 +276,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             if len(dets) > 0:
                 if demo_mode == "yoloe":
                     candidates = check_yoloe_violations(dets, camera_id)
+                    candidates.extend(check_violations(dets, camera_id))
                 else:
                     candidates = check_violations(dets, camera_id)
 
@@ -308,13 +313,14 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                             source=candidate["source"],
                             bboxes=violation_bboxes,
                         )
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
-                            loop.close()
-                        except Exception:
-                            pass
+                        if alert:
+                            try:
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
+                                loop.close()
+                            except Exception:
+                                pass
             else:
                 # No detections -- clear all state
                 active_violations.clear()

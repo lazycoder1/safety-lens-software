@@ -8,6 +8,8 @@ import {
   WifiOff,
   Grid2x2,
   Grid3x3,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
@@ -32,12 +34,16 @@ export function LiveView() {
   const [gridCols, setGridCols] = useState(2)
   const [cameras, setCameras] = useState<CameraInfo[]>([])
   const [vlmResult, setVlmResult] = useState<{ text: string; timestamp: string; elapsed: number } | null>(null)
+  const [page, setPage] = useState(0)
   const connected = useAlertConnection((s) => s.connected)
   const alerts = useAlertStore((s) => s.alerts)
 
+  const PAGE_SIZE = 6
   const focusCamera = (camId: string) => setSearchParams({ cam: camId })
   const unfocusCamera = () => setSearchParams({})
-  const displayedCameras = focusedCamId ? cameras.filter((c) => c.id === focusedCamId) : cameras
+  const totalPages = Math.ceil(cameras.length / PAGE_SIZE)
+  const pagedCameras = cameras.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const displayedCameras = focusedCamId ? cameras.filter((c) => c.id === focusedCamId) : pagedCameras
 
   // Fetch cameras on mount
   useEffect(() => {
@@ -115,6 +121,29 @@ export function LiveView() {
               <Icon size={15} />
             </button>
           ))}
+
+          {/* Pagination */}
+          {!focusedCamId && totalPages > 1 && (
+            <div className="flex items-center gap-1 ml-auto">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="inline-flex items-center justify-center rounded-md p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-700 dark:hover:text-neutral-300 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
+              >
+                <ChevronLeft size={15} />
+              </button>
+              <span className="text-xs text-neutral-500 min-w-[60px] text-center">
+                {page + 1} / {totalPages}
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1}
+                className="inline-flex items-center justify-center rounded-md p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-neutral-700 dark:hover:text-neutral-300 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
+              >
+                <ChevronRight size={15} />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Camera grid */}
