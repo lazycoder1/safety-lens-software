@@ -192,6 +192,9 @@ export async function addCamera(camera: {
   rules: string[]
   fps?: number
   yoloe_classes?: string[]
+  stream_type?: string
+  rtsp_url?: string
+  safety_rule_ids?: string[]
 }) {
   return request("/api/cameras", {
     method: "POST",

@@ -2,20 +2,22 @@ import { Trash2 } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import type { Camera } from "@/types"
+import type { Camera, SafetyRule } from "@/types"
 import { CAMERA_ROLES, statusVariant } from "./constants"
 import type { CameraRole } from "./constants"
 
 interface CameraCardProps {
   camera: Camera
   role: CameraRole
+  safetyRules: SafetyRule[]
   onClick: () => void
   onDelete: () => void
 }
 
-export function CameraCard({ camera, role, onClick, onDelete }: CameraCardProps) {
+export function CameraCard({ camera, role, safetyRules, onClick, onDelete }: CameraCardProps) {
   const roleInfo = CAMERA_ROLES.find((r) => r.value === role) || CAMERA_ROLES[0]
   const variant = statusVariant[camera.status] || "default"
+  const assignedRules = safetyRules.filter((r) => (camera.safety_rule_ids || []).includes(r.id))
 
   return (
     <Card
@@ -37,10 +39,19 @@ export function CameraCard({ camera, role, onClick, onDelete }: CameraCardProps)
         <p className="text-xs text-[var(--color-text-tertiary)] truncate">
           {camera.video}
         </p>
-        {camera.rules.length > 0 && (
-          <p className="text-xs text-[var(--color-text-tertiary)]">
-            {camera.rules.length} rule{camera.rules.length !== 1 ? "s" : ""}: {camera.rules.join(", ")}
-          </p>
+        {assignedRules.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {assignedRules.slice(0, 3).map((rule) => (
+              <Badge key={rule.id} variant={rule.type === "ppe" ? "info" : "warning"}>
+                {rule.name}
+              </Badge>
+            ))}
+            {assignedRules.length > 3 && (
+              <Badge>+{assignedRules.length - 3}</Badge>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-[var(--color-text-tertiary)] italic">No safety rules</p>
         )}
         <div className="space-y-0.5">
           <Badge variant="info">{roleInfo.label}</Badge>

@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect, useCallback } from "react"
 import { Plus, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getCameras, deleteCamera } from "@/lib/api"
-import type { Camera } from "@/types"
+import { getCameras, deleteCamera, getSafetyRules } from "@/lib/api"
+import type { Camera, SafetyRule } from "@/types"
 import { CameraCard } from "@/components/cameras/CameraCard"
 import { CameraDetailPanel } from "@/components/cameras/CameraDetailPanel"
 import { AddCameraModal } from "@/components/cameras/AddCameraModal"
@@ -11,23 +11,25 @@ import { SearchInput } from "@/components/ui/SearchInput"
 
 export function CameraConfig() {
   const [cameras, setCameras] = useState<Camera[]>([])
+  const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
   const [search, setSearch] = useState("")
   const [modalOpen, setModalOpen] = useState(false)
   const [selectedCamera, setSelectedCamera] = useState<Camera | null>(null)
   const [cameraRoles, setCameraRoles] = useState<Record<string, CameraRole>>({})
 
-  const fetchCameras = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     try {
-      const data = await getCameras()
-      setCameras(data)
+      const [cams, rules] = await Promise.all([getCameras(), getSafetyRules()])
+      setCameras(cams)
+      setSafetyRules(rules)
     } catch {
-      // silently fail — cameras stay empty
+      // silently fail
     }
   }, [])
 
   useEffect(() => {
-    fetchCameras()
-  }, [fetchCameras])
+    fetchData()
+  }, [fetchData])
 
   const filtered = useMemo(() => {
     if (!search.trim()) return cameras
@@ -44,7 +46,7 @@ export function CameraConfig() {
     if (!window.confirm(`Delete camera "${cam?.name || id}"? This cannot be undone.`)) return
     try {
       await deleteCamera(id)
-      await fetchCameras()
+      await fetchData()
       if (selectedCamera?.id === id) setSelectedCamera(null)
     } catch {
       // ignore
@@ -88,6 +90,7 @@ export function CameraConfig() {
             key={cam.id}
             camera={cam}
             role={cameraRoles[cam.id] || "general"}
+            safetyRules={safetyRules}
             onClick={() => setSelectedCamera(cam)}
             onDelete={() => handleDelete(cam.id)}
           />
@@ -103,7 +106,7 @@ export function CameraConfig() {
       {modalOpen && (
         <AddCameraModal
           onClose={() => setModalOpen(false)}
-          onAdded={fetchCameras}
+          onAdded={fetchData}
         />
       )}
 
@@ -114,7 +117,7 @@ export function CameraConfig() {
           role={cameraRoles[selectedCamera.id] || "general"}
           onRoleChange={(role) => setCameraRoles((prev) => ({ ...prev, [selectedCamera.id]: role }))}
           onClose={() => setSelectedCamera(null)}
-          onUpdated={fetchCameras}
+          onUpdated={fetchData}
           onDelete={() => handleDelete(selectedCamera.id)}
         />
       )}

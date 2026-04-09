@@ -1,13 +1,13 @@
 import { useState, useEffect } from "react"
-import { Trash2, X, ChevronDown, ChevronRight } from "lucide-react"
+import { Trash2, X, ChevronDown, ChevronRight, Eye, Zap } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { SeverityBadge } from "@/components/ui/SeverityBadge"
 import { updateCamera, API_BASE, getSafetyRules } from "@/lib/api"
 import type { Camera, SafetyRule } from "@/types"
 import { CAMERA_ROLES, statusVariant } from "./constants"
 import type { CameraRole } from "./constants"
-import { Field, InfoRow } from "./helpers"
+import { Field, InfoRow, inferDetectionMode } from "./helpers"
+import { SafetyRuleSelector } from "./SafetyRuleSelector"
 
 interface CameraDetailPanelProps {
   camera: Camera
@@ -38,30 +38,27 @@ export function CameraDetailPanel({
   const [saving, setSaving] = useState(false)
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
   const [safetyRuleIds, setSafetyRuleIds] = useState<string[]>(camera.safety_rule_ids || [])
-  const [showAdvancedClasses, setShowAdvancedClasses] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [demoManuallySet, setDemoManuallySet] = useState(false)
 
   useEffect(() => {
     getSafetyRules().then(setSafetyRules).catch(() => {})
   }, [])
 
   const variant = statusVariant[camera.status] || "default"
+  const inferred = inferDetectionMode(safetyRuleIds, safetyRules)
+
+  useEffect(() => {
+    if (editing && !demoManuallySet && safetyRuleIds.length > 0) {
+      setDemo(inferred.mode)
+    }
+  }, [safetyRuleIds, editing, demoManuallySet, inferred.mode])
 
   function toggleSafetyRule(ruleId: string) {
     setSafetyRuleIds((prev) =>
       prev.includes(ruleId) ? prev.filter((id) => id !== ruleId) : [...prev, ruleId]
     )
   }
-
-  const ppeRulesEnabled = safetyRules.filter((r) => r.type === "ppe" && r.enabled)
-  const alertRulesEnabled = safetyRules.filter((r) => r.type === "alert" && r.enabled)
-
-  const derivedClasses = Array.from(
-    new Set(
-      safetyRules
-        .filter((r) => safetyRuleIds.includes(r.id) && r.enabled)
-        .flatMap((r) => r.classes)
-    )
-  )
 
   async function handleSave() {
     setSaving(true)
@@ -85,6 +82,8 @@ export function CameraDetailPanel({
       setSaving(false)
     }
   }
+
+  const assignedRules = safetyRules.filter((r) => (camera.safety_rule_ids || []).includes(r.id))
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -132,6 +131,34 @@ export function CameraDetailPanel({
                   className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
               </Field>
 
+              {/* ── Safety Rules (Hero Section) ── */}
+              <div className="border-t pt-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <Eye className="w-4 h-4 text-[var(--color-info)]" />
+                  <p className="text-sm font-semibold text-[var(--color-text-primary)]">
+                    What Should This Camera Watch For?
+                  </p>
+                </div>
+                <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
+                  Select the safety rules this camera will enforce
+                </p>
+                <SafetyRuleSelector
+                  safetyRules={safetyRules}
+                  selectedIds={safetyRuleIds}
+                  onToggle={toggleSafetyRule}
+                  prominent
+                />
+                {safetyRuleIds.length > 0 && (
+                  <div className="mt-3 flex items-center gap-2 p-2 rounded-[var(--radius-md)] bg-[var(--color-info-bg)]">
+                    <Zap className="w-3.5 h-3.5 text-[var(--color-info)] shrink-0" />
+                    <span className="text-xs text-[var(--color-text-secondary)]">
+                      Detection: {inferred.mode === "yoloe" ? "YOLOe Open-Vocab" : "COCO (80 classes)"} — {inferred.reason}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Source ── */}
               <div className="border-t pt-4">
                 <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-3">Source</p>
                 <Field label="Stream Type">
@@ -153,105 +180,50 @@ export function CameraDetailPanel({
                 )}
               </div>
 
+              {/* ── Advanced Detection (collapsible) ── */}
               <div className="border-t pt-4">
-                <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-3">Detection</p>
-                <Field label="Detection Mode">
-                  <select value={demo} onChange={(e) => setDemo(e.target.value)}
-                    className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 cursor-pointer">
-                    <option value="yolo">COCO (80 classes)</option>
-                    <option value="yoloe">YOLOe Open-Vocab</option>
-                    <option value="yolo+vlm">COCO + VLM</option>
-                  </select>
-                </Field>
-                {(ppeRulesEnabled.length > 0 || alertRulesEnabled.length > 0) && (
-                  <div className="border-t pt-4">
-                    <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-3">Safety Rules</p>
-                    {ppeRulesEnabled.length > 0 && (
-                      <div className="mb-3">
-                        <p className="text-xs font-medium text-[var(--color-text-secondary)] mb-2">PPE Rules</p>
-                        <div className="space-y-2">
-                          {ppeRulesEnabled.map((rule) => (
-                            <label
-                              key={rule.id}
-                              className={`flex items-center gap-3 p-3 rounded-[var(--radius-md)] border cursor-pointer transition-colors ${
-                                safetyRuleIds.includes(rule.id) ? "border-[var(--color-info)] bg-blue-50" : "border-[var(--color-border)]"
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={safetyRuleIds.includes(rule.id)}
-                                onChange={() => toggleSafetyRule(rule.id)}
-                                className="accent-[var(--color-info)]"
-                              />
-                              <div className="flex-1">
-                                <span className="text-sm font-medium text-[var(--color-text-primary)]">{rule.name}</span>
-                                <span className="text-xs text-[var(--color-text-tertiary)] ml-2">
-                                  {rule.classes.join(", ")}
-                                </span>
-                              </div>
-                              <SeverityBadge severity={rule.severity} />
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {alertRulesEnabled.length > 0 && (
-                      <div className="mb-3">
-                        <p className="text-xs font-medium text-[var(--color-text-secondary)] mb-2">Alert Rules</p>
-                        <div className="space-y-2">
-                          {alertRulesEnabled.map((rule) => (
-                            <label
-                              key={rule.id}
-                              className={`flex items-center gap-3 p-3 rounded-[var(--radius-md)] border cursor-pointer transition-colors ${
-                                safetyRuleIds.includes(rule.id) ? "border-[var(--color-info)] bg-blue-50" : "border-[var(--color-border)]"
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={safetyRuleIds.includes(rule.id)}
-                                onChange={() => toggleSafetyRule(rule.id)}
-                                className="accent-[var(--color-info)]"
-                              />
-                              <div className="flex-1">
-                                <span className="text-sm font-medium text-[var(--color-text-primary)]">{rule.name}</span>
-                                <span className="text-xs text-[var(--color-text-tertiary)] ml-2">
-                                  {rule.classes.join(", ")}
-                                </span>
-                              </div>
-                              <SeverityBadge severity={rule.severity} />
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {derivedClasses.length > 0 && demo === "yoloe" && (
-                      <p className="text-xs text-[var(--color-text-tertiary)]">
-                        Derived YOLOe classes: {derivedClasses.join(", ")}
-                      </p>
-                    )}
-                  </div>
-                )}
-                {demo === "yoloe" && (
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => setShowAdvancedClasses(!showAdvancedClasses)}
-                      className="flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] cursor-pointer mb-1"
-                    >
-                      {showAdvancedClasses ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                      Advanced: Custom YOLOe Classes
-                    </button>
-                    {showAdvancedClasses && (
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  className="flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+                >
+                  {showAdvanced ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  Advanced: Detection Mode Override
+                </button>
+                {showAdvanced && (
+                  <div className="mt-3 space-y-3">
+                    <Field label="Detection Mode">
+                      <select value={demo} onChange={(e) => { setDemo(e.target.value); setDemoManuallySet(true) }}
+                        className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 cursor-pointer">
+                        <option value="yolo">COCO (80 classes)</option>
+                        <option value="yoloe">YOLOe Open-Vocab</option>
+                        <option value="yolo+vlm">COCO + VLM</option>
+                      </select>
+                    </Field>
+                    {demo === "yoloe" && (
                       <Field label="YOLOe Classes (comma-separated)">
                         <input type="text" value={yoloeClasses} onChange={(e) => setYoloeClasses(e.target.value)}
                           placeholder="person, hard hat, safety vest"
                           className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
                       </Field>
                     )}
+                    {demoManuallySet && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDemoManuallySet(false)
+                          if (safetyRuleIds.length > 0) setDemo(inferred.mode)
+                        }}
+                        className="text-xs text-[var(--color-info)] hover:underline cursor-pointer"
+                      >
+                        Reset to auto-detected mode
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
 
+              {/* ── Role ── */}
               <div className="border-t pt-4">
                 <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-3">Role</p>
                 <Field label="Camera Role">
@@ -288,22 +260,30 @@ export function CameraDetailPanel({
             </div>
           ) : (
             <div className="space-y-4">
+              {/* Safety Rules (prominent in read-only view) */}
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Eye className="w-3.5 h-3.5 text-[var(--color-info)]" />
+                  <span className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">Safety Rules</span>
+                </div>
+                {assignedRules.length > 0 ? (
+                  <SafetyRuleSelector
+                    safetyRules={safetyRules}
+                    selectedIds={camera.safety_rule_ids || []}
+                    onToggle={() => {}}
+                    readOnly
+                  />
+                ) : (
+                  <p className="text-xs text-[var(--color-text-tertiary)] italic py-2">
+                    No safety rules assigned. Click Edit to configure what this camera watches for.
+                  </p>
+                )}
+              </div>
+
               <InfoRow label="Source" value={camera.stream_type === "rtsp" ? camera.rtsp_url : camera.video} />
               <InfoRow label="Stream Type" value={camera.stream_type === "rtsp" ? "RTSP" : "Video File"} />
               <InfoRow label="Zone" value={camera.zone} />
               <InfoRow label="Detection Mode" value={camera.demo === "yoloe" ? "YOLOe Open-Vocab" : camera.demo === "yolo+vlm" ? "COCO + VLM" : "COCO (80 classes)"} />
-              {(camera.safety_rule_ids || []).length > 0 && (
-                <div>
-                  <span className="text-xs font-medium text-[var(--color-text-secondary)] block mb-1">Safety Rules</span>
-                  <div className="flex flex-wrap gap-1">
-                    {safetyRules
-                      .filter((r) => (camera.safety_rule_ids || []).includes(r.id))
-                      .map((r) => (
-                        <Badge key={r.id} variant={r.type === "ppe" ? "info" : "warning"}>{r.name}</Badge>
-                      ))}
-                  </div>
-                </div>
-              )}
               {camera.demo === "yoloe" && (
                 <div>
                   <span className="text-xs font-medium text-[var(--color-text-secondary)] block mb-1">YOLOe Classes</span>
