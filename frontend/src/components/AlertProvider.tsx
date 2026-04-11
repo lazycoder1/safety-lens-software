@@ -18,6 +18,7 @@ export const useAlertConnection = create<AlertConnectionStore>((set) => ({
 export function AlertProvider() {
   const wsRef = useRef<WebSocket | null>(null)
   const addOrUpdateAlert = useAlertStore((s) => s.addOrUpdateAlert)
+  const fetchAlerts = useAlertStore((s) => s.fetchAlerts)
   const setConnected = useAlertConnection((s) => s.setConnected)
   const token = useAuthStore((s) => s.token)
 
@@ -27,6 +28,12 @@ export function AlertProvider() {
     let retryDelay = 2000
     let cancelled = false
 
+    // Backfill the alert store on (re)connect so alerts that fired while
+    // this client was offline still show up in the Live Alerts panel.
+    // Without this, the panel only shows alerts received via WebSocket
+    // push since the user's current session started.
+    fetchAlerts().catch(() => {})
+
     function connect() {
       if (cancelled) return
       const ws = new WebSocket(`${WS_BASE}/ws/alerts?token=${token}`)
@@ -35,6 +42,9 @@ export function AlertProvider() {
       ws.onopen = () => {
         setConnected(true)
         retryDelay = 2000
+        // Re-backfill on every successful reconnect, not just initial mount.
+        // If the WS dropped and we missed a push, this catches us up.
+        fetchAlerts().catch(() => {})
       }
 
       ws.onmessage = (event) => {
@@ -66,7 +76,7 @@ export function AlertProvider() {
       cancelled = true
       wsRef.current?.close()
     }
-  }, [addOrUpdateAlert, setConnected, token])
+  }, [addOrUpdateAlert, fetchAlerts, setConnected, token])
 
   return null
 }

@@ -12,9 +12,14 @@ interface AlertStore {
   alerts: Alert[]
   loading: boolean
   error: string | null
+  // ISO timestamp — alerts with timestamp <= hiddenBefore are filtered out
+  // from the Live Alerts panel view. Server data is untouched. Reset to null
+  // by reload (intentionally ephemeral per-session).
+  hiddenBefore: string | null
 
   fetchAlerts: () => Promise<void>
   addOrUpdateAlert: (alert: Alert) => void
+  clearView: () => void
 
   acknowledge: (id: string) => Promise<void>
   snooze: (id: string, minutes?: number) => Promise<void>
@@ -26,6 +31,9 @@ export const useAlertStore = create<AlertStore>((set, get) => ({
   alerts: [],
   loading: true,
   error: null,
+  hiddenBefore: null,
+
+  clearView: () => set({ hiddenBefore: new Date().toISOString() }),
 
   fetchAlerts: async () => {
     set({ loading: true, error: null })

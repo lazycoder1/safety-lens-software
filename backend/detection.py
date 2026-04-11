@@ -225,6 +225,54 @@ def bbox_center_normalized(bbox: list[int], frame_w: int, frame_h: int) -> tuple
     return cx, cy
 
 
+def bbox_probe_points_normalized(bbox: list[int], frame_w: int, frame_h: int) -> list[tuple[float, float]]:
+    """Return a set of normalized (0-1) test points for bbox-vs-polygon overlap.
+
+    We can't easily do a true polygon-polygon intersection cheaply, so we
+    approximate: test the four corners, the center, and the foot-center
+    (bottom-center where a person actually stands). If ANY of these points
+    lies inside the polygon we treat it as an intrusion. This matches user
+    intent — "if a person is visibly in the drawn area, alert" — much better
+    than a single torso point.
+    """
+    x1, y1, x2, y2 = bbox
+    fw, fh = float(frame_w), float(frame_h)
+    points = [
+        (x1 / fw, y1 / fh),                 # top-left
+        (x2 / fw, y1 / fh),                 # top-right
+        (x1 / fw, y2 / fh),                 # bottom-left
+        (x2 / fw, y2 / fh),                 # bottom-right
+        ((x1 + x2) / 2 / fw, (y1 + y2) / 2 / fh),  # center
+        ((x1 + x2) / 2 / fw, y2 / fh),      # foot-center
+    ]
+    return points
+
+
+def bbox_intersects_polygon(bbox: list[int], polygon: list[list[float]], frame_w: int, frame_h: int) -> bool:
+    """True if the person's bounding box visibly overlaps the polygon.
+
+    Fast approximation — checks if any probe point of the bbox lies inside
+    the polygon, or if any polygon vertex lies inside the (normalized) bbox.
+    The second check catches the edge case where the polygon is entirely
+    contained inside the bbox (common when the user draws a tight zone on a
+    close-up shot).
+    """
+    if len(polygon) < 3:
+        return False
+    for (px, py) in bbox_probe_points_normalized(bbox, frame_w, frame_h):
+        if point_in_polygon(px, py, polygon):
+            return True
+    # Reverse check: any polygon vertex inside the person's bbox?
+    x1n = bbox[0] / frame_w
+    y1n = bbox[1] / frame_h
+    x2n = bbox[2] / frame_w
+    y2n = bbox[3] / frame_h
+    for vx, vy in polygon:
+        if x1n <= vx <= x2n and y1n <= vy <= y2n:
+            return True
+    return False
+
+
 def check_zone_intrusions(detections: list, camera_id: str, frame_w: int, frame_h: int) -> list:
     """Check if detected persons are inside any restricted zones for this camera."""
     cfg = get_config()
@@ -252,8 +300,7 @@ def check_zone_intrusions(detections: list, camera_id: str, frame_w: int, frame_
         intruders = 0
         max_conf = 0.0
         for p in persons:
-            cx, cy = bbox_center_normalized(p["bbox"], frame_w, frame_h)
-            if point_in_polygon(cx, cy, points):
+            if bbox_intersects_polygon(p["bbox"], points, frame_w, frame_h):
                 intruders += 1
                 max_conf = max(max_conf, p["confidence"])
 

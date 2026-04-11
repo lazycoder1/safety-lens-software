@@ -45,6 +45,14 @@ export interface Camera {
   safety_rule_ids?: string[]
 }
 
+export interface Zone {
+  id: string
+  name: string
+  type: string
+  color: string
+  points: number[][]
+}
+
 export interface SafetyRule {
   id: string
   name: string

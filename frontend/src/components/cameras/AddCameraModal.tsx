@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react"
-import { X, Eye, Zap, ChevronDown, ChevronRight } from "lucide-react"
+import { X, Eye, Zap, ChevronDown, ChevronRight, Shield, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getVideos, addCamera, getSafetyRules } from "@/lib/api"
-import type { SafetyRule } from "@/types"
+import { getVideos, addCamera, getSafetyRules, addZone, getZones, deleteZone, API_BASE } from "@/lib/api"
+import type { SafetyRule, Zone } from "@/types"
 import { Field, inferDetectionMode } from "./helpers"
 import { SafetyRuleSelector } from "./SafetyRuleSelector"
+import { PolygonDrawer } from "@/components/zones/PolygonDrawer"
 
 interface AddCameraModalProps {
   onClose: () => void
@@ -26,6 +27,9 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
   const [saving, setSaving] = useState(false)
   const [demoManuallySet, setDemoManuallySet] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [step, setStep] = useState<"setup" | "zones">("setup")
+  const [newCamId, setNewCamId] = useState<string | null>(null)
+  const [savedZones, setSavedZones] = useState<Zone[]>([])
 
   useEffect(() => {
     getVideos().then((v) => {
@@ -52,7 +56,7 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
   async function handleSave() {
     setSaving(true)
     try {
-      await addCamera({
+      const created = await addCamera({
         name,
         video: streamType === "file" ? video : "",
         zone,
@@ -63,8 +67,9 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
         rtsp_url: streamType === "rtsp" ? rtspUrl : "",
         safety_rule_ids: safetyRuleIds,
       })
+      setNewCamId(created.id)
       await onAdded()
-      onClose()
+      setStep("zones")
     } catch {
       // ignore
     } finally {
@@ -72,13 +77,39 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
     }
   }
 
+  async function handleSaveZone(zone: { name: string; type: string; color: string; points: number[][] }) {
+    if (!newCamId) return
+    await addZone(newCamId, zone)
+    const updated = await getZones(newCamId)
+    setSavedZones(updated)
+  }
+
+  async function handleDeleteSavedZone(zoneId: string) {
+    if (!newCamId) return
+    try {
+      await deleteZone(newCamId, zoneId)
+      setSavedZones((prev) => prev.filter((z) => z.id !== zoneId))
+    } catch {
+      // ignore
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-[var(--radius-xl)] shadow-xl w-full max-w-lg mx-4 max-h-[85vh] overflow-y-auto">
+      <div className={`relative bg-white rounded-[var(--radius-xl)] shadow-xl w-full ${step === "zones" ? "max-w-3xl" : "max-w-lg"} mx-4 max-h-[90vh] overflow-y-auto`}>
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b">
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Add Camera</h2>
+          <div>
+            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
+              {step === "setup" ? "Add Camera" : "Draw Restricted Zones"}
+            </h2>
+            {step === "zones" && (
+              <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+                Optional — draw one or more polygons on the live feed. A person entering a restricted zone will trigger a P1 alert.
+              </p>
+            )}
+          </div>
           <button
             onClick={onClose}
             className="p-1 rounded-[var(--radius-sm)] hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] transition-colors cursor-pointer"
@@ -87,6 +118,7 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
           </button>
         </div>
 
+        {step === "setup" ? (
         <div className="p-5 space-y-4">
           <Field label="Camera Name">
             <input
@@ -242,13 +274,65 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
 
           <div className="flex items-center gap-2 pt-4 border-t">
             <Button onClick={handleSave} disabled={!name || (streamType === "file" && !video) || (streamType === "rtsp" && !rtspUrl) || saving}>
-              {saving ? "Saving..." : "Add Camera"}
+              {saving ? "Saving..." : "Next: Add Camera"}
             </Button>
             <Button variant="secondary" onClick={onClose}>
               Cancel
             </Button>
           </div>
         </div>
+        ) : (
+        <div className="p-5 space-y-4">
+          {newCamId && (
+            <PolygonDrawer
+              imageUrl={`${API_BASE}/api/stream/${newCamId}`}
+              existingZones={savedZones}
+              onSave={handleSaveZone}
+            />
+          )}
+
+          {savedZones.length > 0 && (
+            <div className="border rounded-[var(--radius-md)] p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Shield className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
+                <p className="text-xs font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
+                  {savedZones.length} zone{savedZones.length !== 1 ? "s" : ""} saved
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                {savedZones.map((z) => (
+                  <div key={z.id} className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: z.color }} />
+                      <span className="text-[var(--color-text-primary)]">{z.name}</span>
+                      <span className="text-xs text-[var(--color-text-tertiary)]">
+                        {z.type} · {z.points.length} pts
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteSavedZone(z.id)}
+                      className="p-1 rounded hover:bg-[var(--color-critical-bg)] text-[var(--color-text-tertiary)] hover:text-[var(--color-critical)] cursor-pointer transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 pt-4 border-t">
+            <Button onClick={onClose}>
+              {savedZones.length > 0 ? "Done" : "Skip & Finish"}
+            </Button>
+            {savedZones.length === 0 && (
+              <span className="text-xs text-[var(--color-text-tertiary)]">
+                Zones can also be added later from Zone Management.
+              </span>
+            )}
+          </div>
+        </div>
+        )}
       </div>
     </div>
   )

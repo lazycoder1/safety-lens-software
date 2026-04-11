@@ -31,25 +31,37 @@ interface CameraInfo {
 export function LiveView() {
   const [searchParams, setSearchParams] = useSearchParams()
   const focusedCamId = searchParams.get("cam")
-  const [gridCols, setGridCols] = useState(2)
+  const [gridCols, setGridCols] = useState(3)
   const [cameras, setCameras] = useState<CameraInfo[]>([])
   const [vlmResult, setVlmResult] = useState<{ text: string; timestamp: string; elapsed: number } | null>(null)
   const [page, setPage] = useState(0)
   const connected = useAlertConnection((s) => s.connected)
   const alerts = useAlertStore((s) => s.alerts)
 
-  const PAGE_SIZE = 6
+  // Page size matches the visible grid (2×2 = 4, 3×3 = 9) so no slots are wasted.
+  const pageSize = gridCols * gridCols
   const focusCamera = (camId: string) => setSearchParams({ cam: camId })
   const unfocusCamera = () => setSearchParams({})
-  const totalPages = Math.ceil(cameras.length / PAGE_SIZE)
-  const pagedCameras = cameras.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const totalPages = Math.ceil(cameras.length / pageSize)
+  const pagedCameras = cameras.slice(page * pageSize, (page + 1) * pageSize)
   const displayedCameras = focusedCamId ? cameras.filter((c) => c.id === focusedCamId) : pagedCameras
 
-  // Fetch cameras on mount
+  // Clamp page when camera count or grid size shrinks the pagination
   useEffect(() => {
-    fetchCameras()
-      .then((data) => setCameras(data))
-      .catch(() => setCameras([]))
+    if (totalPages > 0 && page > totalPages - 1) setPage(totalPages - 1)
+  }, [totalPages, page])
+
+  // Fetch cameras on mount + poll so newly-added cameras appear without a reload
+  useEffect(() => {
+    let cancelled = false
+    const load = () => {
+      fetchCameras()
+        .then((data) => { if (!cancelled) setCameras(data) })
+        .catch(() => { if (!cancelled) setCameras([]) })
+    }
+    load()
+    const interval = setInterval(load, 10000)
+    return () => { cancelled = true; clearInterval(interval) }
   }, [])
 
   // Poll VLM result (backend returns { cam_id: { text, timestamp, elapsed } })

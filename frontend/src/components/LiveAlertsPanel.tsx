@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { CheckCircle2, Brain, PanelRightOpen, PanelRightClose } from "lucide-react"
+import { CheckCircle2, Brain, PanelRightOpen, PanelRightClose, Eraser } from "lucide-react"
 import { severityConfig, severityVariantMap } from "@/lib/constants"
 import type { Severity } from "@/types"
 import { cn, timeAgo } from "@/lib/utils"
@@ -14,7 +14,9 @@ import { playP1AlertSound } from "@/lib/alertSound"
 export function LiveAlertsPanel() {
   const [panelOpen, setPanelOpen] = useState(true)
   const alerts = useAlertStore((s) => s.alerts)
+  const hiddenBefore = useAlertStore((s) => s.hiddenBefore)
   const acknowledge = useAlertStore((s) => s.acknowledge)
+  const clearView = useAlertStore((s) => s.clearView)
   const openModal = useViolationModal((s) => s.open)
   const userRole = useAuthStore((s) => s.user?.role)
   const canAct = userRole === "admin" || userRole === "operator"
@@ -45,7 +47,12 @@ export function LiveAlertsPanel() {
     [acknowledge],
   )
 
-  const liveAlerts = alerts.slice(0, 100)
+  // Filter out alerts dismissed by the Clear button. The server data is
+  // untouched — this is a per-session view filter only.
+  const visibleAlerts = hiddenBefore
+    ? alerts.filter((a) => a.timestamp > hiddenBefore)
+    : alerts
+  const liveAlerts = visibleAlerts.slice(0, 100)
   const activeAlerts = liveAlerts.filter((a) => a.status === "active")
 
   if (!panelOpen) {
@@ -84,6 +91,16 @@ export function LiveAlertsPanel() {
           <span className="text-[10px] text-[var(--color-text-tertiary)]">
             {liveAlerts.length} total
           </span>
+          {liveAlerts.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearView}
+              title="Clear alerts from view (does not delete from history)"
+            >
+              <Eraser size={14} />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

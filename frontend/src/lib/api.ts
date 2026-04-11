@@ -19,6 +19,24 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+export class ApiError extends Error {
+  status?: number
+  isNetwork: boolean
+  isTimeout: boolean
+  constructor(message: string, opts: { status?: number; isNetwork?: boolean; isTimeout?: boolean } = {}) {
+    super(message)
+    this.name = "ApiError"
+    this.status = opts.status
+    this.isNetwork = opts.isNetwork ?? false
+    this.isTimeout = opts.isTimeout ?? false
+  }
+}
+
+// Backoff delays for network-error retries. Only genuine TypeError (request
+// never reached server) is retried — not timeouts or HTTP errors.
+const NETWORK_RETRY_DELAYS_MS = [250, 750, 1500]
+const DEFAULT_TIMEOUT_MS = 30000
+
 async function request(path: string, options?: RequestInit) {
   const token = getToken()
   const headers: Record<string, string> = {
@@ -27,32 +45,61 @@ async function request(path: string, options?: RequestInit) {
   if (token) {
     headers["Authorization"] = `Bearer ${token}`
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
-  if (res.status === 401 && !path.startsWith("/api/auth/")) {
-    clearToken()
-    window.location.href = "/login"
-    throw new Error("Session expired")
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "")
-    let message: string
+
+  const totalAttempts = NETWORK_RETRY_DELAYS_MS.length + 1
+  for (let attempt = 0; attempt < totalAttempts; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    let res: Response
     try {
-      const json = JSON.parse(text)
-      message = json.detail || json.message || json.error || ""
-    } catch {
-      message = ""
+      res = await fetch(`${API_BASE}${path}`, { ...options, headers, signal: controller.signal })
+    } catch (err: unknown) {
+      clearTimeout(timer)
+      const isAbort = (err as { name?: string })?.name === "AbortError"
+      const isNetwork = err instanceof TypeError
+      if (isAbort) {
+        // Don't retry timeouts — server may have processed the request.
+        throw new ApiError("Server didn't respond in time. Please try again.", { isTimeout: true })
+      }
+      if (isNetwork && attempt < totalAttempts - 1) {
+        await new Promise((r) => setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt]))
+        continue
+      }
+      if (isNetwork) {
+        throw new ApiError("Can't reach the server. Check your connection and try again.", { isNetwork: true })
+      }
+      throw err
     }
-    if (!message) {
-      if (res.status === 401) message = "Invalid credentials or account not active"
-      else if (res.status === 403) message = "You don't have permission to do that"
-      else if (res.status === 404) message = "Resource not found"
-      else if (res.status === 409) message = "This action conflicts with existing data"
-      else if (res.status >= 500) message = "Server error — please try again later"
-      else message = "Something went wrong"
+    clearTimeout(timer)
+
+    if (res.status === 401 && !path.startsWith("/api/auth/")) {
+      clearToken()
+      window.location.href = "/login"
+      throw new ApiError("Session expired", { status: 401 })
     }
-    throw new Error(message)
+    if (!res.ok) {
+      const text = await res.text().catch(() => "")
+      let message: string
+      try {
+        const json = JSON.parse(text)
+        message = json.detail || json.message || json.error || ""
+      } catch {
+        message = ""
+      }
+      if (!message) {
+        if (res.status === 401) message = "Invalid credentials or account not active"
+        else if (res.status === 403) message = "You don't have permission to do that"
+        else if (res.status === 404) message = "Resource not found"
+        else if (res.status === 409) message = "This action conflicts with existing data"
+        else if (res.status >= 500) message = "Server error — please try again later"
+        else message = "Something went wrong"
+      }
+      throw new ApiError(message, { status: res.status })
+    }
+    return res.json()
   }
-  return res.json()
+  // Unreachable — loop always returns or throws.
+  throw new ApiError("Request failed", { isNetwork: true })
 }
 
 // Auth
