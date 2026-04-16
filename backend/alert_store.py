@@ -273,6 +273,64 @@ def get_time_series(hours: int = 24) -> list[dict]:
     return list(hourly.values())
 
 
+def get_compliance_metrics(window_hours: int = 24) -> dict:
+    """Aggregate safety KPIs over the last N hours.
+
+    - safety_compliance_pct: % of hour-buckets with zero P1/P2 alerts
+    - ppe_compliance_pct:    % of hour-buckets with zero Missing-X alerts
+    - mtta_seconds:          mean (acknowledged_at - timestamp) for alerts acked in window, or None
+    - active_p1_count / active_p2_count: snapshot of current active severities
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    since_iso = since.isoformat()
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Hourly buckets labeled with whether they contain P1/P2 alerts or Missing-X (PPE) alerts
+            cur.execute(
+                """SELECT
+                    date_trunc('hour', timestamp::timestamp) AS hour,
+                    bool_or(severity IN ('P1','P2')) AS has_critical,
+                    bool_or(rule LIKE %s) AS has_ppe_miss
+                FROM alerts
+                WHERE timestamp >= %s
+                GROUP BY hour""",
+                ("Missing %", since_iso),
+            )
+            bucket_rows = cur.fetchall()
+            bad_safety_hours = sum(1 for r in bucket_rows if r["has_critical"])
+            bad_ppe_hours = sum(1 for r in bucket_rows if r["has_ppe_miss"])
+
+            # MTTA: only alerts whose timestamp falls in the window AND were acknowledged
+            cur.execute(
+                """SELECT AVG(EXTRACT(EPOCH FROM (acknowledged_at::timestamp - timestamp::timestamp))) AS mtta
+                FROM alerts
+                WHERE acknowledged_at IS NOT NULL AND timestamp >= %s""",
+                (since_iso,),
+            )
+            mtta_row = cur.fetchone()
+            mtta = mtta_row["mtta"] if mtta_row and mtta_row["mtta"] is not None else None
+
+            # Current active alerts by severity (point-in-time, not window-scoped)
+            cur.execute(
+                "SELECT severity, COUNT(*) AS cnt FROM alerts WHERE status='active' GROUP BY severity"
+            )
+            active_by_sev = {row["severity"]: row["cnt"] for row in cur.fetchall()}
+
+    total_hours = max(window_hours, 1)
+    safety_pct = round(100.0 * (total_hours - bad_safety_hours) / total_hours, 1)
+    ppe_pct = round(100.0 * (total_hours - bad_ppe_hours) / total_hours, 1)
+
+    return {
+        "safety_compliance_pct": max(0.0, min(100.0, safety_pct)),
+        "ppe_compliance_pct": max(0.0, min(100.0, ppe_pct)),
+        "mtta_seconds": round(float(mtta), 1) if mtta is not None else None,
+        "active_p1_count": int(active_by_sev.get("P1", 0)),
+        "active_p2_count": int(active_by_sev.get("P2", 0)),
+        "window_hours": window_hours,
+    }
+
+
 def _row_to_dict(row: dict) -> dict:
     snapshot = row["snapshot_path"]
     raw_bboxes = row.get("bboxes")

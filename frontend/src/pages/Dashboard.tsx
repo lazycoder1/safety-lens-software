@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from "react"
-import { ArrowUp, ArrowDown, Minus, RefreshCw } from "lucide-react"
+import { Link } from "react-router-dom"
+import { AlertTriangle, CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { useAlertStore } from "@/stores/alertStore"
-import { getAlertStats, getCameras, getAlertTimeSeries } from "@/lib/api"
+import { getAlertStats, getCameras, getAlertTimeSeries, getComplianceMetrics } from "@/lib/api"
 import {
   AreaChart,
   Area,
@@ -31,15 +32,44 @@ interface Stats {
   byCamera: Record<string, number>
 }
 
-function complianceCellColor(value: number): string {
-  if (value > 95) return "bg-[var(--color-success-bg)] text-[#065f46]"
-  if (value >= 85) return "bg-[var(--color-warning-bg)] text-[#92400e]"
-  return "bg-[var(--color-critical-bg)] text-[#991b1b]"
+interface Compliance {
+  safety_compliance_pct: number
+  ppe_compliance_pct: number
+  mtta_seconds: number | null
+  active_p1_count: number
+  active_p2_count: number
+  window_hours: number
 }
 
+type TrafficLight = "green" | "amber" | "red"
+
+function lightFromThresholds(value: number, green: number, amber: number): TrafficLight {
+  if (value >= green) return "green"
+  if (value >= amber) return "amber"
+  return "red"
+}
+
+function lightClasses(light: TrafficLight): { border: string; value: string } {
+  if (light === "green")
+    return { border: "border-l-[var(--color-success)]", value: "text-[var(--color-success)]" }
+  if (light === "amber")
+    return { border: "border-l-[var(--color-warning)]", value: "text-[var(--color-warning)]" }
+  return { border: "border-l-[var(--color-critical)]", value: "text-[var(--color-critical)]" }
+}
+
+function formatMtta(seconds: number | null): string {
+  if (seconds == null) return "—"
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  return s === 0 ? `${m}m` : `${m}m ${s}s`
+}
+
+
 export function Dashboard() {
-  const { alerts, fetchAlerts } = useAlertStore()
+  const { fetchAlerts } = useAlertStore()
   const [stats, setStats] = useState<Stats | null>(null)
+  const [compliance, setCompliance] = useState<Compliance | null>(null)
   const [cameraCount, setCameraCount] = useState({ total: 0, online: 0 })
   const [timeSeries, setTimeSeries] = useState<any[]>([])
   const [refreshing, setRefreshing] = useState(false)
@@ -48,8 +78,14 @@ export function Dashboard() {
     setRefreshing(true)
     try {
       await fetchAlerts()
-      const [s, cams, ts] = await Promise.all([getAlertStats(), getCameras(), getAlertTimeSeries(24)])
+      const [s, cams, ts, comp] = await Promise.all([
+        getAlertStats(),
+        getCameras(),
+        getAlertTimeSeries(24),
+        getComplianceMetrics(24),
+      ])
       setStats(s)
+      setCompliance(comp)
       setTimeSeries(
         (ts || []).map((d: any) => ({
           ...d,
@@ -71,39 +107,95 @@ export function Dashboard() {
     return () => clearInterval(interval)
   }, [])
 
-  const activeAlerts = useMemo(() => alerts.filter((a) => a.status === "active"), [alerts])
-
   const kpis = useMemo(() => {
-    if (!stats) return []
-    const resolvedPct = stats.total > 0 ? Math.round((stats.resolved / stats.total) * 100) : 0
+    if (!compliance) return []
+    const uptimePct =
+      cameraCount.total > 0 ? Math.round((cameraCount.online / cameraCount.total) * 100) : 0
+    const offline = cameraCount.total - cameraCount.online
     return [
       {
-        label: "Total Alerts",
-        value: stats.total,
-        change: 0,
-        changeLabel: "all time",
+        label: "Safety Compliance",
+        value: `${compliance.safety_compliance_pct}%`,
+        caption: "last 24h · no P1/P2 violations",
+        light: lightFromThresholds(compliance.safety_compliance_pct, 98, 90),
       },
       {
-        label: "Active Alerts",
-        value: stats.active,
-        change: stats.active > 0 ? -1 : 0,
-        changeLabel: stats.active > 0 ? "needs attention" : "all clear",
-        invertColor: true,
+        label: "PPE Compliance",
+        value: `${compliance.ppe_compliance_pct}%`,
+        caption: "last 24h · helmet + vest",
+        light: lightFromThresholds(compliance.ppe_compliance_pct, 95, 85),
       },
       {
-        label: "Active Cameras",
+        label: "Camera Uptime",
         value: `${cameraCount.online} / ${cameraCount.total}`,
-        change: cameraCount.total === cameraCount.online ? 1 : -1,
-        changeLabel: cameraCount.total === cameraCount.online ? "all online" : `${cameraCount.total - cameraCount.online} offline`,
+        caption:
+          cameraCount.total === 0
+            ? "no cameras configured"
+            : offline === 0
+              ? "all online"
+              : `${offline} offline (${uptimePct}%)`,
+        light:
+          cameraCount.total === 0
+            ? ("amber" as TrafficLight)
+            : lightFromThresholds(uptimePct, 100, 80),
       },
       {
-        label: "Resolved Rate",
-        value: `${resolvedPct}%`,
-        change: resolvedPct >= 80 ? 1 : resolvedPct > 0 ? -1 : 0,
-        changeLabel: "of total alerts",
+        label: "Mean Time to Acknowledge",
+        value: formatMtta(compliance.mtta_seconds),
+        caption:
+          compliance.mtta_seconds == null
+            ? "no alerts acked in 24h"
+            : "avg ack time · last 24h",
+        light:
+          compliance.mtta_seconds == null
+            ? ("amber" as TrafficLight)
+            : compliance.mtta_seconds <= 120
+              ? "green"
+              : compliance.mtta_seconds <= 600
+                ? "amber"
+                : "red",
       },
     ]
-  }, [stats, cameraCount])
+  }, [compliance, cameraCount])
+
+  const safetyBanner = useMemo(() => {
+    if (!compliance) return null
+    const offline = cameraCount.total - cameraCount.online
+    if (compliance.active_p1_count > 0) {
+      return {
+        light: "red" as TrafficLight,
+        icon: ShieldAlert,
+        title: `${compliance.active_p1_count} active P1 alert${compliance.active_p1_count === 1 ? "" : "s"} — critical violations need attention`,
+        detail:
+          compliance.active_p2_count > 0
+            ? `${compliance.active_p2_count} P2 alert${compliance.active_p2_count === 1 ? "" : "s"} also active`
+            : offline > 0
+              ? `${offline} camera${offline === 1 ? "" : "s"} offline`
+              : "All cameras online",
+      }
+    }
+    if (compliance.active_p2_count > 0 || offline > 0) {
+      const bits: string[] = []
+      if (compliance.active_p2_count > 0)
+        bits.push(
+          `${compliance.active_p2_count} active P2 alert${compliance.active_p2_count === 1 ? "" : "s"}`,
+        )
+      if (offline > 0)
+        bits.push(`${offline} camera${offline === 1 ? "" : "s"} offline`)
+      return {
+        light: "amber" as TrafficLight,
+        icon: AlertTriangle,
+        title: "Attention needed",
+        detail: bits.join(" · "),
+      }
+    }
+    return {
+      light: "green" as TrafficLight,
+      icon: CheckCircle2,
+      title: "Safe — no active violations",
+      detail: `${cameraCount.online}/${cameraCount.total} cameras online`,
+    }
+  }, [compliance, cameraCount])
 
   const violationsByZone = useMemo(() => {
     if (!stats?.byZone) return []
@@ -123,7 +215,7 @@ export function Dashboard() {
 
   const maxZoneCount = violationsByZone[0]?.count || 1
 
-  if (!stats) {
+  if (!stats || !compliance) {
     return (
       <div className="flex items-center justify-center h-64 text-sm text-[var(--color-text-tertiary)]">
         Loading dashboard data...
@@ -147,38 +239,53 @@ export function Dashboard() {
         </Button>
       </div>
 
+      {/* Safety status banner */}
+      {safetyBanner && (() => {
+        const { icon: Icon, light, title, detail } = safetyBanner
+        const bgVar =
+          light === "red"
+            ? "var(--color-critical-bg)"
+            : light === "amber"
+              ? "var(--color-warning-bg)"
+              : "var(--color-success-bg)"
+        const fgVar =
+          light === "red"
+            ? "var(--color-critical)"
+            : light === "amber"
+              ? "var(--color-warning)"
+              : "var(--color-success)"
+        return (
+          <div
+            className="flex items-center gap-3 rounded-[var(--radius-md)] border-l-4 px-4 py-3"
+            style={{ backgroundColor: bgVar, borderLeftColor: fgVar }}
+          >
+            <Icon className="w-5 h-5 shrink-0" style={{ color: fgVar }} />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold" style={{ color: fgVar }}>
+                {title}
+              </p>
+              <p className="text-xs text-[var(--color-text-secondary)]">{detail}</p>
+            </div>
+            {(compliance.active_p1_count > 0 || compliance.active_p2_count > 0) && (
+              <Link to="/alerts" className="text-xs font-medium underline" style={{ color: fgVar }}>
+                View alerts
+              </Link>
+            )}
+          </div>
+        )
+      })()}
+
       {/* KPI row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {kpis.map((kpi) => {
-          const invertColor = "invertColor" in kpi && kpi.invertColor
-          const isPositive = invertColor
-            ? kpi.change < 0
-            : kpi.change > 0
-          const isNeutral = kpi.change === 0
-          const borderColor = isNeutral
-            ? "border-l-[var(--color-border-strong)]"
-            : isPositive
-              ? "border-l-[var(--color-success)]"
-              : "border-l-[var(--color-critical)]"
-
+          const { border, value } = lightClasses(kpi.light)
           return (
-            <Card key={kpi.label} className={`border-l-4 ${borderColor}`}>
+            <Card key={kpi.label} className={`border-l-4 ${border}`}>
               <p className="text-xs font-medium text-[var(--color-text-secondary)] mb-1">
                 {kpi.label}
               </p>
-              <p className="text-2xl font-bold text-[var(--color-text-primary)] mb-1">
-                {kpi.value}
-              </p>
-              <div className="flex items-center gap-1 text-xs">
-                {isNeutral ? (
-                  <Minus className="w-3 h-3 text-[var(--color-text-tertiary)]" />
-                ) : isPositive ? (
-                  <ArrowUp className="w-3 h-3 text-[var(--color-success)]" />
-                ) : (
-                  <ArrowDown className="w-3 h-3 text-[var(--color-critical)]" />
-                )}
-                <span className="text-[var(--color-text-tertiary)]">{kpi.changeLabel}</span>
-              </div>
+              <p className={`text-2xl font-bold mb-1 ${value}`}>{kpi.value}</p>
+              <p className="text-xs text-[var(--color-text-tertiary)]">{kpi.caption}</p>
             </Card>
           )
         })}

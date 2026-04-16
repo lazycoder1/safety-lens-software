@@ -35,6 +35,11 @@ async def get_alert_time_series(hours: int = Query(24)):
     return alert_store.get_time_series(hours)
 
 
+@router.get("/alerts/compliance")
+async def get_alert_compliance(hours: int = Query(24, ge=1, le=720)):
+    return alert_store.get_compliance_metrics(window_hours=hours)
+
+
 @router.put("/alerts/{alert_id}/acknowledge", dependencies=[Depends(require_operator_or_admin)])
 async def api_acknowledge_alert(alert_id: str, request: Request):
     by = request.state.user.get("username", "Admin")

@@ -27,10 +27,10 @@ DEFAULT_SAFETY_RULES = [
     {"id": "ppe_goggles", "name": "Safety Goggles", "type": "ppe", "classes": ["safety goggles", "protective eyewear"], "model": "yoloe", "severity": "P2", "enabled": True},
     # Alert rules (type="alert", model="yolo")
     {"id": "alert_mobile_phone", "name": "Mobile Phone Usage", "type": "alert", "classes": ["cell phone"], "model": "yolo", "severity": "P3", "enabled": True},
-    {"id": "alert_animal", "name": "Animal Intrusion", "type": "alert", "classes": ["dog", "cat"], "model": "yolo", "severity": "P3", "enabled": True},
+    {"id": "alert_animal", "name": "Animal Intrusion", "type": "alert", "classes": ["dog", "cat", "deer", "animal"], "model": "yolo", "severity": "P3", "enabled": True, "threshold": 3},
     {"id": "alert_person", "name": "Person Detected", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P4", "enabled": True},
     {"id": "alert_vehicle", "name": "Vehicle Detected", "type": "alert", "classes": ["truck", "car", "motorcycle"], "model": "yolo", "severity": "P4", "enabled": True},
-    {"id": "alert_zone_intrusion", "name": "Zone Intrusion", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P1", "enabled": True},
+    {"id": "alert_zone_intrusion", "name": "Zone Intrusion", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P1", "enabled": True, "threshold": 6},
 ]
 
 # Default alert rule IDs (for migration)

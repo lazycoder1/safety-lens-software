@@ -201,6 +201,10 @@ export async function getAlertTimeSeries(hours: number = 24) {
   return request(`/api/alerts/time-series?hours=${hours}`)
 }
 
+export async function getComplianceMetrics(hours: number = 24) {
+  return request(`/api/alerts/compliance?hours=${hours}`)
+}
+
 // Zones
 export async function getZones(cameraId: string) {
   return request(`/api/cameras/${cameraId}/zones`)

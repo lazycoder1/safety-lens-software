@@ -82,6 +82,36 @@ def draw_detections(
     cam = cfg["cameras"].get(camera_id, {})
     cam_name = cam.get("name", camera_id)
 
+    # Overlay zone polygons so operators can visually verify the configured zone
+    zones = cam.get("zones", [])
+    if zones:
+        fh, fw = annotated.shape[:2]
+        overlay = annotated.copy()
+        for zone in zones:
+            points = zone.get("points", [])
+            if len(points) < 3:
+                continue
+            pts = np.array([[int(x * fw), int(y * fh)] for x, y in points], np.int32)
+            # Hex "#rrggbb" -> BGR for OpenCV; default to red for restricted
+            hex_color = (zone.get("color") or "#dc2626").lstrip("#")
+            try:
+                r = int(hex_color[0:2], 16)
+                g = int(hex_color[2:4], 16)
+                b = int(hex_color[4:6], 16)
+                bgr = (b, g, r)
+            except ValueError:
+                bgr = (38, 38, 220)
+            cv2.fillPoly(overlay, [pts], bgr)
+            cv2.polylines(annotated, [pts], isClosed=True, color=bgr, thickness=2)
+            # Zone name near centroid
+            cx = int(pts[:, 0].mean())
+            cy = int(pts[:, 1].mean())
+            zone_name = zone.get("name", "zone")
+            (tw, th), _ = cv2.getTextSize(zone_name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(annotated, (cx - tw // 2 - 4, cy - th - 6), (cx + tw // 2 + 4, cy + 2), bgr, -1)
+            cv2.putText(annotated, zone_name, (cx - tw // 2, cy - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.addWeighted(overlay, 0.15, annotated, 0.85, 0, annotated)
+
     if demo_label is not None:
         overlay_text = f"{cam_name} | {demo_label}"
     else:
@@ -289,6 +319,13 @@ def check_zone_intrusions(detections: list, camera_id: str, frame_w: int, frame_
     if not persons:
         return []
 
+    # Per-rule threshold override (e.g. require sustained presence before firing)
+    zone_rule = next(
+        (r for r in cfg.get("safety_rules", []) if r.get("id") == "alert_zone_intrusion"),
+        None,
+    )
+    rule_threshold = zone_rule.get("threshold") if zone_rule else None
+
     candidates = []
     for zone in zones:
         zone_name = zone.get("name", "Unknown Zone")
@@ -313,12 +350,13 @@ def check_zone_intrusions(detections: list, camera_id: str, frame_w: int, frame_
                 "confidence": max_conf,
                 "description": f"{intruders} person(s) in {zone_type} zone '{zone_name}'",
                 "source": "YOLO",
+                "threshold": rule_threshold,
             })
 
     return candidates
 
 
-def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h: int) -> list[dict]:
+def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h: int, camera_id: str | None = None) -> list[dict]:
     """Extract and normalize bboxes relevant to a specific violation rule.
     Returns list of {label, bbox: [x1_norm, y1_norm, x2_norm, y2_norm], confidence}."""
     results = []
@@ -344,9 +382,24 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
                 if not has_ppe:
                     results.append({"label": f"Missing {ppe_item.title()}", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
     elif rule == "Zone Intrusion":
+        # Only include persons whose bbox actually overlaps one of this camera's zones.
+        cfg = get_config()
+        zones = cfg["cameras"].get(camera_id, {}).get("zones", []) if camera_id else []
+        zones = [z for z in zones if len(z.get("points", [])) >= 3]
+        if not zones:
+            return results
         for d in detections:
-            if d["class"] == "person":
-                results.append({"label": "Zone Intruder", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+            if d["class"] != "person":
+                continue
+            for zone in zones:
+                if bbox_intersects_polygon(d["bbox"], zone["points"], frame_w, frame_h):
+                    zone_name = zone.get("name", "zone")
+                    results.append({
+                        "label": f"Intruder — {zone_name}",
+                        "bbox": normalize(d["bbox"]),
+                        "confidence": round(d["confidence"], 2),
+                    })
+                    break  # don't double-count persons who overlap multiple zones
     else:
         # Config-driven: look up the safety rule by name to find its classes
         cfg = get_config()
@@ -399,14 +452,12 @@ def check_violations(detections: list, camera_id: str) -> list:
         desc = f"{len(matching)} {rule['name'].lower()} detection(s)"
         if rule["classes"] == ["cell phone"] and persons:
             desc = f"Mobile phone detected near {len(persons)} worker(s)"
-        elif "dog" in rule["classes"] or "cat" in rule["classes"]:
-            dogs = [d for d in matching if d["class"] == "dog"]
-            cats = [d for d in matching if d["class"] == "cat"]
-            parts = []
-            if dogs:
-                parts.append(f"{len(dogs)} dog(s)")
-            if cats:
-                parts.append(f"{len(cats)} cat(s)")
+        elif "dog" in rule["classes"] or "cat" in rule["classes"] or "animal" in rule["classes"]:
+            animal_counts: dict[str, int] = {}
+            for d in matching:
+                cls = d["class"]
+                animal_counts[cls] = animal_counts.get(cls, 0) + 1
+            parts = [f"{count} {name}(s)" for name, count in animal_counts.items()]
             desc = f"Animal detected: {', '.join(parts)}" if parts else desc
 
         candidates.append({
@@ -416,6 +467,7 @@ def check_violations(detections: list, camera_id: str) -> list:
             "confidence": max(d["confidence"] for d in matching),
             "description": desc,
             "source": "YOLO",
+            "threshold": rule.get("threshold"),
         })
 
     return candidates

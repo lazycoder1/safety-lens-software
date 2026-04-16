@@ -193,6 +193,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     last_alert_by_rule: dict[str, float] = {}  # rule_name -> last fire time
     active_violations: set[str] = set()  # currently active violation rules (fire once until cleared)
     violation_streak: dict[str, int] = {}  # rule -> consecutive frames with violation
+    violation_miss: dict[str, int] = {}  # rule -> consecutive frames WITHOUT violation (grace period)
+    # Sliding window: track detection hits in last WINDOW_SIZE frames per rule
+    WINDOW_SIZE = 15  # look at last 15 detection frames (~7.5 seconds at 6fps/3rd frame)
+    violation_window: dict[str, list[bool]] = {}  # rule -> list of booleans (hit/miss)
     frame_counter = 0
     last_annotated = None
 
@@ -271,7 +275,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 annotated = frame
                 state.camera_detections[camera_id] = []
 
-            # Check for violations (state-based with streak: must persist N frames before firing)
+            # Check for violations (sliding window: N hits out of WINDOW_SIZE frames before firing)
             dets = state.camera_detections.get(camera_id, [])
             if len(dets) > 0:
                 if demo_mode == "yoloe":
@@ -285,25 +289,40 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 candidates.extend(check_zone_intrusions(dets, camera_id, w_frame, h_frame))
 
                 # Determine which violations are present this frame
-                current_violation_rules = {c["rule"] for c in candidates}
+                current_violation_rules = {c["rule"]: c for c in candidates}
 
-                # Reset streak for violations that cleared this frame
-                for rule_key in list(violation_streak.keys()):
-                    if rule_key not in current_violation_rules:
-                        violation_streak.pop(rule_key, None)
-                # Clear active violations that are no longer detected
-                active_violations -= (active_violations - current_violation_rules)
+                # Update sliding window for ALL tracked rules
+                all_tracked = set(violation_window.keys()) | set(current_violation_rules.keys())
+                for rule_key in all_tracked:
+                    if rule_key not in violation_window:
+                        violation_window[rule_key] = []
+                    violation_window[rule_key].append(rule_key in current_violation_rules)
+                    # Trim to window size
+                    if len(violation_window[rule_key]) > WINDOW_SIZE:
+                        violation_window[rule_key] = violation_window[rule_key][-WINDOW_SIZE:]
 
-                for candidate in candidates:
-                    rule_key = candidate["rule"]
+                # Clear active violations whose window has gone cold (< 2 hits in last window)
+                for rule_key in list(active_violations):
+                    window = violation_window.get(rule_key, [])
+                    if sum(window[-WINDOW_SIZE:]) < 2:
+                        active_violations.discard(rule_key)
+
+                # Check if any rule crosses its threshold (N hits out of WINDOW_SIZE frames)
+                now = time.time()
+                for rule_key, candidate in current_violation_rules.items():
                     if rule_key in active_violations:
                         continue  # already fired, skip until cleared
-                    # Increment streak
-                    violation_streak[rule_key] = violation_streak.get(rule_key, 0) + 1
-                    if violation_streak[rule_key] >= VIOLATION_THRESHOLD:
+                    # Cooldown: don't re-fire within alert_cooldown seconds
+                    if now - last_alert_by_rule.get(rule_key, 0) < alert_cooldown:
+                        continue
+                    window = violation_window.get(rule_key, [])
+                    hits = sum(window)
+                    rule_threshold = candidate.get("threshold") or VIOLATION_THRESHOLD
+                    if hits >= rule_threshold:
                         active_violations.add(rule_key)
-                        violation_streak.pop(rule_key, None)
-                        violation_bboxes = extract_violation_bboxes(candidate["rule"], dets, w_frame, h_frame)
+                        last_alert_by_rule[rule_key] = now
+                        violation_window[rule_key] = []  # reset window after firing
+                        violation_bboxes = extract_violation_bboxes(candidate["rule"], dets, w_frame, h_frame, camera_id)
                         alert = create_alert(
                             camera_id=candidate["camera_id"],
                             rule=candidate["rule"],
@@ -321,10 +340,21 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                                 loop.close()
                             except Exception:
                                 pass
+
+                # Clean up stale windows (no hits in last WINDOW_SIZE frames)
+                for rule_key in list(violation_window.keys()):
+                    if len(violation_window[rule_key]) >= WINDOW_SIZE and sum(violation_window[rule_key]) == 0:
+                        violation_window.pop(rule_key, None)
             else:
-                # No detections -- clear all state
-                active_violations.clear()
-                violation_streak.clear()
+                # No detections -- record a miss for all tracked rules
+                for rule_key in list(violation_window.keys()):
+                    violation_window[rule_key].append(False)
+                    if len(violation_window[rule_key]) > WINDOW_SIZE:
+                        violation_window[rule_key] = violation_window[rule_key][-WINDOW_SIZE:]
+                    # Clean up cold windows
+                    if sum(violation_window[rule_key]) == 0:
+                        violation_window.pop(rule_key, None)
+                        active_violations.discard(rule_key)
 
             # Downscale to 854px wide before JPEG encode
             h, w = annotated.shape[:2]
