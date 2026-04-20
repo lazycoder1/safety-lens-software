@@ -1,0 +1,459 @@
+"""Model registry, lifecycle management, and install jobs."""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import requests
+from ultralytics import YOLO
+
+from capability_registry import ALL_PPE_PROMPT_TERMS, ModelKey
+from constants import PROJECT_ROOT
+
+logger = logging.getLogger("safetylens.models")
+
+MODELS_ROOT = PROJECT_ROOT / "models"
+TMP_MODELS_ROOT = Path(tempfile.gettempdir()) / "safetylens-models"
+_JOB_POLL_FINAL_STATES = {"ready", "failed"}
+
+
+MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
+    "coco_primary": {
+        "model_key": "coco_primary",
+        "display_name": "COCO Primary",
+        "filename": "yolo26n.pt",
+        "local_path": MODELS_ROOT / "coco_primary" / "yolo26n.pt",
+        "legacy_paths": [PROJECT_ROOT / "yolo26n.pt"],
+        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt",
+        "warmup_behavior": "Full-frame COCO detect warmup",
+        "shared_asset_key": "yolo26n",
+    },
+    "ppe_specialist": {
+        "model_key": "ppe_specialist",
+        "display_name": "PPE Specialist",
+        "filename": "yoloe-11s-seg.pt",
+        "local_path": MODELS_ROOT / "yoloe_open_vocab" / "yoloe-11s-seg.pt",
+        "legacy_paths": [PROJECT_ROOT / "yoloe-11s-seg.pt"],
+        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-11s-seg.pt",
+        "warmup_behavior": "Open-vocab warmup with stable PPE prompts",
+        "shared_asset_key": "yoloe-11s-seg",
+    },
+    "yoloe_long_tail": {
+        "model_key": "yoloe_long_tail",
+        "display_name": "YOLOE Long-Tail",
+        "filename": "yoloe-11s-seg.pt",
+        "local_path": MODELS_ROOT / "yoloe_open_vocab" / "yoloe-11s-seg.pt",
+        "legacy_paths": [PROJECT_ROOT / "yoloe-11s-seg.pt"],
+        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-11s-seg.pt",
+        "warmup_behavior": "Open-vocab warmup with long-tail prompts",
+        "shared_asset_key": "yoloe-11s-seg",
+    },
+}
+
+_DEFAULT_LONG_TAIL_PROMPTS = ["fire", "smoke", "flames"]
+_MODEL_LOCK = threading.RLock()
+_MODEL_RUNTIMES: dict[ModelKey, dict[str, Any]] = {
+    model_key: {
+        "handle": None,
+        "lock": threading.Lock(),
+        "loaded_path": None,
+        "current_classes": [],
+    }
+    for model_key in MODEL_DEFINITIONS
+}
+_MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
+    model_key: {
+        "status": "not_downloaded",
+        "error": None,
+        "active_path": None,
+        "job_id": None,
+        "shared_asset_key": definition["shared_asset_key"],
+    }
+    for model_key, definition in MODEL_DEFINITIONS.items()
+}
+_INSTALL_JOBS: dict[str, dict[str, Any]] = {}
+_ACTIVE_JOB_ID: str | None = None
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _resolve_mobileclip_source() -> Path | None:
+    candidates = [
+        PROJECT_ROOT / "backend" / "mobileclip_blt.ts",
+        Path(__file__).parent / "mobileclip_blt.ts",
+        PROJECT_ROOT / "mobileclip_blt.ts",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _sync_state_compat():
+    try:
+        import state
+
+        state.model = _MODEL_RUNTIMES["coco_primary"]["handle"]
+        state.yoloe_model = _MODEL_RUNTIMES["yoloe_long_tail"]["handle"]
+    except Exception:
+        logger.debug("State compatibility sync skipped", exc_info=True)
+
+
+def _set_model_state(model_key: ModelKey, **updates):
+    _MODEL_STATES[model_key].update(updates)
+
+
+def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
+    definition = MODEL_DEFINITIONS[model_key]
+    state = deepcopy(_MODEL_STATES[model_key])
+    active_path = state.get("active_path")
+    return {
+        "model_key": model_key,
+        "display_name": definition["display_name"],
+        "filename": definition["filename"],
+        "local_path": str(definition["local_path"]),
+        "active_path": str(active_path) if active_path else None,
+        "download_url": definition["download_url"],
+        "warmup_behavior": definition["warmup_behavior"],
+        "status": state["status"],
+        "error": state["error"],
+        "job_id": state["job_id"],
+        "shared_asset_key": definition["shared_asset_key"],
+        "is_ready": state["status"] == "ready",
+        "is_downloaded": bool(active_path),
+    }
+
+
+def list_models() -> list[dict[str, Any]]:
+    with _MODEL_LOCK:
+        return [_serialize_model_state(model_key) for model_key in MODEL_DEFINITIONS]
+
+
+def get_model(model_key: str) -> dict[str, Any]:
+    with _MODEL_LOCK:
+        if model_key not in MODEL_DEFINITIONS:
+            raise KeyError(f"Unknown model key: {model_key}")
+        return _serialize_model_state(model_key)  # type: ignore[arg-type]
+
+
+def missing_model_keys(model_keys: list[str]) -> list[ModelKey]:
+    missing: list[ModelKey] = []
+    with _MODEL_LOCK:
+        for model_key in model_keys:
+            if model_key not in MODEL_DEFINITIONS:
+                continue
+            if _MODEL_STATES[model_key]["status"] != "ready":
+                missing.append(model_key)  # type: ignore[arg-type]
+    return missing
+
+
+def get_install_job(job_id: str) -> dict[str, Any] | None:
+    with _MODEL_LOCK:
+        job = _INSTALL_JOBS.get(job_id)
+        return deepcopy(job) if job else None
+
+
+def _update_job(job_id: str, **updates):
+    with _MODEL_LOCK:
+        job = _INSTALL_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = _now()
+
+
+def _resolve_existing_path(model_key: ModelKey) -> Path | None:
+    definition = MODEL_DEFINITIONS[model_key]
+    if definition["local_path"].exists():
+        return definition["local_path"]
+    for legacy_path in definition.get("legacy_paths", []):
+        if legacy_path.exists():
+            return legacy_path
+    return None
+
+
+def _copy_to_local_fs(model_key: ModelKey, source_path: Path) -> Path:
+    TMP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    target = TMP_MODELS_ROOT / f"{model_key}-{source_path.name}"
+    if not target.exists() or target.stat().st_size != source_path.stat().st_size:
+        shutil.copy2(str(source_path), str(target))
+    return target
+
+
+def _set_open_vocab_classes(handle: YOLO, classes: list[str]):
+    tmp_models_dir = TMP_MODELS_ROOT
+    tmp_models_dir.mkdir(parents=True, exist_ok=True)
+    mobileclip_source = _resolve_mobileclip_source()
+    if mobileclip_source is None:
+        raise RuntimeError("mobileclip_blt.ts not found for open-vocabulary model setup")
+    local_mobileclip = tmp_models_dir / "mobileclip_blt.ts"
+    if not local_mobileclip.exists() or local_mobileclip.stat().st_size != mobileclip_source.stat().st_size:
+        shutil.copy2(str(mobileclip_source), str(local_mobileclip))
+
+    original_cwd = os.getcwd()
+    try:
+        handle.to("cpu")
+        os.chdir(str(tmp_models_dir))
+        handle.set_classes(classes)
+    finally:
+        os.chdir(original_cwd)
+
+
+def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
+    runtime = _MODEL_RUNTIMES[model_key]
+    if runtime["handle"] is not None and runtime["loaded_path"] == str(source_path):
+        return
+
+    from config_manager import get_config
+
+    device = get_config()["global"]["device"]
+    dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+
+    if model_key == "coco_primary":
+        handle = YOLO(str(source_path))
+        handle.predict(dummy, verbose=False)
+        runtime["handle"] = handle
+        runtime["loaded_path"] = str(source_path)
+        runtime["current_classes"] = []
+        return
+
+    local_model = _copy_to_local_fs(model_key, source_path)
+    handle = YOLO(str(local_model))
+    if model_key == "ppe_specialist":
+        initial_classes = list(ALL_PPE_PROMPT_TERMS)
+    else:
+        initial_classes = list(_DEFAULT_LONG_TAIL_PROMPTS)
+
+    _set_open_vocab_classes(handle, initial_classes)
+    handle.to(device)
+    handle.predict(dummy, verbose=False, device=device)
+    runtime["handle"] = handle
+    runtime["loaded_path"] = str(source_path)
+    runtime["current_classes"] = initial_classes
+
+
+def initialize() -> None:
+    MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    with _MODEL_LOCK:
+        for model_key in MODEL_DEFINITIONS:
+            _set_model_state(model_key, status="not_downloaded", error=None, active_path=None, job_id=None)
+
+    for model_key in MODEL_DEFINITIONS:
+        existing_path = _resolve_existing_path(model_key)
+        if existing_path is None:
+            continue
+        try:
+            _load_runtime(model_key, existing_path)
+            with _MODEL_LOCK:
+                _set_model_state(model_key, status="ready", error=None, active_path=existing_path, job_id=None)
+        except Exception as exc:
+            logger.exception("Model load failed during initialization", extra={"model_key": model_key})
+            with _MODEL_LOCK:
+                _set_model_state(model_key, status="failed", error=str(exc), active_path=existing_path, job_id=None)
+    _sync_state_compat()
+
+
+def _asset_keys_for_models(model_keys: list[ModelKey]) -> list[str]:
+    asset_keys: list[str] = []
+    for model_key in model_keys:
+        shared_asset_key = MODEL_DEFINITIONS[model_key]["shared_asset_key"]
+        if shared_asset_key not in asset_keys:
+            asset_keys.append(shared_asset_key)
+    return asset_keys
+
+
+def install_models(model_keys: list[str]) -> dict[str, Any]:
+    normalized_keys: list[ModelKey] = []
+    for raw_key in model_keys:
+        if raw_key in MODEL_DEFINITIONS and raw_key not in normalized_keys:
+            normalized_keys.append(raw_key)  # type: ignore[arg-type]
+    if not normalized_keys:
+        raise ValueError("No valid model keys requested")
+
+    with _MODEL_LOCK:
+        global _ACTIVE_JOB_ID
+        if _ACTIVE_JOB_ID:
+            active = _INSTALL_JOBS.get(_ACTIVE_JOB_ID)
+            if active and active.get("status") not in _JOB_POLL_FINAL_STATES:
+                active_assets = set(active.get("asset_keys", []))
+                requested_assets = set(_asset_keys_for_models(normalized_keys))
+                if requested_assets.issubset(active_assets):
+                    return deepcopy(active)
+                raise RuntimeError("Another model install is already in progress")
+
+        job_id = uuid.uuid4().hex[:12]
+        asset_keys = _asset_keys_for_models(normalized_keys)
+        job = {
+            "id": job_id,
+            "model_keys": normalized_keys,
+            "asset_keys": asset_keys,
+            "status": "queued",
+            "stage": "queued",
+            "current_model_key": normalized_keys[0],
+            "progress_percent": 0.0,
+            "bytes_downloaded": 0,
+            "total_bytes": None,
+            "error": None,
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        _INSTALL_JOBS[job_id] = job
+        _ACTIVE_JOB_ID = job_id
+        for model_key in normalized_keys:
+            _set_model_state(model_key, status="installing", error=None, job_id=job_id)
+
+    thread = threading.Thread(target=_run_install_job, args=(job_id,), daemon=True)
+    thread.start()
+    return get_install_job(job_id) or job
+
+
+def retry_install_job(job_id: str) -> dict[str, Any]:
+    job = get_install_job(job_id)
+    if not job:
+        raise KeyError("Install job not found")
+    return install_models(job.get("model_keys", []))
+
+
+def _download_asset(job_id: str, model_key: ModelKey, destination: Path, url: str, asset_index: int, asset_count: int) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_suffix(destination.suffix + ".part")
+    _update_job(
+        job_id,
+        status="running",
+        stage="downloading",
+        current_model_key=model_key,
+        progress_percent=asset_index / max(asset_count, 1) * 100.0,
+        bytes_downloaded=0,
+        total_bytes=None,
+        error=None,
+    )
+    with requests.get(url, stream=True, timeout=(15, 120)) as response:
+        response.raise_for_status()
+        total_bytes = int(response.headers.get("Content-Length", "0")) or None
+        bytes_downloaded = 0
+        with open(tmp_path, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                bytes_downloaded += len(chunk)
+                asset_progress = (bytes_downloaded / total_bytes) if total_bytes else 0.0
+                progress_percent = ((asset_index + asset_progress) / max(asset_count, 1)) * 100.0
+                _update_job(
+                    job_id,
+                    bytes_downloaded=bytes_downloaded,
+                    total_bytes=total_bytes,
+                    progress_percent=min(progress_percent, 99.0),
+                )
+    os.replace(tmp_path, destination)
+    return destination
+
+
+def _verify_asset(path: Path, total_bytes: int | None):
+    if not path.exists():
+        raise RuntimeError("Downloaded model file missing after transfer")
+    if path.stat().st_size <= 0:
+        raise RuntimeError("Downloaded model file is empty")
+    if total_bytes and path.stat().st_size != total_bytes:
+        raise RuntimeError("Downloaded model file size does not match expected size")
+
+
+def _run_install_job(job_id: str):
+    job = get_install_job(job_id)
+    if not job:
+        return
+
+    try:
+        asset_keys = job["asset_keys"]
+        model_keys = job["model_keys"]
+        for asset_index, asset_key in enumerate(asset_keys):
+            asset_model_keys = [
+                model_key
+                for model_key in model_keys
+                if MODEL_DEFINITIONS[model_key]["shared_asset_key"] == asset_key
+            ]
+            primary_model_key = asset_model_keys[0]
+            definition = MODEL_DEFINITIONS[primary_model_key]
+
+            _update_job(job_id, status="running", stage="checking_disk", current_model_key=primary_model_key)
+            existing_path = _resolve_existing_path(primary_model_key)
+            active_path = existing_path
+            if active_path is None:
+                active_path = _download_asset(
+                    job_id,
+                    primary_model_key,
+                    definition["local_path"],
+                    definition["download_url"],
+                    asset_index,
+                    len(asset_keys),
+                )
+
+            _update_job(job_id, stage="verifying", current_model_key=primary_model_key)
+            _verify_asset(active_path, get_install_job(job_id).get("total_bytes") if get_install_job(job_id) else None)
+
+            _update_job(job_id, stage="preparing_assets", current_model_key=primary_model_key)
+            MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+            TMP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+
+            for model_key in asset_model_keys:
+                _update_job(job_id, stage="loading", current_model_key=model_key)
+                _load_runtime(model_key, active_path)
+                with _MODEL_LOCK:
+                    _set_model_state(model_key, status="ready", error=None, active_path=active_path, job_id=None)
+                _update_job(job_id, stage="warming_up", current_model_key=model_key)
+
+        _update_job(job_id, status="ready", stage="ready", progress_percent=100.0, error=None)
+        _sync_state_compat()
+        try:
+            from video_processing import restart_all_cameras
+
+            restart_all_cameras()
+        except Exception:
+            logger.exception("Failed to restart cameras after model install")
+    except Exception as exc:
+        logger.exception("Model install failed", extra={"job_id": job_id})
+        _update_job(job_id, status="failed", stage="failed", error=str(exc))
+        with _MODEL_LOCK:
+            for model_key in job["model_keys"]:
+                _set_model_state(model_key, status="failed", error=str(exc), job_id=None)
+    finally:
+        with _MODEL_LOCK:
+            global _ACTIVE_JOB_ID
+            if _ACTIVE_JOB_ID == job_id:
+                _ACTIVE_JOB_ID = None
+
+
+def predict(
+    model_key: ModelKey,
+    frame,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str] | None = None,
+):
+    runtime = _MODEL_RUNTIMES[model_key]
+    handle = runtime["handle"]
+    if handle is None:
+        raise RuntimeError(f"Model {model_key} is not loaded")
+
+    with runtime["lock"]:
+        if model_key != "coco_primary" and classes is not None:
+            requested_classes = [value for value in classes if isinstance(value, str) and value]
+            if runtime["current_classes"] != requested_classes:
+                _set_open_vocab_classes(handle, requested_classes)
+                handle.to(device)
+                runtime["current_classes"] = requested_classes
+        return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=imgsz)

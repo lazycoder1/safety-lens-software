@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request, Query, HTTPException
 from fastapi.responses import FileResponse
 
 import alert_store
+import audit_store
 from dependencies import require_operator_or_admin
 from video_processing import broadcast_alert
 
@@ -46,33 +47,61 @@ async def api_acknowledge_alert(alert_id: str, request: Request):
     result = alert_store.acknowledge_alert(alert_id, by=by)
     if not result:
         raise HTTPException(status_code=404, detail="Alert not found")
+    audit_store.log_event(
+        "alert.acknowledge",
+        target_type="alert",
+        target_id=alert_id,
+        details={"status": "acknowledged"},
+        **audit_store.build_actor_context(request),
+    )
     await broadcast_alert({"type": "updated", "data": result})
     return result
 
 
 @router.put("/alerts/{alert_id}/resolve", dependencies=[Depends(require_operator_or_admin)])
-async def api_resolve_alert(alert_id: str):
+async def api_resolve_alert(alert_id: str, request: Request):
     result = alert_store.resolve_alert(alert_id)
     if not result:
         raise HTTPException(status_code=404, detail="Alert not found")
+    audit_store.log_event(
+        "alert.resolve",
+        target_type="alert",
+        target_id=alert_id,
+        details={"status": "resolved"},
+        **audit_store.build_actor_context(request),
+    )
     await broadcast_alert({"type": "updated", "data": result})
     return result
 
 
 @router.put("/alerts/{alert_id}/snooze", dependencies=[Depends(require_operator_or_admin)])
-async def api_snooze_alert(alert_id: str, minutes: int = Query(15)):
+async def api_snooze_alert(alert_id: str, request: Request, minutes: int = Query(15)):
     result = alert_store.snooze_alert(alert_id, minutes)
     if not result:
         raise HTTPException(status_code=404, detail="Alert not found")
+    audit_store.log_event(
+        "alert.snooze",
+        target_type="alert",
+        target_id=alert_id,
+        details={"minutes": minutes, "status": "snoozed"},
+        **audit_store.build_actor_context(request),
+    )
     await broadcast_alert({"type": "updated", "data": result})
     return result
 
 
 @router.put("/alerts/{alert_id}/false-positive", dependencies=[Depends(require_operator_or_admin)])
-async def api_false_positive_alert(alert_id: str):
+async def api_false_positive_alert(alert_id: str, request: Request):
     result = alert_store.mark_false_positive(alert_id)
     if not result:
         raise HTTPException(status_code=404, detail="Alert not found")
+    audit_store.log_event(
+        "alert.false_positive",
+        target_type="alert",
+        target_id=alert_id,
+        details={"falsePositive": True, "status": "resolved"},
+        **audit_store.build_actor_context(request),
+    )
     await broadcast_alert({"type": "updated", "data": result})
     return result
 

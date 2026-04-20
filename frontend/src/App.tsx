@@ -8,6 +8,9 @@ import { LiveView } from "@/pages/LiveView"
 import { AlertCenter } from "@/pages/AlertCenter"
 import { Dashboard } from "@/pages/Dashboard"
 import { CameraConfig } from "@/pages/CameraConfig"
+import { CameraSetupPage } from "@/pages/CameraSetupPage"
+import { CameraDetailsPage } from "@/pages/CameraDetailsPage"
+import { CameraEditPage } from "@/pages/CameraEditPage"
 import { RulesEngine } from "@/pages/RulesEngine"
 import { RuleEditor } from "@/pages/RuleEditor"
 import { PlateManagement } from "@/pages/PlateManagement"
@@ -15,6 +18,7 @@ import { FaceEnrollment } from "@/pages/FaceEnrollment"
 import { AlertRouting } from "@/pages/AlertRouting"
 import { Placeholder } from "@/pages/Placeholder"
 import { SystemSettings } from "@/pages/SystemSettings"
+import { SystemModels } from "@/pages/SystemModels"
 import { ZoneManagement } from "@/pages/ZoneManagement"
 import { AISearch } from "@/pages/AISearch"
 import { LicenseStatus } from "@/pages/LicenseStatus"
@@ -41,6 +45,23 @@ export default function App() {
             <Route path="/reports" element={<Placeholder title="Reports" />} />
             <Route path="/search" element={<ErrorBoundary><AISearch /></ErrorBoundary>} />
             <Route path="/configure/cameras" element={<ErrorBoundary><CameraConfig /></ErrorBoundary>} />
+            <Route
+              path="/configure/cameras/new"
+              element={
+                <ProtectedRoute requiredRole={["admin"]}>
+                  <ErrorBoundary><CameraSetupPage /></ErrorBoundary>
+                </ProtectedRoute>
+              }
+            />
+            <Route path="/configure/cameras/:cameraId" element={<ErrorBoundary><CameraDetailsPage /></ErrorBoundary>} />
+            <Route
+              path="/configure/cameras/:cameraId/edit"
+              element={
+                <ProtectedRoute requiredRole={["admin"]}>
+                  <ErrorBoundary><CameraEditPage /></ErrorBoundary>
+                </ProtectedRoute>
+              }
+            />
             <Route path="/configure/rules" element={<ErrorBoundary><RulesEngine /></ErrorBoundary>} />
             <Route path="/configure/rules/new" element={<ErrorBoundary><RuleEditor /></ErrorBoundary>} />
             <Route path="/configure/rules/:ruleId" element={<ErrorBoundary><RuleEditor /></ErrorBoundary>} />
@@ -50,6 +71,14 @@ export default function App() {
             <Route path="/configure/faces" element={<FaceEnrollment />} />
             <Route path="/configure/integrations" element={<Placeholder title="Integrations" />} />
             <Route path="/system/settings" element={<ErrorBoundary><SystemSettings /></ErrorBoundary>} />
+            <Route
+              path="/system/models"
+              element={
+                <ProtectedRoute requiredRole={["admin"]}>
+                  <ErrorBoundary><SystemModels /></ErrorBoundary>
+                </ProtectedRoute>
+              }
+            />
             <Route path="/system/license" element={<LicenseStatus />} />
             <Route
               path="/system/users"

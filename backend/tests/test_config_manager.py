@@ -58,7 +58,38 @@ def test_load_config_reads_existing_file():
     _test_config.write_text(json.dumps(custom))
     cfg = config_manager.load_config()
     assert cfg["global"]["target_fps"] == 10
-    assert cfg["cameras"] == {}
+    assert "cam1" in cfg["cameras"]
+
+
+def test_load_config_normalizes_legacy_camera_rule_fields():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_food": {
+                "name": "Food Factory",
+                "demo": "yoloe",
+                "rules": ["Hairnet Detection", "Gloves Detection"],
+                "yoloe_classes": ["person", "hairnet", "gloves", "face mask"],
+                "alert_classes": ["mobile_phone"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_food"]
+
+    assert "ppe_hairnet" in camera["safety_rule_ids"]
+    assert "ppe_gloves" in camera["safety_rule_ids"]
+    assert "ppe_facemask" in camera["safety_rule_ids"]
+    assert "alert_mobile_phone" in camera["safety_rule_ids"]
+    assert "mobile_phone" in camera["alert_classes"]
+    assert "ppe_hairnet" in camera["ppe_rule_ids"]
+    assert "person" in camera["yoloe_classes"]
+    assert "hairnet_required" in camera["capabilities"]
+    assert camera["profile"] == "work_zone_ppe"
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
 
 
 # ── get_config ───────────────────────────────────────────────────────────────

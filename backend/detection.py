@@ -22,6 +22,8 @@ def draw_detections(
     class_names=None,
     colors=None,
     demo_label: str | None = None,
+    show_overlay: bool = True,
+    count_override: int | None = None,
 ) -> tuple[np.ndarray, list]:
     """Draw bounding boxes on frame.
 
@@ -39,6 +41,12 @@ def draw_detections(
     """
     annotated = frame.copy()
     detections = []
+
+    # Scale font and line thickness based on frame width for crisp text at any resolution
+    h_img, w_img = annotated.shape[:2]
+    font_scale = max(0.4, w_img / 1600)
+    font_thickness = max(1, int(w_img / 800))
+    box_thickness = max(1, int(w_img / 600))
 
     if results and len(results) > 0:
         boxes = results[0].boxes
@@ -64,18 +72,46 @@ def draw_detections(
                 else:
                     color = colors.get(cls_id, (200, 200, 200))
 
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness, cv2.LINE_AA)
 
                 label = f"{cls_name} {conf:.0%}"
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
                 cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-                cv2.putText(annotated, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(annotated, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
 
                 detections.append({
                     "class": cls_name,
                     "confidence": conf,
                     "bbox": [x1, y1, x2, y2],
                 })
+
+    if show_overlay:
+        count_color = (168, 85, 247) if colors is not None and isinstance(colors, list) else (34, 197, 94)
+        annotated = apply_camera_overlay(
+            annotated,
+            camera_id=camera_id,
+            detection_count=count_override if count_override is not None else len(detections),
+            demo_label=demo_label,
+            count_color=count_color,
+        )
+
+    return annotated, detections
+
+
+def apply_camera_overlay(
+    frame: np.ndarray,
+    *,
+    camera_id: str,
+    detection_count: int,
+    demo_label: str | None = None,
+    count_color: tuple[int, int, int] = (34, 197, 94),
+) -> np.ndarray:
+    """Draw shared zone and camera overlay on an already-annotated frame."""
+    annotated = frame
+    h_img, w_img = annotated.shape[:2]
+    font_scale = max(0.4, w_img / 1600)
+    font_thickness = max(1, int(w_img / 800))
+    box_thickness = max(1, int(w_img / 600))
 
     # Overlay camera info
     cfg = get_config()
@@ -102,14 +138,14 @@ def draw_detections(
             except ValueError:
                 bgr = (38, 38, 220)
             cv2.fillPoly(overlay, [pts], bgr)
-            cv2.polylines(annotated, [pts], isClosed=True, color=bgr, thickness=2)
+            cv2.polylines(annotated, [pts], isClosed=True, color=bgr, thickness=box_thickness, lineType=cv2.LINE_AA)
             # Zone name near centroid
             cx = int(pts[:, 0].mean())
             cy = int(pts[:, 1].mean())
             zone_name = zone.get("name", "zone")
-            (tw, th), _ = cv2.getTextSize(zone_name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            (tw, th), _ = cv2.getTextSize(zone_name, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
             cv2.rectangle(annotated, (cx - tw // 2 - 4, cy - th - 6), (cx + tw // 2 + 4, cy + 2), bgr, -1)
-            cv2.putText(annotated, zone_name, (cx - tw // 2, cy - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(annotated, zone_name, (cx - tw // 2, cy - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
         cv2.addWeighted(overlay, 0.15, annotated, 0.85, 0, annotated)
 
     if demo_label is not None:
@@ -118,20 +154,19 @@ def draw_detections(
         cam_demo = cam.get("demo", "yolo")
         overlay_text = f"{cam_name} | {cam_demo.upper()}"
 
-    cv2.putText(annotated, overlay_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(annotated, overlay_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+    overlay_font_scale = max(0.5, w_img / 1400)
+    overlay_thickness = max(1, int(w_img / 600))
+    overlay_y = int(30 * (w_img / 1280))
+    count_y = int(55 * (w_img / 1280))
 
-    # Count color: purple for YOLOe, green for COCO
-    if colors is not None and isinstance(colors, list):
-        count_color = (168, 85, 247)  # purple for YOLOe
-    else:
-        count_color = (34, 197, 94)   # green for COCO
+    cv2.putText(annotated, overlay_text, (10, overlay_y), cv2.FONT_HERSHEY_SIMPLEX, overlay_font_scale, (255, 255, 255), overlay_thickness + 1, cv2.LINE_AA)
+    cv2.putText(annotated, overlay_text, (10, overlay_y), cv2.FONT_HERSHEY_SIMPLEX, overlay_font_scale, (0, 0, 0), overlay_thickness, cv2.LINE_AA)
 
-    count_text = f"{len(detections)} detections"
-    cv2.putText(annotated, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-    cv2.putText(annotated, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, count_color, 1)
+    count_text = f"{detection_count} detections"
+    cv2.putText(annotated, count_text, (10, count_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness + 1, cv2.LINE_AA)
+    cv2.putText(annotated, count_text, (10, count_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, count_color, font_thickness, cv2.LINE_AA)
 
-    return annotated, detections
+    return annotated
 
 
 # ── PPE detection ───────────────────────────────────────────────────────────
@@ -208,14 +243,13 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
         violating_persons = [p for p in persons if not _ppe_center_inside_person(p["bbox"], ppe_dets)]
 
         if violating_persons:
-            print(f"[PPE DEBUG] cam={camera_id} group={group_name} persons={len(persons)} ppe_dets={len(ppe_dets)} ppe_classes={[d['class'] for d in ppe_dets]} violating={len(violating_persons)} all_classes={list({d['class'] for d in detections})}", flush=True)
             candidates.append({
                 "camera_id": camera_id,
                 "rule": f"Missing {group_name}",
                 "severity": severity_map.get(group_name, "P2"),
                 "confidence": max(p["confidence"] for p in violating_persons),
                 "description": f"{len(violating_persons)} worker(s) detected without {group_name}",
-                "source": "YOLOe",
+                "source": "PPE Specialist",
             })
 
     return candidates
@@ -460,13 +494,22 @@ def check_violations(detections: list, camera_id: str) -> list:
             parts = [f"{count} {name}(s)" for name, count in animal_counts.items()]
             desc = f"Animal detected: {', '.join(parts)}" if parts else desc
 
+        matching_sources = {d.get("model_family") for d in matching if d.get("model_family")}
+        source_label = "YOLO"
+        if matching_sources == {"yoloe_long_tail"}:
+            source_label = "YOLOE Long-Tail"
+        elif matching_sources == {"ppe_specialist"}:
+            source_label = "PPE Specialist"
+        elif matching_sources == {"coco_primary"}:
+            source_label = "COCO Primary"
+
         candidates.append({
             "camera_id": camera_id,
             "rule": rule["name"],
             "severity": rule["severity"],
             "confidence": max(d["confidence"] for d in matching),
             "description": desc,
-            "source": "YOLO",
+            "source": source_label,
             "threshold": rule.get("threshold"),
         })
 

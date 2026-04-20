@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from dependencies import require_admin
 
 from config_manager import get_config, save_config
+from camera_planner import normalize_camera_record
 from video_processing import restart_camera
 
 logger = logging.getLogger("safetylens.safety_rules")
@@ -31,6 +32,7 @@ DEFAULT_SAFETY_RULES = [
     {"id": "alert_person", "name": "Person Detected", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P4", "enabled": True},
     {"id": "alert_vehicle", "name": "Vehicle Detected", "type": "alert", "classes": ["truck", "car", "motorcycle"], "model": "yolo", "severity": "P4", "enabled": True},
     {"id": "alert_zone_intrusion", "name": "Zone Intrusion", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P1", "enabled": True, "threshold": 6},
+    {"id": "alert_fire_smoke", "name": "Fire / Smoke", "type": "alert", "classes": ["fire", "smoke", "flames"], "model": "yoloe", "severity": "P1", "enabled": True, "threshold": 2},
 ]
 
 # Default alert rule IDs (for migration)
@@ -143,8 +145,12 @@ def _refresh_cameras_for_rule(rule_id: str, cfg: dict):
     changed = False
     for cam_id, cam in cfg.get("cameras", {}).items():
         rule_ids = cam.get("safety_rule_ids", [])
-        if rule_id in rule_ids and cam.get("demo") == "yoloe":
-            cam["yoloe_classes"] = derive_yoloe_classes(rule_ids, cfg)
+        if rule_id in rule_ids:
+            updated_camera, camera_changed = normalize_camera_record(cam, cfg)
+            if camera_changed:
+                cam.clear()
+                cam.update(updated_camera)
+                changed = True
             changed = True
     if changed:
         save_config(cfg)
@@ -258,8 +264,11 @@ async def api_assign_rule_cameras(rule_id: str, body: RuleCameraAssign):
             cam["safety_rule_ids"] = [rid for rid in rule_ids if rid != rule_id]
             changed_cams.append(cam_id)
 
-        if cam_id in changed_cams and cam.get("demo") == "yoloe":
-            cam["yoloe_classes"] = derive_yoloe_classes(cam["safety_rule_ids"], cfg)
+        if cam_id in changed_cams:
+            updated_camera, camera_changed = normalize_camera_record(cam, cfg)
+            if camera_changed:
+                cam.clear()
+                cam.update(updated_camera)
 
     save_config(cfg)
     for cam_id in changed_cams:

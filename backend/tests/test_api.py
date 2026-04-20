@@ -26,6 +26,7 @@ config_manager.CONFIG_PATH = _test_config
 # Mock YOLO so server doesn't try to load real models
 with mock.patch("state.load_model"):
     import server
+    import model_manager
     import state
 
 # Use TestClient (no real model loading)
@@ -61,6 +62,12 @@ def fresh_state():
     state.camera_frames.clear()
     state.camera_detections.clear()
     state.alert_subscribers.clear()
+    state.camera_runtime_status.clear()
+    model_manager._INSTALL_JOBS.clear()
+    model_manager._ACTIVE_JOB_ID = None
+    with model_manager._MODEL_LOCK:
+        for model_key in model_manager.MODEL_DEFINITIONS:
+            model_manager._set_model_state(model_key, status="ready", error=None, active_path=config_manager.CONFIG_PATH, job_id=None)
 
     yield
 
@@ -408,12 +415,37 @@ def test_add_camera(mock_start):
     mock_start.assert_called_once()
 
 
+@mock.patch("routers.cameras.model_manager.missing_model_keys", return_value=["coco_primary"])
+def test_add_camera_returns_missing_models(_mock_missing):
+    resp = client.post("/api/cameras", json={
+        "name": "Needs Model", "video": "test.mp4", "zone": "ZoneX",
+        "profile": "general_safety", "capabilities": ["person_presence"],
+    })
+    assert resp.status_code == 409
+    data = resp.json()
+    assert data["code"] == "missing_models"
+    assert "coco_primary" in data["missing_model_keys"]
+
+
 @mock.patch("routers.cameras.restart_camera")
 def test_update_camera(mock_restart):
     resp = client.put("/api/cameras/cam1", json={"name": "Updated Name"})
     assert resp.status_code == 200
     assert resp.json()["name"] == "Updated Name"
     mock_restart.assert_called_once_with("cam1")
+
+
+def test_preview_camera_plan():
+    resp = client.post("/api/camera-plans/preview", json={
+        "profile": "work_zone_ppe",
+        "capabilities": ["helmet_required", "zone_intrusion"],
+        "stream_type": "file",
+        "video": "test.mp4",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["execution_plan"]["run_coco_primary"] is True
+    assert data["execution_plan"]["run_ppe_specialist"] is True
 
 
 def test_update_camera_not_found():

@@ -53,9 +53,25 @@ def close_pool():
             _pool = None
 
 
+def check_connection() -> bool:
+    """Quick readiness check for health/diagnostics."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return True
+    except Exception:
+        logger.exception("Database health check failed")
+        return False
+
+
 @contextmanager
 def get_conn():
     """Check out a connection from the pool, return it when done."""
+    global _pool
+    if _pool is None:
+        init_pool()
     conn = _pool.getconn()
     try:
         yield conn

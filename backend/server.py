@@ -7,6 +7,8 @@ SafetyLens Demo Backend
 """
 
 import logging
+import time
+from uuid import uuid4
 
 import jwt
 from fastapi import FastAPI, Request
@@ -21,7 +23,10 @@ from routers.safety_rules import _ensure_safety_rules
 from video_processing import start_camera
 import db
 import alert_store
+import audit_store
 import auth_store
+import diagnostics
+import licensing
 import state
 
 logger = logging.getLogger("safetylens")
@@ -37,17 +42,14 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
+def _authenticate_request(request: Request):
     path = request.url.path
-    # Skip CORS preflight requests
     if request.method == "OPTIONS":
-        return await call_next(request)
+        return None
     if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
-        return await call_next(request)
-    # Skip auth for WebSocket upgrade (handled in the WS endpoint)
+        return None
     if request.headers.get("upgrade", "").lower() == "websocket":
-        return await call_next(request)
+        return None
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
@@ -58,7 +60,65 @@ async def auth_middleware(request: Request, call_next):
         return JSONResponse({"detail": "Token expired"}, status_code=401)
     except Exception:
         return JSONResponse({"detail": "Invalid token"}, status_code=401)
-    return await call_next(request)
+    return None
+
+
+@app.middleware("http")
+async def request_middleware(request: Request, call_next):
+    request_id = str(uuid4())[:8]
+    request.state.request_id = request_id
+    start = time.perf_counter()
+    response = None
+
+    try:
+        auth_response = _authenticate_request(request)
+        if auth_response is not None:
+            response = auth_response
+        else:
+            response = await call_next(request)
+        return response
+    except Exception:
+        duration_ms = round((time.perf_counter() - start) * 1000, 1)
+        user = getattr(request.state, "user", {}) or {}
+        logger.exception(
+            "Unhandled request error",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "route": request.url.path,
+                "duration_ms": duration_ms,
+                "user_id": user.get("sub"),
+                "username": user.get("username"),
+            },
+        )
+        raise
+    finally:
+        if response is not None:
+            response.headers["X-Request-ID"] = request_id
+            duration_ms = round((time.perf_counter() - start) * 1000, 1)
+            user = getattr(request.state, "user", {}) or {}
+            route = request.url.path
+            status_code = response.status_code
+            if status_code >= 500:
+                log_fn = logger.error
+            elif status_code >= 400:
+                log_fn = logger.warning
+            elif route == "/api/health":
+                log_fn = logger.debug
+            else:
+                log_fn = logger.info
+            log_fn(
+                "HTTP request complete",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "route": route,
+                    "status_code": status_code,
+                    "duration_ms": duration_ms,
+                    "user_id": user.get("sub"),
+                    "username": user.get("username"),
+                },
+            )
 
 
 # ── Register routers ────────────────────────────────────────────────────────
@@ -70,13 +130,39 @@ register_routers(app)
 
 @app.on_event("startup")
 async def startup():
+    import asyncio
+
     setup_logging()
     logger.info("SafetyLens backend starting")
     db.init_pool()
     alert_store.init_db()
+    audit_store.init_db()
     auth_store.init_auth_db()
     state.load_model()
     load_config()
+
+    # License gate. Inference workers always start, but they self-pause
+    # whenever the license state is SUSPENDED. The admin UI stays reachable
+    # at all times so the customer can upload a fresh license to recover.
+    license_status = licensing.init_licensing()
+    if license_status.state == licensing.LicenseState.SUSPENDED:
+        logger.warning(
+            "License is SUSPENDED at startup — inference will not run until a valid license is installed. Reason: %s",
+            license_status.reason,
+        )
+    elif license_status.state != licensing.LicenseState.VALID:
+        logger.warning(
+            "License state is %s — %s",
+            license_status.state.value,
+            license_status.reason,
+        )
+
+    # Background task that fetches a fresh heartbeat token from License Hub
+    # once a day. Failures are logged but never crash the loop — the existing
+    # heartbeat keeps working until the grace period runs out.
+    asyncio.create_task(licensing.heartbeat_refresh_loop())
+    asyncio.create_task(diagnostics.retention_cleanup_loop())
+
     cfg = get_config()
     _ensure_safety_rules(cfg)
     for cam_id in cfg["cameras"]:

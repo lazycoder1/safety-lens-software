@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from camera_config_utils import sync_camera_rule_fields
 from config_manager import get_config, save_config
 
 logger = logging.getLogger("safetylens")
@@ -56,6 +57,7 @@ async def api_add_zone(cam_id: str, body: ZoneCreate):
     if "zone_intrusion" not in alert_classes:
         alert_classes.append("zone_intrusion")
         cfg["cameras"][cam_id]["alert_classes"] = alert_classes
+    sync_camera_rule_fields(cfg["cameras"][cam_id])
 
     save_config(cfg)
     logger.info("Zone created", extra={"camera_id": cam_id, "zone": zone_id})

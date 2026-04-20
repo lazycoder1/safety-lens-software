@@ -1,130 +1,224 @@
-import { useState, useEffect, useCallback } from "react"
-import { Check, X, Upload } from "lucide-react"
+import { useState, useEffect, useCallback, useRef } from "react"
+import { Check, X, Upload, Loader2, AlertTriangle } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import {
+  getLicenseStatus,
+  uploadLicense,
+  uploadHeartbeat,
+  type LicenseStatusResponse,
+  type LicenseState,
+} from "@/lib/api"
 
-type LicenseState = "active" | "expired" | "disabled"
-
-interface Feature {
-  name: string
-  description: string
-  licensed: boolean
-}
-
-const FEATURES: Feature[] = [
-  { name: "Base Detections (10 features)", description: "Person, vehicle, fire, PPE, phone usage, and more", licensed: true },
-  { name: "ANPR (Vehicle Plate Recognition)", description: "Automatic number plate recognition at entry/exit points", licensed: true },
-  { name: "Face Recognition", description: "Face enrollment and matching for access control", licensed: true },
-  { name: "AI Search", description: "Semantic search across all camera footage", licensed: false },
+// Catalog of features SafetyLens supports. We render every entry — those
+// not present in the license's `features` array show as "Not licensed".
+// Order matches the rollout: base is v1, the rest are post-v1 add-ons.
+const FEATURE_CATALOG: { key: string; name: string; description: string }[] = [
+  {
+    key: "base",
+    name: "Base Detections",
+    description: "Person, vehicle, fire, PPE, phone usage, and more",
+  },
+  {
+    key: "anpr",
+    name: "ANPR (Vehicle Plate Recognition)",
+    description: "Automatic number plate recognition at entry/exit points",
+  },
+  {
+    key: "face",
+    name: "Face Recognition",
+    description: "Face enrollment and matching for access control",
+  },
+  {
+    key: "ai_search",
+    name: "AI Search",
+    description: "Semantic search across all camera footage",
+  },
 ]
 
-const STATUS_CONFIG: Record<LicenseState, { color: string; label: string; dotClass: string; badgeVariant: "success" | "critical" | "default" }> = {
-  active: { color: "var(--color-success)", label: "Active", dotClass: "bg-[var(--color-success)]", badgeVariant: "success" },
-  expired: { color: "var(--color-critical)", label: "Expired", dotClass: "bg-[var(--color-critical)]", badgeVariant: "critical" },
-  disabled: { color: "var(--color-text-tertiary)", label: "Disabled", dotClass: "bg-[var(--color-text-tertiary)]", badgeVariant: "default" },
+const STATUS_CONFIG: Record<
+  LicenseState,
+  {
+    label: string
+    dotClass: string
+    badgeVariant: "success" | "critical" | "warning" | "default"
+  }
+> = {
+  valid: { label: "Active", dotClass: "bg-[var(--color-success)]", badgeVariant: "success" },
+  warning: { label: "Renewal Due", dotClass: "bg-[var(--color-warning)]", badgeVariant: "warning" },
+  grace: { label: "Grace Period", dotClass: "bg-[var(--color-warning)]", badgeVariant: "warning" },
+  suspended: { label: "Suspended", dotClass: "bg-[var(--color-critical)]", badgeVariant: "critical" },
+}
+
+function formatDate(iso: string | undefined | null): string {
+  if (!iso) return "—"
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    })
+  } catch {
+    return iso
+  }
 }
 
 export function LicenseStatus() {
-  const [licenseState, setLicenseState] = useState<LicenseState>("active")
-  const [devMode, setDevMode] = useState(false)
+  const [status, setStatus] = useState<LicenseStatusResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Dev toggle: Shift+L pressed 5 times within 2 seconds
-  const handleDevToggle = useCallback(() => {
-    const presses: number[] = []
-
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "L" && e.shiftKey) {
-        const now = Date.now()
-        presses.push(now)
-        // Keep only presses within last 2 seconds
-        while (presses.length > 0 && now - presses[0] > 2000) {
-          presses.shift()
-        }
-        if (presses.length >= 5) {
-          setDevMode((prev) => !prev)
-          presses.length = 0
-        }
-      }
+  const refresh = useCallback(async () => {
+    try {
+      const next = await getLicenseStatus()
+      setStatus(next)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to load license status"
+      toast.error(msg)
+    } finally {
+      setLoading(false)
     }
-
-    window.addEventListener("keydown", onKeyDown)
-    return () => window.removeEventListener("keydown", onKeyDown)
   }, [])
 
   useEffect(() => {
-    return handleDevToggle()
-  }, [handleDevToggle])
+    refresh()
+  }, [refresh])
 
-  const status = STATUS_CONFIG[licenseState]
-  const isNormal = licenseState === "active"
+  const handleFile = useCallback(
+    async (file: File) => {
+      setUploading(true)
+      try {
+        // Pick the right endpoint based on filename — .lic is the long-lived
+        // license, anything else (typically .json) is treated as a heartbeat.
+        const isLicense = file.name.toLowerCase().endsWith(".lic")
+        const next = isLicense ? await uploadLicense(file) : await uploadHeartbeat(file)
+        setStatus(next)
+        toast.success(
+          isLicense
+            ? `License installed for ${next.license?.customer_name ?? "this site"}`
+            : "Heartbeat token installed",
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Upload failed"
+        toast.error(msg)
+      } finally {
+        setUploading(false)
+      }
+    },
+    [],
+  )
 
-  const daysRemaining = 363
-  const camerasUsed = 7
-  const camerasTotal = 10
+  const onDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      setDragActive(false)
+      const file = e.dataTransfer.files[0]
+      if (file) handleFile(file)
+    },
+    [handleFile],
+  )
+
+  const onFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      if (file) handleFile(file)
+      // Allow re-uploading the same file by clearing the input
+      e.target.value = ""
+    },
+    [handleFile],
+  )
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-12">
+        <Loader2 className="w-6 h-6 animate-spin text-[var(--color-text-tertiary)]" />
+      </div>
+    )
+  }
+
+  if (!status) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-[var(--color-critical)]">Failed to load license status.</p>
+      </div>
+    )
+  }
+
+  const cfg = STATUS_CONFIG[status.state]
+  const isHealthy = status.state === "valid"
+  const license = status.license
 
   return (
     <div className="space-y-6 p-6">
       {/* Header */}
       <h1 className="text-xl font-bold text-[var(--color-text-primary)]">License</h1>
 
-      {/* Banner for expired/disabled */}
-      {!isNormal && (
+      {/* Banner for non-healthy states */}
+      {!isHealthy && (
         <div
           className={cn(
-            "rounded-[var(--radius-md)] px-4 py-3 text-sm font-medium",
-            licenseState === "expired"
+            "rounded-[var(--radius-md)] px-4 py-3 text-sm font-medium flex items-start gap-2",
+            status.state === "suspended"
               ? "bg-[var(--color-critical-bg)] text-[#991b1b] border border-[var(--color-critical)]"
-              : "bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] border"
+              : "bg-[var(--color-warning-bg)] text-[#92400e] border border-[var(--color-warning)]",
           )}
         >
-          {licenseState === "expired"
-            ? "License expired. Detection features are disabled."
-            : "License is disabled."}
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{status.reason}</span>
         </div>
       )}
 
       {/* Status card */}
       <Card>
         <div className="flex items-center gap-2 mb-5">
-          <span className={cn("inline-block w-2.5 h-2.5 rounded-full", status.dotClass)} />
-          <Badge variant={status.badgeVariant}>{status.label}</Badge>
+          <span className={cn("inline-block w-2.5 h-2.5 rounded-full", cfg.dotClass)} />
+          <Badge variant={cfg.badgeVariant}>{cfg.label}</Badge>
         </div>
 
-        <div className="grid gap-3">
-          <InfoRow label="Customer" value="TMEIC Jamshedpur" />
-          <InfoRow label="License ID" value="SL-2026-0001" mono />
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--color-text-secondary)]">Cameras</span>
-            <div className="flex items-center gap-3">
+        {license ? (
+          <div className="grid gap-3">
+            <InfoRow label="Customer" value={license.customer_name} />
+            <InfoRow label="License ID" value={license.license_id} mono />
+            <InfoRow label="Issued by" value={license.issued_by_partner} />
+            <InfoRow label="Cameras allowed" value={`${license.max_cameras}`} />
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-[var(--color-text-secondary)]">Expires</span>
               <span className="text-sm text-[var(--color-text-primary)]">
-                {camerasUsed} / {camerasTotal} used
+                {formatDate(license.expires_at)}
+                {status.days_until_suspension !== null && status.state === "valid" && (
+                  <span className="text-[var(--color-success)] text-xs ml-2">
+                    ({status.days_until_suspension} days remaining)
+                  </span>
+                )}
+                {status.state === "warning" && (
+                  <span className="text-[var(--color-warning)] text-xs ml-2">(renewal due)</span>
+                )}
+                {status.state === "grace" && (
+                  <span className="text-[var(--color-critical)] text-xs ml-2">(in grace period)</span>
+                )}
+                {status.state === "suspended" && (
+                  <span className="text-[var(--color-critical)] text-xs ml-2">(expired)</span>
+                )}
               </span>
-              <div className="w-24 h-1.5 rounded-full bg-[var(--color-bg-tertiary)] overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-[var(--color-info)]"
-                  style={{ width: `${(camerasUsed / camerasTotal) * 100}%` }}
-                />
-              </div>
             </div>
+            <InfoRow label="Issued" value={formatDate(license.issued_at)} />
+            {status.heartbeat && (
+              <InfoRow
+                label="Heartbeat valid until"
+                value={formatDate(status.heartbeat.valid_until)}
+              />
+            )}
           </div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--color-text-secondary)]">Expires</span>
-            <span className="text-sm text-[var(--color-text-primary)]">
-              2027-03-26{" "}
-              {licenseState === "expired" ? (
-                <span className="text-[var(--color-critical)] text-xs">(Expired)</span>
-              ) : (
-                <span className="text-[var(--color-success)] text-xs">
-                  ({daysRemaining} days remaining)
-                </span>
-              )}
-            </span>
-          </div>
-          <InfoRow label="Issued" value="2026-03-26" />
-        </div>
+        ) : (
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            No license installed. Upload a .lic file from your implementation partner to activate
+            SafetyLens.
+          </p>
+        )}
       </Card>
 
       {/* Licensed Features */}
@@ -133,11 +227,11 @@ export function LicenseStatus() {
           Licensed Features
         </h2>
         <div className="space-y-2">
-          {FEATURES.map((feat) => {
-            const enabled = isNormal && feat.licensed
+          {FEATURE_CATALOG.map((feat) => {
+            const enabled = isHealthy && license?.features.includes(feat.key)
             return (
               <div
-                key={feat.name}
+                key={feat.key}
                 className="flex items-start gap-3 px-4 py-3 rounded-[var(--radius-md)] border bg-white"
               >
                 {enabled ? (
@@ -151,13 +245,15 @@ export function LicenseStatus() {
                       "text-sm font-medium",
                       enabled
                         ? "text-[var(--color-text-primary)]"
-                        : "text-[var(--color-text-tertiary)]"
+                        : "text-[var(--color-text-tertiary)]",
                     )}
                   >
                     {feat.name}
                   </p>
                   <p className="text-xs text-[var(--color-text-tertiary)]">
-                    {enabled ? feat.description : !feat.licensed && isNormal ? "Not licensed" : feat.description}
+                    {enabled ? feat.description : license?.features.includes(feat.key)
+                      ? "Suspended — see banner above"
+                      : "Not licensed"}
                   </p>
                 </div>
               </div>
@@ -171,55 +267,43 @@ export function LicenseStatus() {
         <h2 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3">
           Upload License
         </h2>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".lic,.json"
+          className="hidden"
+          onChange={onFileChange}
+        />
         <div
-          onClick={() =>
-            toast("License upload available in production deployment")
-          }
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={(e) => {
+            e.preventDefault()
+            setDragActive(true)
+          }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={onDrop}
           className={cn(
-            "flex flex-col items-center justify-center gap-2 py-10 rounded-[var(--radius-lg)] border-2 border-dashed cursor-pointer transition-colors hover:bg-[var(--color-bg-secondary)]",
-            licenseState === "expired"
-              ? "border-[var(--color-warning)]"
-              : "border-[var(--color-border-default)]"
+            "flex flex-col items-center justify-center gap-2 py-10 rounded-[var(--radius-lg)] border-2 border-dashed cursor-pointer transition-colors",
+            uploading && "opacity-50 pointer-events-none",
+            dragActive
+              ? "border-[var(--color-info)] bg-[var(--color-info-bg)]"
+              : status.state === "suspended" || status.state === "grace"
+                ? "border-[var(--color-warning)] hover:bg-[var(--color-bg-secondary)]"
+                : "border-[var(--color-border-default)] hover:bg-[var(--color-bg-secondary)]",
           )}
         >
-          <Upload className="w-6 h-6 text-[var(--color-text-tertiary)]" />
+          {uploading ? (
+            <Loader2 className="w-6 h-6 animate-spin text-[var(--color-text-tertiary)]" />
+          ) : (
+            <Upload className="w-6 h-6 text-[var(--color-text-tertiary)]" />
+          )}
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Drop .lic file here or click to browse
+            {uploading
+              ? "Uploading..."
+              : "Drop a .lic or heartbeat file here, or click to browse"}
           </p>
         </div>
       </div>
-
-      {/* Dev mode panel */}
-      {devMode && (
-        <div className="fixed bottom-4 right-4 z-50 bg-white border rounded-[var(--radius-lg)] shadow-lg p-3 space-y-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
-            Dev mode
-          </p>
-          <div className="flex gap-1.5">
-            <Button
-              size="sm"
-              variant={licenseState === "active" ? "primary" : "secondary"}
-              onClick={() => setLicenseState("active")}
-            >
-              Active
-            </Button>
-            <Button
-              size="sm"
-              variant={licenseState === "expired" ? "danger" : "secondary"}
-              onClick={() => setLicenseState("expired")}
-            >
-              Expired
-            </Button>
-            <Button
-              size="sm"
-              variant={licenseState === "disabled" ? "primary" : "secondary"}
-              onClick={() => setLicenseState("disabled")}
-            >
-              Disabled
-            </Button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

@@ -94,6 +94,7 @@ def test_add_zone_auto_enables_zone_intrusion():
     cfg = config_manager.load_config()
     cam = cfg["cameras"][cam_id]
     assert "zone_intrusion" in cam.get("alert_classes", [])
+    assert "alert_zone_intrusion" in cam.get("safety_rule_ids", [])
 
 
 def test_get_zones_after_add():

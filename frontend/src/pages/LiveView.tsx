@@ -213,11 +213,13 @@ export function LiveView() {
                           {cam.zone}
                         </Badge>
                         <Badge
-                          variant={cam.demo === "yolo+vlm" ? "warning" : cam.demo === "yoloe" ? "info" : "success"}
+                          variant={cam.demo === "yolo+vlm" ? "warning" : cam.demo === "yoloe" || cam.demo === "yolo+yoloe" ? "info" : "success"}
                           className="text-[10px]"
                         >
                           {cam.demo === "yolo+vlm" ? (
                             <span className="flex items-center gap-1"><Brain size={10} /> YOLO + VLM</span>
+                          ) : cam.demo === "yolo+yoloe" ? (
+                            <span className="flex items-center gap-1"><Cpu size={10} /> COCO + YOLOE</span>
                           ) : cam.demo === "yoloe" ? (
                             <span className="flex items-center gap-1"><Cpu size={10} /> YOLOe</span>
                           ) : (
@@ -256,9 +258,9 @@ export function LiveView() {
                         </span>
                       ))}
                     </div>
-                    {focusedCamId && cam.demo === "yoloe" && cam.yoloe_classes && cam.yoloe_classes.length > 0 && (
+                    {focusedCamId && (cam.demo === "yoloe" || cam.demo === "yolo+yoloe") && cam.yoloe_classes && cam.yoloe_classes.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1.5 pt-1.5 border-t border-neutral-800">
-                        <span className="text-[10px] text-neutral-500 mr-1">YOLOe classes:</span>
+                        <span className="text-[10px] text-neutral-500 mr-1">Open-vocab classes:</span>
                         {cam.yoloe_classes.map((cls) => (
                           <span key={cls} className="text-[10px] text-emerald-400 bg-emerald-950 rounded px-1.5 py-0.5">
                             {cls}

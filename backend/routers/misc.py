@@ -4,24 +4,22 @@ SafetyLens miscellaneous endpoints — health, videos, alert rules available.
 
 from fastapi import APIRouter
 
-from config_manager import get_config
-from constants import YOLO_MODEL_PATH, VIDEO_DIR
-from routers.safety_rules import _ensure_safety_rules
 import alert_store
+import diagnostics
+from config_manager import get_config
+from constants import VIDEO_DIR
+from routers.safety_rules import _ensure_safety_rules
 
 router = APIRouter(prefix="/api", tags=["misc"])
 
 
 @router.get("/health")
 async def health():
+    snapshot = diagnostics.build_health_snapshot()
     cfg = get_config()
-    return {
-        "status": "ok",
-        "model": str(YOLO_MODEL_PATH) if YOLO_MODEL_PATH.exists() else "yolov8n.pt (pretrained)",
-        "cameras": list(cfg["cameras"].keys()),
-        "vlm": f"{cfg['vlm']['model']} via Ollama",
-        "alerts_count": alert_store.get_stats()["total"],
-    }
+    snapshot["cameraIds"] = list(cfg["cameras"].keys())
+    snapshot["alerts_count"] = alert_store.get_stats()["total"]
+    return snapshot
 
 
 @router.get("/alert-rules-available")

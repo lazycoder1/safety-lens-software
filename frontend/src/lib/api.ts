@@ -23,12 +23,14 @@ export class ApiError extends Error {
   status?: number
   isNetwork: boolean
   isTimeout: boolean
-  constructor(message: string, opts: { status?: number; isNetwork?: boolean; isTimeout?: boolean } = {}) {
+  payload?: any
+  constructor(message: string, opts: { status?: number; isNetwork?: boolean; isTimeout?: boolean; payload?: any } = {}) {
     super(message)
     this.name = "ApiError"
     this.status = opts.status
     this.isNetwork = opts.isNetwork ?? false
     this.isTimeout = opts.isTimeout ?? false
+    this.payload = opts.payload
   }
 }
 
@@ -79,10 +81,12 @@ async function request(path: string, options?: RequestInit) {
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "")
+      let parsedPayload: any = null
       let message: string
       try {
-        const json = JSON.parse(text)
-        message = json.detail || json.message || json.error || ""
+        parsedPayload = JSON.parse(text)
+        const candidate = parsedPayload.detail || parsedPayload.message || parsedPayload.error || ""
+        message = typeof candidate === "string" ? candidate : ""
       } catch {
         message = ""
       }
@@ -94,7 +98,7 @@ async function request(path: string, options?: RequestInit) {
         else if (res.status >= 500) message = "Server error — please try again later"
         else message = "Something went wrong"
       }
-      throw new ApiError(message, { status: res.status })
+      throw new ApiError(message, { status: res.status, payload: parsedPayload })
     }
     return res.json()
   }
@@ -197,6 +201,14 @@ export async function testTelegramConfig() {
   return request("/api/config/telegram/test", { method: "POST" })
 }
 
+export async function fetchTelegramGroups(bot_token: string) {
+  return request("/api/config/telegram/groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bot_token }),
+  })
+}
+
 export async function getAlertTimeSeries(hours: number = 24) {
   return request(`/api/alerts/time-series?hours=${hours}`)
 }
@@ -235,10 +247,21 @@ export async function getCameras() {
   return request("/api/cameras")
 }
 
+export async function getCameraById(id: string) {
+  const cameras = await getCameras()
+  const camera = cameras.find((item: any) => item.id === id)
+  if (!camera) {
+    throw new ApiError("Camera not found", { status: 404 })
+  }
+  return camera
+}
+
 export async function addCamera(camera: {
   name: string
   video: string
   zone: string
+  profile?: string
+  capabilities?: string[]
   demo: string
   rules: string[]
   fps?: number
@@ -246,6 +269,7 @@ export async function addCamera(camera: {
   stream_type?: string
   rtsp_url?: string
   safety_rule_ids?: string[]
+  custom_long_tail_terms?: string[]
 }) {
   return request("/api/cameras", {
     method: "POST",
@@ -264,6 +288,25 @@ export async function updateCamera(id: string, updates: Record<string, any>) {
 
 export async function deleteCamera(id: string) {
   return request(`/api/cameras/${id}`, { method: "DELETE" })
+}
+
+export async function previewCameraPlan(payload: {
+  name?: string
+  zone?: string
+  profile?: string
+  capabilities?: string[]
+  stream_type?: string
+  video?: string
+  rtsp_url?: string
+  safety_rule_ids?: string[]
+  yoloe_classes?: string[]
+  custom_long_tail_terms?: string[]
+}) {
+  return request("/api/camera-plans/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
 }
 
 // Alerts
@@ -330,7 +373,7 @@ export async function createDetectionRule(rule: {
 }
 
 // Safety Rules
-import type { PPERule, SafetyRule } from "@/types"
+import type { ModelInstallJob, ModelStatus, PPERule, SafetyRule } from "@/types"
 
 export async function getSafetyRules(): Promise<SafetyRule[]> {
   return request("/api/safety-rules")
@@ -398,7 +441,80 @@ export async function deletePPERule(id: string): Promise<void> {
   return request(`/api/ppe-rules/${id}`, { method: "DELETE" })
 }
 
+// Models
+export async function getModels(): Promise<{ models: ModelStatus[] }> {
+  return request("/api/models")
+}
+
+export async function installModels(modelKeys: string[]): Promise<ModelInstallJob> {
+  return request("/api/models/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_keys: modelKeys }),
+  })
+}
+
+export async function getModelInstallJob(jobId: string): Promise<ModelInstallJob> {
+  return request(`/api/models/install/${jobId}`)
+}
+
+export async function retryModelInstallJob(jobId: string): Promise<ModelInstallJob> {
+  return request(`/api/models/install/${jobId}/retry`, { method: "POST" })
+}
+
 // Videos
 export async function getVideos(): Promise<string[]> {
   return request("/api/videos")
+}
+
+// License
+export type LicenseState = "valid" | "warning" | "grace" | "suspended"
+
+export interface LicenseInfo {
+  schema_version: number
+  license_id: string
+  customer_name: string
+  issued_by_partner: string
+  max_cameras: number
+  features: string[]
+  issued_at: string
+  expires_at: string
+  heartbeat_url: string
+}
+
+export interface HeartbeatInfo {
+  schema_version: number
+  license_id: string
+  issued_at: string
+  valid_until: string
+}
+
+export interface LicenseStatusResponse {
+  state: LicenseState
+  license: LicenseInfo | null
+  heartbeat: HeartbeatInfo | null
+  reason: string
+  days_until_suspension: number | null
+  has_license: boolean
+  inference_allowed: boolean
+}
+
+export async function getLicenseStatus(): Promise<LicenseStatusResponse> {
+  return request("/api/license")
+}
+
+async function uploadLicenseFile(path: string, file: File): Promise<LicenseStatusResponse> {
+  const form = new FormData()
+  form.append("file", file)
+  // FormData boundary is set by the browser, so we deliberately do NOT set
+  // Content-Type — letting fetch handle it.
+  return request(path, { method: "POST", body: form })
+}
+
+export async function uploadLicense(file: File): Promise<LicenseStatusResponse> {
+  return uploadLicenseFile("/api/license/upload", file)
+}
+
+export async function uploadHeartbeat(file: File): Promise<LicenseStatusResponse> {
+  return uploadLicenseFile("/api/license/heartbeat", file)
 }

@@ -13,6 +13,8 @@ from routers.config import router as config_router
 from routers.stream import router as stream_router
 from routers.detection_rules import router as detection_rules_router
 from routers.safety_rules import router as safety_rules_router
+from routers.license import router as license_router
+from routers.models import router as models_router
 from routers.misc import router as misc_router
 
 
@@ -26,4 +28,6 @@ def register_routers(app: FastAPI):
     app.include_router(stream_router)
     app.include_router(detection_rules_router)
     app.include_router(safety_rules_router)
+    app.include_router(license_router)
+    app.include_router(models_router)
     app.include_router(misc_router)

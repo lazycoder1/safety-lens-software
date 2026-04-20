@@ -2,10 +2,12 @@
 User authentication and management for SafetyLens backend.
 """
 
+import json
 import logging
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import bcrypt
@@ -16,12 +18,35 @@ from db import get_conn
 
 logger = logging.getLogger("safetylens.auth")
 
-JWT_SECRET = os.environ.get("JWT_SECRET") or secrets.token_hex(32)
+
+def _load_jwt_secret() -> str:
+    """Read JWT secret from env, then config.json, else generate & persist."""
+    env = os.environ.get("JWT_SECRET")
+    if env:
+        return env
+    cfg_path = Path(__file__).parent / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text())
+        secret = cfg.get("auth", {}).get("jwt_secret")
+        if secret:
+            return secret
+    except Exception:
+        pass
+    # Last resort: generate and persist into config.json
+    secret = secrets.token_hex(32)
+    try:
+        cfg = json.loads(cfg_path.read_text())
+        cfg.setdefault("auth", {})["jwt_secret"] = secret
+        cfg_path.write_text(json.dumps(cfg, indent=2))
+        logger.info("Generated and saved JWT_SECRET to config.json")
+    except Exception:
+        logger.warning("JWT_SECRET not persisted — tokens will invalidate on restart")
+    return secret
+
+
+JWT_SECRET = _load_jwt_secret()
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 8
-
-if not os.environ.get("JWT_SECRET"):
-    logger.warning("JWT_SECRET not set — using random key (tokens invalidate on restart)")
 
 
 # ── JWT ─────────────────────────────────────────────────────────────────────

@@ -29,6 +29,14 @@ backend/.pytest_cache/
 # Config with secrets
 backend/config.json
 
+# Licensing — runtime state and any private keys must never be committed
+backend/keys/*_private.pem
+backend/license/
+backend/heartbeat/
+
+# Local packaged extras bundle (models/videos/config) should not be source-controlled
+safetylens-extras.zip
+
 # IDE
 .vscode/
 .idea/

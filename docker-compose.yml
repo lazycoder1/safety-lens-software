@@ -23,6 +23,7 @@ services:
       - "${SAFETYLENS_PORT:-8000}:8000"
     environment:
       DATABASE_URL: postgresql://safetylens:${POSTGRES_PASSWORD:-safetylens}@db:5432/safetylens
+      SAFETYLENS_CONFIG_STORE: postgres
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/api/generate}
     volumes:
       - snapshots:/app/backend/snapshots

@@ -1,5 +1,6 @@
 """Tests for alert_store module — PostgreSQL alert persistence."""
 
+from datetime import datetime, timedelta, timezone
 import os
 import tempfile
 import threading
@@ -77,6 +78,7 @@ def test_create_alert_returns_dict_with_expected_keys():
     expected_keys = {
         "id", "severity", "status", "rule", "cameraId", "cameraName",
         "zone", "confidence", "timestamp", "source", "description",
+        "cleanSnapshotUrl", "bboxes",
         "snapshotUrl", "acknowledgedBy", "acknowledgedAt",
         "resolvedAt", "snoozedUntil", "falsePositive",
     }
@@ -387,6 +389,7 @@ def test_output_uses_camel_case():
     camel_keys = {
         "id", "severity", "status", "rule", "cameraId", "cameraName",
         "zone", "confidence", "timestamp", "source", "description",
+        "cleanSnapshotUrl", "bboxes",
         "snapshotUrl", "acknowledgedBy", "acknowledgedAt",
         "resolvedAt", "snoozedUntil", "falsePositive",
     }
@@ -417,3 +420,46 @@ def test_concurrent_creates():
     assert len(errors) == 0
     alerts = alert_store.get_alerts(limit=500)
     assert len(alerts) == 40
+
+
+def test_cleanup_snapshots_prunes_old_resolved_alerts():
+    fake_jpeg = b"\xff\xd8\xff\xe0old_jpeg"
+    alert = alert_store.create_alert(
+        camera_id="cam1",
+        camera_name="Test",
+        zone="Zone A",
+        rule="Helmet",
+        severity="P2",
+        confidence=0.87,
+        snapshot_jpeg=fake_jpeg,
+        clean_snapshot_jpeg=fake_jpeg,
+    )
+    alert_store.resolve_alert(alert["id"])
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+
+    with alert_store._get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE alerts SET timestamp = %s, status = 'resolved' WHERE id = %s",
+                (old_timestamp, alert["id"]),
+            )
+        conn.commit()
+
+    result = alert_store.cleanup_snapshots(retention_days=30, max_bytes=1024 * 1024, orphan_grace_hours=24)
+
+    refreshed = alert_store.get_alert(alert["id"])
+    assert result["detachedAlerts"] == 1
+    assert refreshed["snapshotUrl"] is None
+    assert refreshed["cleanSnapshotUrl"] is None
+
+
+def test_cleanup_snapshots_deletes_old_orphans():
+    orphan = _test_snapshots / "orphan.jpg"
+    orphan.write_bytes(b"orphan")
+    old_time = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
+    os.utime(orphan, (old_time, old_time))
+
+    result = alert_store.cleanup_snapshots(retention_days=30, max_bytes=1024 * 1024, orphan_grace_hours=24)
+
+    assert result["deletedFiles"] == 1
+    assert not orphan.exists()

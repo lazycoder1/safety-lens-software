@@ -109,3 +109,33 @@ def _send_message(token: str, chat_id: str, text: str) -> None:
         json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
         timeout=10,
     )
+
+
+def fetch_groups(bot_token: str) -> dict:
+    """Call getUpdates and return unique group/supergroup chats the bot belongs to."""
+    try:
+        url = f"{TELEGRAM_API.format(token=bot_token)}/getUpdates"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            data = resp.json()
+            return {"ok": False, "error": data.get("description", resp.text), "groups": []}
+
+        results = resp.json().get("result", [])
+        seen: dict[str, dict] = {}
+        for update in results:
+            msg = update.get("message") or update.get("my_chat_member", {}).get("chat")
+            if not msg:
+                continue
+            chat = msg.get("chat") or msg
+            chat_type = chat.get("type", "")
+            if chat_type in ("group", "supergroup"):
+                chat_id = str(chat.get("id"))
+                if chat_id not in seen:
+                    seen[chat_id] = {
+                        "chat_id": chat_id,
+                        "title": chat.get("title", f"Group {chat_id}"),
+                        "type": chat_type,
+                    }
+        return {"ok": True, "groups": list(seen.values())}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "groups": []}

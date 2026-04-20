@@ -24,7 +24,10 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOGS_DIR = Path(__file__).parent / "logs"
+DEFAULT_LOGS_DIR = Path(__file__).parent / "logs"
+LOGS_DIR = Path(os.environ.get("SAFETYLENS_LOG_DIR", str(DEFAULT_LOGS_DIR)))
+DEFAULT_LOG_MAX_BYTES = 25 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 8
 
 
 class JSONFormatter(logging.Formatter):
@@ -38,7 +41,26 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         # Merge any extra keys (camera_id, path, etc.)
-        for key in ("camera_id", "path", "source", "subscribers", "elapsed", "alert_id"):
+        for key in (
+            "camera_id",
+            "path",
+            "source",
+            "subscribers",
+            "elapsed",
+            "alert_id",
+            "request_id",
+            "method",
+            "route",
+            "status_code",
+            "duration_ms",
+            "user_id",
+            "username",
+            "action",
+            "target_type",
+            "target_id",
+            "outcome",
+            "free_bytes",
+        ):
             val = getattr(record, key, None)
             if val is not None:
                 entry[key] = val
@@ -67,7 +89,17 @@ class ColorConsoleFormatter(logging.Formatter):
 
         # Append extra context
         extras = []
-        for key in ("camera_id", "path", "source", "elapsed"):
+        for key in (
+            "camera_id",
+            "path",
+            "source",
+            "elapsed",
+            "request_id",
+            "status_code",
+            "duration_ms",
+            "route",
+            "action",
+        ):
             val = getattr(record, key, None)
             if val is not None:
                 extras.append(f"{key}={val}")
@@ -100,10 +132,13 @@ def setup_logging() -> None:
 
     # ── File handler (always JSON, always DEBUG) ─────────────────────
     LOGS_DIR.mkdir(exist_ok=True)
+    max_bytes = int(os.environ.get("SAFETYLENS_LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES)))
+    backup_count = int(os.environ.get("SAFETYLENS_LOG_BACKUP_COUNT", str(DEFAULT_LOG_BACKUP_COUNT)))
+
     file_handler = RotatingFileHandler(
         LOGS_DIR / "safetylens.log",
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
         encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)
@@ -118,4 +153,10 @@ def setup_logging() -> None:
     logging.getLogger("ultralytics").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
-    root_logger.info("Logging initialized", extra={"source": f"env={env}"})
+    root_logger.info(
+        "Logging initialized",
+        extra={
+            "source": f"env={env}",
+            "path": str(LOGS_DIR),
+        },
+    )

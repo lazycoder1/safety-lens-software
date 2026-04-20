@@ -40,6 +40,7 @@ import {
   Car,
   Users,
   Key,
+  Cpu,
 } from "lucide-react"
 
 export function Sidebar() {
@@ -92,10 +93,11 @@ export function Sidebar() {
     if (role === "admin" || role === "operator") {
       const systemItems = [
         { to: "/system/settings", icon: Settings, label: "Settings" },
+        ...(role === "admin" ? [{ to: "/system/models", icon: Cpu, label: "Models" }] : []),
         { to: "/system/license", icon: Key, label: "License" },
       ]
       if (role === "admin") {
-        systemItems.push({ to: "/system/users", icon: Shield, label: "User Management", badge: pendingCount })
+        systemItems.push({ to: "/system/users", icon: Shield, label: "User Management", badge: pendingCount } as any)
       }
       groups.push({ label: "System", items: systemItems })
     }

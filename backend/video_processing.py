@@ -1,36 +1,93 @@
-"""
-SafetyLens video processing — alert creation, VLM, MJPEG streaming, thread management.
-"""
+"""SafetyLens video processing — alerts, grouped inference, MJPEG streaming."""
+
+from __future__ import annotations
 
 import asyncio
 import base64
 import logging
-import os
-import time
 import threading
+import time
 from datetime import datetime, timezone
 
 import cv2
 import numpy as np
 import requests
 
-from config_manager import get_config, save_config
-from constants import VIDEO_DIR, OLLAMA_URL, YOLOE_COLORS, VIOLATION_THRESHOLD
+import alert_store
+import licensing
+import model_manager
+import state
+import telegram_notifier
+from camera_planner import build_execution_plan
+from capability_registry import CLASS_TERM_TO_CAPABILITY
+from config_manager import get_config
+from constants import OLLAMA_URL, VIDEO_DIR, VIOLATION_THRESHOLD, YOLOE_COLORS
 from detection import (
-    draw_detections,
+    apply_camera_overlay,
     check_violations,
     check_yoloe_violations,
     check_zone_intrusions,
+    draw_detections,
     extract_violation_bboxes,
 )
-import state
-import alert_store
-import telegram_notifier
+
+LICENSE_PAUSE_INTERVAL = 1.0
 
 logger = logging.getLogger("safetylens")
 
+_COCO_CLASS_TO_CAPABILITIES = {
+    "person": ["person_presence", "zone_intrusion"],
+    "cell phone": ["mobile_phone"],
+    "dog": ["animal_presence"],
+    "cat": ["animal_presence"],
+    "deer": ["animal_presence"],
+    "animal": ["animal_presence"],
+    "car": ["vehicle_presence"],
+    "truck": ["vehicle_presence"],
+    "motorcycle": ["vehicle_presence"],
+}
 
-# ── Alert helpers ───────────────────────────────────────────────────────────
+
+def _normalize_text(value: str) -> str:
+    return value.lower().replace("_", " ").replace("-", " ").strip()
+
+
+def _normalize_detection_batch(detections: list[dict], model_family: str) -> list[dict]:
+    normalized: list[dict] = []
+    for detection in detections:
+        class_name = detection["class"]
+        capability_keys = _COCO_CLASS_TO_CAPABILITIES.get(class_name, [])
+        if not capability_keys:
+            mapped = CLASS_TERM_TO_CAPABILITY.get(_normalize_text(class_name))
+            if mapped:
+                capability_keys = [mapped]
+        normalized.append({
+            **detection,
+            "model_family": model_family,
+            "capability_keys": capability_keys,
+        })
+    return normalized
+
+
+def _overlay_label_for_plan(execution_plan: dict) -> str:
+    if execution_plan.get("run_coco_primary") and execution_plan.get("run_ppe_specialist") and execution_plan.get("run_yoloe_long_tail"):
+        return "COCO + PPE + YOLOE"
+    if execution_plan.get("run_coco_primary") and execution_plan.get("run_ppe_specialist"):
+        return "COCO + PPE"
+    if execution_plan.get("run_coco_primary") and execution_plan.get("run_yoloe_long_tail"):
+        return "COCO + YOLOE"
+    if execution_plan.get("run_ppe_specialist"):
+        return "PPE Specialist"
+    if execution_plan.get("run_yoloe_long_tail"):
+        return "YOLOE"
+    return "YOLO26"
+
+
+def _count_color_for_plan(execution_plan: dict) -> tuple[int, int, int]:
+    if execution_plan.get("run_ppe_specialist") or execution_plan.get("run_yoloe_long_tail"):
+        return (37, 99, 235)
+    return (34, 197, 94)
+
 
 def create_alert(
     camera_id: str,
@@ -43,7 +100,6 @@ def create_alert(
 ) -> dict | None:
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
-    # Capture snapshot from current frame — skip alert if no frame available yet
     snapshot_jpeg = state.camera_frames.get(camera_id)
     clean_snapshot_jpeg = state.camera_clean_frames.get(camera_id)
     if not snapshot_jpeg:
@@ -62,7 +118,6 @@ def create_alert(
         bboxes=bboxes,
         clean_snapshot_jpeg=clean_snapshot_jpeg,
     )
-    # Send Telegram notification (fire-and-forget, never blocks)
     try:
         snap_url = alert.get("snapshotUrl")
         snap_full = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1]) if snap_url else None
@@ -82,8 +137,6 @@ async def broadcast_alert(msg: dict):
     for ws in dead:
         state.alert_subscribers.remove(ws)
 
-
-# ── VLM (qwen3-vl) ─────────────────────────────────────────────────────────
 
 def call_vlm(frame: np.ndarray) -> str:
     try:
@@ -111,8 +164,8 @@ def call_vlm(frame: np.ndarray) -> str:
         if resp.status_code == 200:
             return resp.json().get("response", "No response from VLM")
         return f"VLM error: {resp.status_code}"
-    except Exception as e:
-        return f"VLM unavailable: {e}"
+    except Exception as exc:
+        return f"VLM unavailable: {exc}"
 
 
 def vlm_worker(camera_id: str, stop_event: threading.Event):
@@ -121,28 +174,26 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
         vlm_cfg = cfg["vlm"]
         interval = vlm_cfg["interval"]
 
-        # Sleep in small increments so we can respond to stop_event
         for _ in range(int(interval)):
             if stop_event.is_set():
                 return
             time.sleep(1)
 
-        if not vlm_cfg.get("enabled", True):
+        if not vlm_cfg.get("enabled", True) or not licensing.is_inference_allowed():
             continue
 
         frame_bytes = state.camera_frames.get(camera_id)
         if frame_bytes is None:
             continue
 
-        nparr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             continue
 
         logger.info("VLM analysis started", extra={"camera_id": camera_id})
-        start = time.time()
+        started = time.time()
         result = call_vlm(frame)
-        elapsed = time.time() - start
+        elapsed = time.time() - started
         logger.info("VLM analysis done", extra={"camera_id": camera_id, "elapsed": round(elapsed, 1)})
 
         with state.vlm_lock:
@@ -152,9 +203,8 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
                 "elapsed": round(elapsed, 1),
             }
 
-        # Check for violations using keywords from config
         keywords = vlm_cfg.get("violation_keywords", [])
-        is_violation = any(kw in result.lower() for kw in keywords)
+        is_violation = any(keyword in result.lower() for keyword in keywords)
         alert = create_alert(
             camera_id=camera_id,
             rule="VLM Scene Analysis",
@@ -170,18 +220,82 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
             loop.close()
 
 
-# ── Video Processing Threads ────────────────────────────────────────────────
+def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: dict, *, conf: float, device: str, imgsz: int):
+    annotated = frame.copy()
+    detections: list[dict] = []
+
+    if execution_plan.get("run_coco_primary"):
+        results = model_manager.predict(
+            "coco_primary",
+            frame,
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+        )
+        annotated, coco_detections = draw_detections(
+            annotated,
+            results,
+            camera_id,
+            show_overlay=False,
+        )
+        detections.extend(_normalize_detection_batch(coco_detections, "coco_primary"))
+
+    if execution_plan.get("run_ppe_specialist") and execution_plan.get("ppe_prompt_terms"):
+        ppe_prompts = execution_plan["ppe_prompt_terms"]
+        results = model_manager.predict(
+            "ppe_specialist",
+            frame,
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+            classes=ppe_prompts,
+        )
+        annotated, ppe_detections = draw_detections(
+            annotated,
+            results,
+            camera_id,
+            class_names=ppe_prompts,
+            colors=YOLOE_COLORS,
+            show_overlay=False,
+        )
+        detections.extend(_normalize_detection_batch(ppe_detections, "ppe_specialist"))
+
+    if execution_plan.get("run_yoloe_long_tail") and execution_plan.get("yoloe_prompt_terms"):
+        long_tail_prompts = execution_plan["yoloe_prompt_terms"]
+        results = model_manager.predict(
+            "yoloe_long_tail",
+            frame,
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+            classes=long_tail_prompts,
+        )
+        annotated, long_tail_detections = draw_detections(
+            annotated,
+            results,
+            camera_id,
+            class_names=long_tail_prompts,
+            colors=YOLOE_COLORS,
+            show_overlay=False,
+        )
+        detections.extend(_normalize_detection_batch(long_tail_detections, "yoloe_long_tail"))
+
+    annotated = apply_camera_overlay(
+        annotated,
+        camera_id=camera_id,
+        detection_count=len(detections),
+        demo_label=_overlay_label_for_plan(execution_plan),
+        count_color=_count_color_for_plan(execution_plan),
+    )
+    return annotated, detections
+
 
 def video_processor(camera_id: str, stop_event: threading.Event):
     cfg = get_config()
     cam = cfg["cameras"][camera_id]
     stream_type = cam.get("stream_type", "file")
-    if stream_type == "rtsp":
-        video_source = cam.get("rtsp_url", "")
-    else:
-        video_source = str(VIDEO_DIR / cam["video"])
-    demo_mode = cam.get("demo", "yolo")
-    yoloe_classes = cam.get("yoloe_classes", ["person"])
+    video_source = cam.get("rtsp_url", "") if stream_type == "rtsp" else str(VIDEO_DIR / cam["video"])
+    execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
     g = cfg["global"]
     target_fps = cam.get("fps", g["target_fps"])
     frame_interval = 1.0 / target_fps
@@ -190,29 +304,20 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     jpeg_quality = g["jpeg_quality"]
     inference_width = g["inference_width"]
     device = g["device"]
-    last_alert_by_rule: dict[str, float] = {}  # rule_name -> last fire time
-    active_violations: set[str] = set()  # currently active violation rules (fire once until cleared)
-    violation_streak: dict[str, int] = {}  # rule -> consecutive frames with violation
-    violation_miss: dict[str, int] = {}  # rule -> consecutive frames WITHOUT violation (grace period)
-    # Sliding window: track detection hits in last WINDOW_SIZE frames per rule
-    WINDOW_SIZE = 15  # look at last 15 detection frames (~7.5 seconds at 6fps/3rd frame)
-    violation_window: dict[str, list[bool]] = {}  # rule -> list of booleans (hit/miss)
+    last_alert_by_rule: dict[str, float] = {}
+    active_violations: set[str] = set()
+    violation_window: dict[str, list[bool]] = {}
+    window_size = 15
     frame_counter = 0
     last_annotated = None
 
-    # Pre-set YOLOe classes if needed
-    if demo_mode == "yoloe" and state.yoloe_model is not None:
-        with state.yoloe_lock:
-            state.yoloe_model.to("cpu")
-            import tempfile
-            orig_cwd = os.getcwd()
-            os.chdir(tempfile.gettempdir())
-            try:
-                state.yoloe_model.set_classes(yoloe_classes)
-            finally:
-                os.chdir(orig_cwd)
-            state.yoloe_model.to(device)
-            logger.info("YOLOe classes set", extra={"camera_id": camera_id})
+    missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
+    if missing_model_keys:
+        state.camera_runtime_status[camera_id] = "awaiting_model_install"
+        state.camera_frames[camera_id] = None
+        state.camera_detections[camera_id] = []
+        logger.warning("Camera waiting on missing models", extra={"camera_id": camera_id, "missing_models": missing_model_keys})
+        return
 
     while not stop_event.is_set():
         cap = cv2.VideoCapture(video_source)
@@ -227,44 +332,33 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             continue
 
         while cap.isOpened() and not stop_event.is_set():
-            start_time = time.time()
-            ret, frame = cap.read()
-            if not ret:
+            if not licensing.is_inference_allowed():
+                time.sleep(LICENSE_PAUSE_INTERVAL)
+                continue
+
+            started = time.time()
+            ok, frame = cap.read()
+            if not ok:
                 break
 
             frame_counter += 1
+            current_cfg = get_config()
+            current_cam = current_cfg["cameras"].get(camera_id, {})
+            execution_plan = current_cam.get("execution_plan") or build_execution_plan(current_cam, current_cfg)
+            state.camera_runtime_status[camera_id] = "running"
 
-            # Run detection every 3rd frame, reuse last annotated on others
             if frame_counter % 3 == 1:
                 try:
-                    if demo_mode == "yoloe" and state.yoloe_model is not None:
-                        with state.yoloe_lock:
-                            # Re-read classes from config in case they were updated live
-                            current_cfg = get_config()
-                            current_cam = current_cfg["cameras"].get(camera_id, {})
-                            current_classes = current_cam.get("yoloe_classes", yoloe_classes)
-                            if current_classes != yoloe_classes:
-                                yoloe_classes = current_classes
-                                state.yoloe_model.to("cpu")
-                                import tempfile
-                                _cwd = os.getcwd()
-                                os.chdir(tempfile.gettempdir())
-                                try:
-                                    state.yoloe_model.set_classes(yoloe_classes)
-                                finally:
-                                    os.chdir(_cwd)
-                                state.yoloe_model.to(device)
-                                logger.info("YOLOe classes updated", extra={"camera_id": camera_id})
-                            results = state.yoloe_model.predict(frame, conf=yolo_conf, verbose=False, device=device, imgsz=inference_width)
-                        annotated, detections = draw_detections(frame, results, camera_id, class_names=yoloe_classes, colors=YOLOE_COLORS, demo_label="YOLOE")
-                    elif state.model is not None:
-                        results = state.model.predict(frame, conf=yolo_conf, verbose=False, device=device, imgsz=inference_width)
-                        annotated, detections = draw_detections(frame, results, camera_id)
-                    else:
-                        annotated = frame
-                        detections = []
-                except Exception as e:
-                    logger.error("Detection failed", extra={"camera_id": camera_id})
+                    annotated, detections = _run_grouped_inference(
+                        camera_id,
+                        frame,
+                        execution_plan,
+                        conf=yolo_conf,
+                        device=device,
+                        imgsz=inference_width,
+                    )
+                except Exception:
+                    logger.exception("Detection failed", extra={"camera_id": camera_id})
                     annotated = frame
                     detections = []
                 last_annotated = annotated
@@ -275,125 +369,104 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 annotated = frame
                 state.camera_detections[camera_id] = []
 
-            # Check for violations (sliding window: N hits out of WINDOW_SIZE frames before firing)
-            dets = state.camera_detections.get(camera_id, [])
-            if len(dets) > 0:
-                if demo_mode == "yoloe":
-                    candidates = check_yoloe_violations(dets, camera_id)
-                    candidates.extend(check_violations(dets, camera_id))
-                else:
-                    candidates = check_violations(dets, camera_id)
+            detections = state.camera_detections.get(camera_id, [])
+            if detections:
+                candidates = []
+                if execution_plan.get("run_ppe_specialist"):
+                    candidates.extend(check_yoloe_violations(detections, camera_id))
+                candidates.extend(check_violations(detections, camera_id))
 
-                # Zone intrusion checks (works with both YOLO and YOLOe)
-                h_frame, w_frame = frame.shape[:2]
-                candidates.extend(check_zone_intrusions(dets, camera_id, w_frame, h_frame))
+                frame_h, frame_w = frame.shape[:2]
+                candidates.extend(check_zone_intrusions(detections, camera_id, frame_w, frame_h))
+                current_violation_rules = {candidate["rule"]: candidate for candidate in candidates}
 
-                # Determine which violations are present this frame
-                current_violation_rules = {c["rule"]: c for c in candidates}
-
-                # Update sliding window for ALL tracked rules
-                all_tracked = set(violation_window.keys()) | set(current_violation_rules.keys())
+                all_tracked = set(violation_window) | set(current_violation_rules)
                 for rule_key in all_tracked:
-                    if rule_key not in violation_window:
-                        violation_window[rule_key] = []
-                    violation_window[rule_key].append(rule_key in current_violation_rules)
-                    # Trim to window size
-                    if len(violation_window[rule_key]) > WINDOW_SIZE:
-                        violation_window[rule_key] = violation_window[rule_key][-WINDOW_SIZE:]
+                    violation_window.setdefault(rule_key, []).append(rule_key in current_violation_rules)
+                    if len(violation_window[rule_key]) > window_size:
+                        violation_window[rule_key] = violation_window[rule_key][-window_size:]
 
-                # Clear active violations whose window has gone cold (< 2 hits in last window)
                 for rule_key in list(active_violations):
-                    window = violation_window.get(rule_key, [])
-                    if sum(window[-WINDOW_SIZE:]) < 2:
+                    if sum(violation_window.get(rule_key, [])[-window_size:]) < 2:
                         active_violations.discard(rule_key)
 
-                # Check if any rule crosses its threshold (N hits out of WINDOW_SIZE frames)
                 now = time.time()
                 for rule_key, candidate in current_violation_rules.items():
                     if rule_key in active_violations:
-                        continue  # already fired, skip until cleared
-                    # Cooldown: don't re-fire within alert_cooldown seconds
+                        continue
                     if now - last_alert_by_rule.get(rule_key, 0) < alert_cooldown:
                         continue
-                    window = violation_window.get(rule_key, [])
-                    hits = sum(window)
+                    hits = sum(violation_window.get(rule_key, []))
                     rule_threshold = candidate.get("threshold") or VIOLATION_THRESHOLD
-                    if hits >= rule_threshold:
-                        active_violations.add(rule_key)
-                        last_alert_by_rule[rule_key] = now
-                        violation_window[rule_key] = []  # reset window after firing
-                        violation_bboxes = extract_violation_bboxes(candidate["rule"], dets, w_frame, h_frame, camera_id)
-                        alert = create_alert(
-                            camera_id=candidate["camera_id"],
-                            rule=candidate["rule"],
-                            severity=candidate["severity"],
-                            confidence=candidate["confidence"],
-                            description=candidate["description"],
-                            source=candidate["source"],
-                            bboxes=violation_bboxes,
-                        )
-                        if alert:
-                            try:
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
-                                loop.close()
-                            except Exception:
-                                pass
+                    if hits < rule_threshold:
+                        continue
+                    active_violations.add(rule_key)
+                    last_alert_by_rule[rule_key] = now
+                    violation_window[rule_key] = []
+                    violation_bboxes = extract_violation_bboxes(candidate["rule"], detections, frame_w, frame_h, camera_id)
+                    alert = create_alert(
+                        camera_id=candidate["camera_id"],
+                        rule=candidate["rule"],
+                        severity=candidate["severity"],
+                        confidence=candidate["confidence"],
+                        description=candidate["description"],
+                        source=candidate["source"],
+                        bboxes=violation_bboxes,
+                    )
+                    if alert:
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
+                            loop.close()
+                        except Exception:
+                            logger.exception("Alert broadcast failed")
 
-                # Clean up stale windows (no hits in last WINDOW_SIZE frames)
-                for rule_key in list(violation_window.keys()):
-                    if len(violation_window[rule_key]) >= WINDOW_SIZE and sum(violation_window[rule_key]) == 0:
+                for rule_key in list(violation_window):
+                    if len(violation_window[rule_key]) >= window_size and sum(violation_window[rule_key]) == 0:
                         violation_window.pop(rule_key, None)
             else:
-                # No detections -- record a miss for all tracked rules
-                for rule_key in list(violation_window.keys()):
+                for rule_key in list(violation_window):
                     violation_window[rule_key].append(False)
-                    if len(violation_window[rule_key]) > WINDOW_SIZE:
-                        violation_window[rule_key] = violation_window[rule_key][-WINDOW_SIZE:]
-                    # Clean up cold windows
+                    if len(violation_window[rule_key]) > window_size:
+                        violation_window[rule_key] = violation_window[rule_key][-window_size:]
                     if sum(violation_window[rule_key]) == 0:
                         violation_window.pop(rule_key, None)
                         active_violations.discard(rule_key)
 
-            # Downscale to 854px wide before JPEG encode
-            h, w = annotated.shape[:2]
-            if w > 854:
-                scale = 854.0 / w
-                new_w = 854
-                new_h = int(h * scale)
-                clean_resized = cv2.resize(frame, (new_w, new_h))
-                annotated = cv2.resize(annotated, (new_w, new_h))
+            height, width = annotated.shape[:2]
+            if width > 854:
+                scale = 854.0 / width
+                new_width = 854
+                new_height = int(height * scale)
+                clean_resized = cv2.resize(frame, (new_width, new_height))
+                annotated = cv2.resize(annotated, (new_width, new_height))
             else:
                 clean_resized = frame
 
-            # Encode to JPEG
             _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
             state.camera_frames[camera_id] = buffer.tobytes()
 
-            # Store clean (unannotated) frame for violation snapshots
             _, clean_buffer = cv2.imencode(".jpg", clean_resized, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
             state.camera_clean_frames[camera_id] = clean_buffer.tobytes()
 
-            # Frame rate control
-            elapsed = time.time() - start_time
+            elapsed = time.time() - started
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
         cap.release()
-        if not stop_event.is_set():
-            if stream_type == "rtsp":
-                logger.warning("RTSP stream dropped, reconnecting in 5s", extra={"camera_id": camera_id})
-                for _ in range(50):
-                    if stop_event.is_set():
-                        return
-                    time.sleep(0.1)
-            else:
-                logger.debug("Video loop restarting", extra={"camera_id": camera_id})
+        if stop_event.is_set():
+            return
+        if stream_type == "rtsp":
+            logger.warning("RTSP stream dropped, reconnecting in 5s", extra={"camera_id": camera_id})
+            for _ in range(50):
+                if stop_event.is_set():
+                    return
+                time.sleep(0.1)
+        else:
+            logger.debug("Video loop restarting", extra={"camera_id": camera_id})
 
-
-# ── Thread management ───────────────────────────────────────────────────────
 
 def start_camera(cam_id: str):
     cfg = get_config()
@@ -401,24 +474,31 @@ def start_camera(cam_id: str):
     if not cam or not cam.get("enabled", True):
         return
 
-    stop_evt = threading.Event()
-    t = threading.Thread(target=video_processor, args=(cam_id, stop_evt), daemon=True)
-    t.start()
-    state.camera_threads[cam_id] = (t, stop_evt)
+    execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
+    missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
     state.camera_frames[cam_id] = None
     state.camera_detections[cam_id] = []
+    if missing_model_keys:
+        state.camera_runtime_status[cam_id] = "awaiting_model_install"
+        logger.warning("Skipping camera start until models are ready", extra={"camera_id": cam_id, "missing_models": missing_model_keys})
+        return
+
+    stop_evt = threading.Event()
+    thread = threading.Thread(target=video_processor, args=(cam_id, stop_evt), daemon=True)
+    thread.start()
+    state.camera_threads[cam_id] = (thread, stop_evt)
+    state.camera_runtime_status[cam_id] = "starting"
     logger.info("Started video processor", extra={"camera_id": cam_id})
 
-    # Start VLM worker if demo includes vlm
     if cam.get("demo") == "yolo+vlm":
         start_vlm_for_camera(cam_id)
 
 
 def start_vlm_for_camera(cam_id: str):
     stop_evt = threading.Event()
-    t = threading.Thread(target=vlm_worker, args=(cam_id, stop_evt), daemon=True)
-    t.start()
-    state.vlm_threads[cam_id] = (t, stop_evt)
+    thread = threading.Thread(target=vlm_worker, args=(cam_id, stop_evt), daemon=True)
+    thread.start()
+    state.vlm_threads[cam_id] = (thread, stop_evt)
     logger.info("Started VLM worker", extra={"camera_id": cam_id})
 
 
@@ -435,6 +515,7 @@ def stop_camera(cam_id: str):
         del state.vlm_threads[cam_id]
     state.camera_frames.pop(cam_id, None)
     state.camera_detections.pop(cam_id, None)
+    state.camera_runtime_status[cam_id] = "offline"
 
 
 def restart_camera(cam_id: str):
@@ -444,22 +525,18 @@ def restart_camera(cam_id: str):
 
 def restart_all_cameras():
     cfg = get_config()
-    for cam_id in list(state.camera_threads.keys()):
+    for cam_id in list(state.camera_threads):
         stop_camera(cam_id)
     for cam_id in cfg["cameras"]:
         start_camera(cam_id)
 
 
-# ── MJPEG Stream ────────────────────────────────────────────────────────────
-
 def mjpeg_generator(camera_id: str):
     while True:
         frame_bytes = state.camera_frames.get(camera_id)
         if frame_bytes is not None:
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-            )
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
         cfg = get_config()
         fps = cfg["global"]["target_fps"]
         time.sleep(1.0 / fps)
+

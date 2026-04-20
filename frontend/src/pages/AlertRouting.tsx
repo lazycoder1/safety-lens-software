@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import {
   Bell,
   Send,
@@ -11,6 +11,12 @@ import {
   XCircle,
   Loader2,
   Zap,
+  Eye,
+  EyeOff,
+  Settings2,
+  HelpCircle,
+  RefreshCw,
+  ExternalLink,
 } from "lucide-react"
 import { cameras, detectionRules } from "@/data/mock"
 import { severityConfig, severityVariantMap } from "@/lib/constants"
@@ -20,6 +26,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { toast } from "sonner"
+import { getConfig, updateTelegramConfig, testTelegramConfig, fetchTelegramGroups } from "@/lib/api"
 
 /* ------------------------------------------------------------------ */
 /*  Types & constants                                                  */
@@ -115,6 +122,117 @@ export function AlertRouting() {
   })
   const [testResults, setTestResults] = useState<TestResult[] | null>(null)
   const [testRunning, setTestRunning] = useState(false)
+
+  /* Telegram config */
+  const [tgEnabled, setTgEnabled] = useState(false)
+  const [tgBotToken, setTgBotToken] = useState("")
+  const [tgChatId, setTgChatId] = useState("")
+  const [tgSeverities, setTgSeverities] = useState<string[]>(["P1", "P2"])
+  const [tgShowToken, setTgShowToken] = useState(false)
+  const [tgSaving, setTgSaving] = useState(false)
+  const [tgTesting, setTgTesting] = useState(false)
+  const [tgDirty, setTgDirty] = useState(false)
+  const tgLoaded = useRef(false)
+  const [tgGroups, setTgGroups] = useState<{ chat_id: string; title: string; type: string }[]>([])
+  const [tgFetchingGroups, setTgFetchingGroups] = useState(false)
+  const [showTgGuide, setShowTgGuide] = useState(false)
+
+  /* Load telegram config from backend */
+  useEffect(() => {
+    getConfig()
+      .then((cfg) => {
+        const tg = cfg.telegram || {}
+        setTgEnabled(tg.enabled ?? false)
+        setTgBotToken(tg.bot_token ?? "")
+        setTgChatId(tg.chat_id ?? "")
+        setTgSeverities(tg.severities ?? ["P1", "P2"])
+        tgLoaded.current = true
+      })
+      .catch(() => {
+        /* config endpoint unavailable — keep defaults */
+      })
+  }, [])
+
+  function updateTgField<T>(setter: (v: T) => void) {
+    return (value: T) => {
+      setter(value)
+      setTgDirty(true)
+    }
+  }
+
+  function toggleTgSeverity(sev: string) {
+    setTgSeverities((prev) =>
+      prev.includes(sev) ? prev.filter((s) => s !== sev) : [...prev, sev]
+    )
+    setTgDirty(true)
+  }
+
+  async function saveTelegramConfig() {
+    setTgSaving(true)
+    try {
+      await updateTelegramConfig({
+        enabled: tgEnabled,
+        bot_token: tgBotToken,
+        chat_id: tgChatId,
+        severities: tgSeverities,
+      })
+      setTgDirty(false)
+      toast.success("Telegram configuration saved")
+    } catch {
+      toast.error("Failed to save Telegram configuration")
+    } finally {
+      setTgSaving(false)
+    }
+  }
+
+  async function handleTestTelegram() {
+    if (!tgBotToken || !tgChatId) {
+      toast.error("Enter Bot Token and Chat ID before testing")
+      return
+    }
+    // Save first if dirty so the backend uses the latest credentials
+    if (tgDirty) {
+      await saveTelegramConfig()
+    }
+    setTgTesting(true)
+    try {
+      const result = await testTelegramConfig()
+      if (result.ok) {
+        toast.success("Test message sent — check your Telegram")
+      } else {
+        toast.error(`Telegram test failed: ${result.error}`)
+      }
+    } catch {
+      toast.error("Could not reach the server")
+    } finally {
+      setTgTesting(false)
+    }
+  }
+
+  async function handleFetchGroups() {
+    if (!tgBotToken) {
+      toast.error("Enter a Bot Token first")
+      return
+    }
+    setTgFetchingGroups(true)
+    try {
+      const result = await fetchTelegramGroups(tgBotToken)
+      if (result.ok) {
+        setTgGroups(result.groups)
+        if (result.groups.length === 0) {
+          toast("No groups found — make sure the bot is added to a group and someone has sent a message", { duration: 5000 })
+        } else {
+          toast.success(`Found ${result.groups.length} group${result.groups.length > 1 ? "s" : ""}`)
+        }
+      } else {
+        toast.error(`Failed to fetch groups: ${result.error}`)
+      }
+    } catch {
+      toast.error("Could not reach the server")
+    } finally {
+      setTgFetchingGroups(false)
+    }
+  }
 
   /* Channel matrix */
   function toggleChannel(severity: Severity, channel: Channel) {
@@ -244,65 +362,273 @@ export function AlertRouting() {
         {/*  CHANNELS TAB                                                 */}
         {/* ============================================================ */}
         {activeTab === "channels" && (
-          <Card className="p-0 overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b bg-[var(--color-bg-secondary)]">
-                    <th className="text-left px-4 py-3 text-xs font-medium text-[var(--color-text-secondary)]">
-                      Severity
-                    </th>
-                    {channels.map((ch) => (
-                      <th
-                        key={ch}
-                        className="text-center px-4 py-3 text-xs font-medium text-[var(--color-text-secondary)]"
-                      >
-                        {channelLabels[ch]}
+          <div className="space-y-6">
+            <Card className="p-0 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-[var(--color-bg-secondary)]">
+                      <th className="text-left px-4 py-3 text-xs font-medium text-[var(--color-text-secondary)]">
+                        Severity
                       </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {severities.map((sev) => {
-                    const config = severityConfig[sev]
-                    return (
-                      <tr
-                        key={sev}
-                        className="border-b last:border-b-0 hover:bg-[var(--color-bg-secondary)] transition-colors"
-                      >
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className="w-2.5 h-2.5 rounded-full shrink-0"
-                              style={{ backgroundColor: config.color }}
-                            />
-                            <span className="font-medium text-[var(--color-text-primary)]">
-                              {sev}
-                            </span>
-                            <span className="text-[var(--color-text-secondary)]">
-                              {config.label}
-                            </span>
-                          </div>
-                        </td>
-                        {channels.map((ch) => (
-                          <td key={ch} className="text-center px-4 py-3">
-                            <label className="inline-flex items-center justify-center cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={channelMatrix[sev][ch]}
-                                onChange={() => toggleChannel(sev, ch)}
-                                className="w-4 h-4 rounded border-[var(--color-border-default)] text-[var(--color-info)] focus:ring-[var(--color-info)] focus:ring-offset-0 cursor-pointer"
+                      {channels.map((ch) => (
+                        <th
+                          key={ch}
+                          className="text-center px-4 py-3 text-xs font-medium text-[var(--color-text-secondary)]"
+                        >
+                          {channelLabels[ch]}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {severities.map((sev) => {
+                      const config = severityConfig[sev]
+                      return (
+                        <tr
+                          key={sev}
+                          className="border-b last:border-b-0 hover:bg-[var(--color-bg-secondary)] transition-colors"
+                        >
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full shrink-0"
+                                style={{ backgroundColor: config.color }}
                               />
-                            </label>
+                              <span className="font-medium text-[var(--color-text-primary)]">
+                                {sev}
+                              </span>
+                              <span className="text-[var(--color-text-secondary)]">
+                                {config.label}
+                              </span>
+                            </div>
                           </td>
+                          {channels.map((ch) => (
+                            <td key={ch} className="text-center px-4 py-3">
+                              <label className="inline-flex items-center justify-center cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={channelMatrix[sev][ch]}
+                                  onChange={() => toggleChannel(sev, ch)}
+                                  className="w-4 h-4 rounded border-[var(--color-border-default)] text-[var(--color-info)] focus:ring-[var(--color-info)] focus:ring-offset-0 cursor-pointer"
+                                />
+                              </label>
+                            </td>
+                          ))}
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+
+            {/* Telegram Setup */}
+            <Card>
+              <div className="flex items-center gap-2 mb-4">
+                <Settings2 size={16} className="text-[var(--color-text-secondary)]" />
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                  Telegram Setup
+                </h3>
+                <span className="text-xs text-[var(--color-text-tertiary)]">
+                  Connect a Telegram bot to receive alert notifications
+                </span>
+                <button
+                  onClick={() => setShowTgGuide(true)}
+                  className="ml-auto flex items-center gap-1 text-xs text-[var(--color-info)] hover:underline cursor-pointer"
+                >
+                  <HelpCircle size={14} />
+                  How to set up
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {/* Enable toggle */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">
+                      Enabled
+                    </label>
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      Send alerts to Telegram when triggered
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setTgEnabled((v) => !v)
+                      setTgDirty(true)
+                    }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                      tgEnabled ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                        tgEnabled ? "translate-x-6" : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* Bot Token */}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Bot Token
+                  </label>
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    Create a bot via @BotFather on Telegram and paste the token here
+                  </p>
+                  <div className="relative">
+                    <input
+                      type={tgShowToken ? "text" : "password"}
+                      value={tgBotToken}
+                      onChange={(e) => updateTgField(setTgBotToken)(e.target.value)}
+                      placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+                      className="w-full px-3 py-2 pr-10 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setTgShowToken((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+                    >
+                      {tgShowToken ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Group / Chat ID */}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Group
+                  </label>
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    Select the Telegram group where alerts will be sent
+                  </p>
+                  <div className="flex gap-2">
+                    {tgGroups.length > 0 ? (
+                      <select
+                        value={tgChatId}
+                        onChange={(e) => {
+                          setTgChatId(e.target.value)
+                          setTgDirty(true)
+                        }}
+                        className="flex-1 px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white text-[var(--color-text-primary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 cursor-pointer"
+                      >
+                        <option value="">Select a group...</option>
+                        {tgGroups.map((g) => (
+                          <option key={g.chat_id} value={g.chat_id}>
+                            {g.title}
+                          </option>
                         ))}
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={tgChatId}
+                        onChange={(e) => updateTgField(setTgChatId)(e.target.value)}
+                        placeholder="Click Fetch Groups or enter ID manually"
+                        className="flex-1 px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                        readOnly={false}
+                      />
+                    )}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleFetchGroups}
+                      disabled={tgFetchingGroups || !tgBotToken}
+                    >
+                      {tgFetchingGroups ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <RefreshCw size={14} />
+                      )}
+                      Fetch Groups
+                    </Button>
+                  </div>
+                  {tgGroups.length > 0 && tgChatId && (
+                    <p className="text-xs text-[var(--color-text-tertiary)]">
+                      Chat ID: {tgChatId}
+                    </p>
+                  )}
+                </div>
+
+                {/* Severity filter */}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Alert Severities
+                  </label>
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    Only send alerts matching these severity levels
+                  </p>
+                  <div className="flex gap-2">
+                    {severities.map((sev) => {
+                      const sevCfg = severityConfig[sev]
+                      const active = tgSeverities.includes(sev)
+                      return (
+                        <button
+                          key={sev}
+                          onClick={() => toggleTgSeverity(sev)}
+                          className={cn(
+                            "flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-xs font-medium transition-colors cursor-pointer border",
+                            active
+                              ? "border-current"
+                              : "border-transparent bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]"
+                          )}
+                          style={
+                            active
+                              ? { backgroundColor: sevCfg.bg, color: sevCfg.textColor }
+                              : undefined
+                          }
+                        >
+                          <span
+                            className="w-2 h-2 rounded-full"
+                            style={{ backgroundColor: sevCfg.color }}
+                          />
+                          {sev}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-3 pt-2 border-t">
+                  <Button
+                    size="sm"
+                    onClick={saveTelegramConfig}
+                    disabled={tgSaving || !tgDirty}
+                  >
+                    {tgSaving ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" />
+                        Saving...
+                      </>
+                    ) : (
+                      "Save"
+                    )}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleTestTelegram}
+                    disabled={tgTesting || !tgBotToken || !tgChatId}
+                  >
+                    {tgTesting ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" />
+                        Testing...
+                      </>
+                    ) : (
+                      <>
+                        <Send size={14} />
+                        Test Connection
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          </div>
         )}
 
         {/* ============================================================ */}
@@ -691,6 +1017,153 @@ export function AlertRouting() {
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/*  TELEGRAM SETUP GUIDE MODAL                                   */}
+      {/* ============================================================ */}
+      {showTgGuide && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => setShowTgGuide(false)}
+          />
+          <div className="relative bg-white rounded-[var(--radius-lg)] shadow-xl border w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b">
+              <div className="flex items-center gap-2">
+                <HelpCircle size={16} className="text-[var(--color-info)]" />
+                <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                  Setting up Telegram Alerts
+                </h2>
+              </div>
+              <button
+                onClick={() => setShowTgGuide(false)}
+                className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-5">
+              {/* Step 1 */}
+              <div className="flex gap-3">
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-info)] text-white text-xs font-bold shrink-0">
+                  1
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Create a Telegram Bot
+                  </p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Open Telegram, search for <strong>@BotFather</strong>, and
+                    send <code className="px-1 py-0.5 bg-[var(--color-bg-tertiary)] rounded text-xs">/newbot</code>.
+                    Follow the prompts to name your bot. BotFather will give you a <strong>Bot Token</strong>.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 2 */}
+              <div className="flex gap-3">
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-info)] text-white text-xs font-bold shrink-0">
+                  2
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Disable Group Privacy mode
+                  </p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    In @BotFather, send <code className="px-1 py-0.5 bg-[var(--color-bg-tertiary)] rounded text-xs">/mybots</code>,
+                    select your bot, then go to <strong>Bot Settings</strong> → <strong>Group Privacy</strong> → <strong>Turn off</strong>.
+                    This allows the bot to detect the group when you send a message.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 3 */}
+              <div className="flex gap-3">
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-info)] text-white text-xs font-bold shrink-0">
+                  3
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Add the bot to your group
+                  </p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Create a Telegram group (or use an existing one) for your team to receive alerts.
+                    Open group settings, tap <strong>Add Members</strong>, and search for your bot by its username.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 4 */}
+              <div className="flex gap-3">
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-info)] text-white text-xs font-bold shrink-0">
+                  4
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Send a message in the group
+                  </p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Send any message in the group so the bot can detect it. This is needed for the
+                    bot to discover the group.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 5 */}
+              <div className="flex gap-3">
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-info)] text-white text-xs font-bold shrink-0">
+                  5
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Configure in SafetyLens
+                  </p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Paste the <strong>Bot Token</strong> above, click <strong>Fetch Groups</strong> to
+                    find your group, select it from the dropdown, choose which alert severities to
+                    forward, and hit <strong>Save</strong>.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 6 */}
+              <div className="flex gap-3">
+                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[var(--color-info)] text-white text-xs font-bold shrink-0">
+                  6
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                    Test the connection
+                  </p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Click <strong>Test Connection</strong> to send a test message to your group.
+                    If it arrives, you're all set! Enable the toggle and alerts will flow to Telegram.
+                  </p>
+                </div>
+              </div>
+
+              {/* Tip */}
+              <div className="p-3 bg-[var(--color-info-bg)] rounded-[var(--radius-md)]">
+                <p className="text-xs text-[var(--color-text-secondary)]">
+                  <strong>Tip:</strong> You can add the bot to multiple groups. Use
+                  Fetch Groups to see all groups the bot belongs to, and pick the one
+                  you want alerts sent to.
+                </p>
+              </div>
+
+              <Button
+                className="w-full"
+                variant="secondary"
+                onClick={() => setShowTgGuide(false)}
+              >
+                Got it
+              </Button>
             </div>
           </div>
         </div>

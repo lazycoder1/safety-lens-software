@@ -15,6 +15,7 @@ from db import get_conn
 logger = logging.getLogger("safetylens.alerts")
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
+_get_conn = get_conn
 
 
 def init_db():
@@ -331,6 +332,137 @@ def get_compliance_metrics(window_hours: int = 24) -> dict:
     }
 
 
+def get_snapshot_usage() -> dict:
+    total_bytes = 0
+    total_files = 0
+    if SNAPSHOTS_DIR.exists():
+        for path in SNAPSHOTS_DIR.iterdir():
+            if path.is_file():
+                total_files += 1
+                total_bytes += path.stat().st_size
+    return {
+        "dir": str(SNAPSHOTS_DIR),
+        "files": total_files,
+        "bytes": total_bytes,
+    }
+
+
+def cleanup_snapshots(
+    *,
+    retention_days: int,
+    max_bytes: int,
+    orphan_grace_hours: int,
+) -> dict:
+    """Prune stale or oversized snapshot files and detach them from alert rows.
+
+    Policy:
+    - Active/acknowledged/snoozed alerts keep snapshots.
+    - Resolved alerts lose snapshots after `retention_days`.
+    - If the directory still exceeds `max_bytes`, prune oldest resolved snapshots first.
+    - Unreferenced orphan files older than `orphan_grace_hours` are deleted.
+    """
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc)
+    retention_cutoff = now - timedelta(days=max(retention_days, 0))
+    orphan_cutoff = now - timedelta(hours=max(orphan_grace_hours, 0))
+    deleted_files = 0
+    reclaimed_bytes = 0
+    detached_alerts = 0
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, status, timestamp, snapshot_path, clean_snapshot_path
+                FROM alerts
+                WHERE snapshot_path IS NOT NULL OR clean_snapshot_path IS NOT NULL
+                ORDER BY timestamp ASC
+                """
+            )
+            rows = cur.fetchall()
+
+            # Age-based pruning for resolved alerts.
+            for row in rows:
+                ts = _parse_iso_timestamp(row["timestamp"])
+                if row["status"] != "resolved" or ts >= retention_cutoff:
+                    continue
+                deleted, bytes_freed = _delete_snapshot_pair(row.get("snapshot_path"), row.get("clean_snapshot_path"))
+                if deleted:
+                    cur.execute(
+                        "UPDATE alerts SET snapshot_path = NULL, clean_snapshot_path = NULL WHERE id = %s",
+                        (row["id"],),
+                    )
+                    detached_alerts += 1
+                    deleted_files += deleted
+                    reclaimed_bytes += bytes_freed
+
+            conn.commit()
+
+            # Capacity-based pruning for remaining resolved alerts.
+            usage = get_snapshot_usage()
+            if usage["bytes"] > max_bytes:
+                cur.execute(
+                    """
+                    SELECT id, timestamp, snapshot_path, clean_snapshot_path
+                    FROM alerts
+                    WHERE status = 'resolved'
+                      AND (snapshot_path IS NOT NULL OR clean_snapshot_path IS NOT NULL)
+                    ORDER BY timestamp ASC
+                    """
+                )
+                for row in cur.fetchall():
+                    if usage["bytes"] <= max_bytes:
+                        break
+                    deleted, bytes_freed = _delete_snapshot_pair(row.get("snapshot_path"), row.get("clean_snapshot_path"))
+                    if not deleted:
+                        continue
+                    cur.execute(
+                        "UPDATE alerts SET snapshot_path = NULL, clean_snapshot_path = NULL WHERE id = %s",
+                        (row["id"],),
+                    )
+                    detached_alerts += 1
+                    deleted_files += deleted
+                    reclaimed_bytes += bytes_freed
+                    usage["bytes"] = max(0, usage["bytes"] - bytes_freed)
+                conn.commit()
+
+            # Orphan cleanup, with a grace window to avoid racing fresh writes.
+            cur.execute(
+                """
+                SELECT snapshot_path, clean_snapshot_path
+                FROM alerts
+                WHERE snapshot_path IS NOT NULL OR clean_snapshot_path IS NOT NULL
+                """
+            )
+            referenced = set()
+            for row in cur.fetchall():
+                for name in (row.get("snapshot_path"), row.get("clean_snapshot_path")):
+                    if name:
+                        referenced.add(name)
+
+    for path in SNAPSHOTS_DIR.iterdir():
+        if not path.is_file() or path.name in referenced:
+            continue
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        if modified >= orphan_cutoff:
+            continue
+        reclaimed_bytes += path.stat().st_size
+        deleted_files += 1
+        path.unlink(missing_ok=True)
+
+    final_usage = get_snapshot_usage()
+    return {
+        "snapshotRetentionDays": retention_days,
+        "snapshotMaxBytes": max_bytes,
+        "deletedFiles": deleted_files,
+        "reclaimedBytes": reclaimed_bytes,
+        "detachedAlerts": detached_alerts,
+        "remainingBytes": final_usage["bytes"],
+        "remainingFiles": final_usage["files"],
+    }
+
+
 def _row_to_dict(row: dict) -> dict:
     snapshot = row["snapshot_path"]
     raw_bboxes = row.get("bboxes")
@@ -379,3 +511,27 @@ def _build_dict(
         "snoozedUntil": snoozed_until,
         "falsePositive": false_positive,
     }
+
+
+def _delete_snapshot_pair(snapshot_path: str | None, clean_snapshot_path: str | None) -> tuple[int, int]:
+    deleted = 0
+    reclaimed = 0
+    for name in (snapshot_path, clean_snapshot_path):
+        if not name:
+            continue
+        path = SNAPSHOTS_DIR / name
+        if not path.exists():
+            continue
+        reclaimed += path.stat().st_size
+        path.unlink(missing_ok=True)
+        deleted += 1
+    return deleted, reclaimed
+
+
+def _parse_iso_timestamp(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)

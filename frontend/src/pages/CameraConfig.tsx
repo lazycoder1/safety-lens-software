@@ -1,29 +1,44 @@
-import { useState, useMemo, useEffect, useCallback } from "react"
-import { Plus, Search } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { useNavigate } from "react-router-dom"
+import { Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getCameras, deleteCamera, getSafetyRules } from "@/lib/api"
+import { getCameras, deleteCamera, getSafetyRules, getZones } from "@/lib/api"
+import { useAuthStore } from "@/stores/authStore"
 import type { Camera, SafetyRule } from "@/types"
 import { CameraCard } from "@/components/cameras/CameraCard"
-import { CameraDetailPanel } from "@/components/cameras/CameraDetailPanel"
-import { AddCameraModal } from "@/components/cameras/AddCameraModal"
-import type { CameraRole } from "@/components/cameras/constants"
 import { SearchInput } from "@/components/ui/SearchInput"
+import { getConfiguredDetectionKeys, usesZoneIntrusion } from "@/components/cameras/detectionCatalog"
 
 export function CameraConfig() {
+  const navigate = useNavigate()
+  const userRole = useAuthStore((state) => state.user?.role)
+  const isAdmin = userRole === "admin"
+
   const [cameras, setCameras] = useState<Camera[]>([])
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
   const [search, setSearch] = useState("")
-  const [modalOpen, setModalOpen] = useState(false)
-  const [selectedCamera, setSelectedCamera] = useState<Camera | null>(null)
-  const [cameraRoles, setCameraRoles] = useState<Record<string, CameraRole>>({})
+  const [zoneCounts, setZoneCounts] = useState<Record<string, number>>({})
 
   const fetchData = useCallback(async () => {
     try {
-      const [cams, rules] = await Promise.all([getCameras(), getSafetyRules()])
-      setCameras(cams)
-      setSafetyRules(rules)
+      const [cameraData, ruleData]: [Camera[], SafetyRule[]] = await Promise.all([getCameras(), getSafetyRules()])
+      setCameras(cameraData)
+      setSafetyRules(ruleData)
+
+      const zoneCameraIds = cameraData
+        .filter((camera: Camera) => usesZoneIntrusion(getConfiguredDetectionKeys(camera, ruleData)))
+        .map((camera: Camera) => camera.id)
+
+      const zoneEntries = await Promise.all(
+        zoneCameraIds.map(async (cameraId: string) => {
+          const zones = await getZones(cameraId).catch(() => [])
+          return [cameraId, zones.length] as const
+        })
+      )
+
+      setZoneCounts(Object.fromEntries(zoneEntries))
     } catch {
-      // silently fail
+      // silently fail for now
     }
   }, [])
 
@@ -33,21 +48,22 @@ export function CameraConfig() {
 
   const filtered = useMemo(() => {
     if (!search.trim()) return cameras
-    const q = search.toLowerCase()
+    const query = search.toLowerCase()
     return cameras.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.zone.toLowerCase().includes(q)
+      (camera) =>
+        camera.name.toLowerCase().includes(query) ||
+        camera.zone.toLowerCase().includes(query)
     )
   }, [search, cameras])
 
-  const onlineCount = cameras.filter((c) => c.status === "online").length
+  const onlineCount = cameras.filter((camera) => camera.status === "online").length
 
   async function handleDelete(id: string) {
-    const cam = cameras.find((c) => c.id === id)
-    if (!window.confirm(`Delete camera "${cam?.name || id}"? This cannot be undone.`)) return
+    const camera = cameras.find((item) => item.id === id)
+    if (!window.confirm(`Delete camera "${camera?.name || id}"? This cannot be undone.`)) return
     try {
       await deleteCamera(id)
       await fetchData()
-      if (selectedCamera?.id === id) setSelectedCamera(null)
     } catch {
       // ignore
     }
@@ -55,19 +71,24 @@ export function CameraConfig() {
 
   return (
     <div className="space-y-6 p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Cameras</h1>
-        <Button onClick={() => setModalOpen(true)}>
-          <Plus className="w-4 h-4" />
-          Add Camera
-        </Button>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Cameras</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            Browse camera health, enabled detections, and zone readiness.
+          </p>
+        </div>
+        {isAdmin && (
+          <Button onClick={() => navigate("/configure/cameras/new")}>
+            <Plus className="w-4 h-4" />
+            Add Camera
+          </Button>
+        )}
       </div>
 
-      {/* Stats bar */}
       <div className="flex items-center gap-4 text-sm text-[var(--color-text-secondary)]">
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-2 h-2 rounded-full bg-[var(--color-success)]" />
+          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-success)]" />
           <span className="font-medium">{onlineCount}</span> Online
         </span>
         <span className="text-[var(--color-text-tertiary)]">
@@ -75,7 +96,6 @@ export function CameraConfig() {
         </span>
       </div>
 
-      {/* Search */}
       <SearchInput
         value={search}
         onChange={setSearch}
@@ -83,44 +103,27 @@ export function CameraConfig() {
         className="max-w-sm"
       />
 
-      {/* Camera grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {filtered.map((cam) => (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {filtered.map((camera) => (
           <CameraCard
-            key={cam.id}
-            camera={cam}
-            role={cameraRoles[cam.id] || "general"}
+            key={camera.id}
+            camera={camera}
             safetyRules={safetyRules}
-            onClick={() => setSelectedCamera(cam)}
-            onDelete={() => handleDelete(cam.id)}
+            zoneCount={zoneCounts[camera.id] ?? null}
+            canEdit={isAdmin}
+            onView={() => navigate(`/configure/cameras/${camera.id}`)}
+            onEdit={() => navigate(`/configure/cameras/${camera.id}/edit`)}
+            onDelete={() => handleDelete(camera.id)}
           />
         ))}
         {filtered.length === 0 && (
-          <p className="col-span-full text-center text-sm text-[var(--color-text-tertiary)] py-12">
-            {cameras.length === 0 ? "No cameras configured. Click Add Camera to get started." : "No cameras match your search."}
+          <p className="col-span-full py-12 text-center text-sm text-[var(--color-text-tertiary)]">
+            {cameras.length === 0
+              ? "No cameras configured yet."
+              : "No cameras match your search."}
           </p>
         )}
       </div>
-
-      {/* Modal */}
-      {modalOpen && (
-        <AddCameraModal
-          onClose={() => setModalOpen(false)}
-          onAdded={fetchData}
-        />
-      )}
-
-      {/* Camera Detail Panel */}
-      {selectedCamera && (
-        <CameraDetailPanel
-          camera={selectedCamera}
-          role={cameraRoles[selectedCamera.id] || "general"}
-          onRoleChange={(role) => setCameraRoles((prev) => ({ ...prev, [selectedCamera.id]: role }))}
-          onClose={() => setSelectedCamera(null)}
-          onUpdated={fetchData}
-          onDelete={() => handleDelete(selectedCamera.id)}
-        />
-      )}
     </div>
   )
 }
