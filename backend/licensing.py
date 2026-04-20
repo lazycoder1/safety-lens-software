@@ -357,10 +357,10 @@ def compute_status(
     license_in_warning_window = now >= license_warning_threshold
 
     if heartbeat is None:
-        # No heartbeat ever fetched — likely a brand-new install that hasn't
-        # phoned home yet. Treat as just-expired so we get the full grace
-        # window to fetch one before suspending.
-        hb_past_validity = True
+        # No heartbeat ever fetched — brand-new install that hasn't phoned
+        # home yet. Don't penalize: treat heartbeat as healthy so the license
+        # expiry date alone governs state transitions.
+        hb_past_validity = False
         hb_grace_end = now + timedelta(days=GRACE_PERIOD_DAYS)
     else:
         hb_past_validity = now >= heartbeat.valid_until
