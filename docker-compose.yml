@@ -27,6 +27,7 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/api/generate}
     volumes:
       - snapshots:/app/backend/snapshots
+      - ./logs:/app/backend/logs
       - ./test-videos:/app/test-videos:ro
       - ./backend/config.json:/app/backend/config.json
     depends_on:

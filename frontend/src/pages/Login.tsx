@@ -72,7 +72,19 @@ export function Login() {
         setConfirmPassword("")
       }
     } catch (err: any) {
-      setError(err.message || "Something went wrong")
+      const msg: string = err.message || "Something went wrong"
+      // Map technical errors to user-friendly messages
+      if (err.isTimeout || msg.includes("respond") || msg.includes("reach")) {
+        setError("server_unreachable")
+      } else if (err.isNetwork) {
+        setError("server_unreachable")
+      } else if (err.status === 401) {
+        setError("invalid_credentials")
+      } else if (err.status >= 500) {
+        setError("server_error")
+      } else {
+        setError(msg)
+      }
     } finally {
       setSubmitting(false)
     }
@@ -173,7 +185,15 @@ export function Login() {
             )}
 
             {/* Error */}
-            {error && <p className="text-sm text-red-600">{error}</p>}
+            {error && (() => {
+              const messages: Record<string, { text: string; color: string }> = {
+                server_unreachable: { text: "Could not reach server. Check that the backend is running.", color: "text-amber-600" },
+                invalid_credentials: { text: "Incorrect username or password.", color: "text-red-600" },
+                server_error: { text: "Server error — please try again in a moment.", color: "text-amber-600" },
+              }
+              const m = messages[error] || { text: error, color: "text-red-600" }
+              return <p className={`text-sm ${m.color}`}>{m.text}</p>
+            })()}
 
             {/* Success */}
             {successMsg && <p className="text-sm text-green-600">{successMsg}</p>}

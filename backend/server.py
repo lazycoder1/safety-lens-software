@@ -26,6 +26,7 @@ import alert_store
 import audit_store
 import auth_store
 import diagnostics
+import error_store
 import licensing
 import state
 
@@ -77,7 +78,7 @@ async def request_middleware(request: Request, call_next):
         else:
             response = await call_next(request)
         return response
-    except Exception:
+    except Exception as exc:
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
         user = getattr(request.state, "user", {}) or {}
         logger.exception(
@@ -91,6 +92,18 @@ async def request_middleware(request: Request, call_next):
                 "username": user.get("username"),
             },
         )
+        try:
+            import traceback
+            error_store.log_error(
+                source="backend",
+                message=f"Unhandled error: {exc}",
+                stack=traceback.format_exc(),
+                url=f"{request.method} {request.url.path}",
+                request_id=request_id,
+                context={"user_id": user.get("sub"), "username": user.get("username")},
+            )
+        except Exception:
+            pass  # Never let error logging break the request
         raise
     finally:
         if response is not None:
@@ -101,12 +114,27 @@ async def request_middleware(request: Request, call_next):
             status_code = response.status_code
             if status_code >= 500:
                 log_fn = logger.error
+                try:
+                    error_store.log_error(
+                        source="backend",
+                        message=f"HTTP {status_code} on {route}",
+                        url=f"{request.method} {route}",
+                        request_id=request_id,
+                        context={"status_code": status_code, "user_id": user.get("sub")},
+                    )
+                except Exception:
+                    pass
             elif status_code >= 400:
                 log_fn = logger.warning
-            elif route == "/api/health":
-                log_fn = logger.debug
-            else:
+            elif duration_ms > 2000:
+                # Slow requests are worth logging
                 log_fn = logger.info
+            elif request.method in ("POST", "PUT", "DELETE", "PATCH"):
+                # State-changing operations are worth logging
+                log_fn = logger.info
+            else:
+                # Routine successful GETs — debug only (file won't capture these)
+                log_fn = logger.debug
             log_fn(
                 "HTTP request complete",
                 extra={
@@ -138,6 +166,7 @@ async def startup():
     alert_store.init_db()
     audit_store.init_db()
     auth_store.init_auth_db()
+    error_store.init_db()
     state.load_model()
     load_config()
 
@@ -162,6 +191,7 @@ async def startup():
     # heartbeat keeps working until the grace period runs out.
     asyncio.create_task(licensing.heartbeat_refresh_loop())
     asyncio.create_task(diagnostics.retention_cleanup_loop())
+    asyncio.create_task(alert_store.auto_resolve_loop())
 
     cfg = get_config()
     _ensure_safety_rules(cfg)

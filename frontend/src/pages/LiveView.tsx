@@ -179,7 +179,7 @@ export function LiveView() {
             </div>
           ) : (
             <div
-              className="grid gap-3 h-full"
+              className="grid gap-3 content-start"
               style={{ gridTemplateColumns: `repeat(${focusedCamId ? 1 : gridCols}, minmax(0, 1fr))` }}
             >
               {displayedCameras.map((cam) => (

@@ -27,18 +27,18 @@ async def get_alerts(
 
 
 @router.get("/alerts/stats")
-async def get_alert_stats():
-    return alert_store.get_stats()
+async def get_alert_stats(camera_id: Optional[str] = Query(None, alias="cameraId")):
+    return alert_store.get_stats(camera_id=camera_id)
 
 
 @router.get("/alerts/time-series")
-async def get_alert_time_series(hours: int = Query(24)):
-    return alert_store.get_time_series(hours)
+async def get_alert_time_series(hours: int = Query(24), camera_id: Optional[str] = Query(None, alias="cameraId")):
+    return alert_store.get_time_series(hours, camera_id=camera_id)
 
 
 @router.get("/alerts/compliance")
-async def get_alert_compliance(hours: int = Query(24, ge=1, le=720)):
-    return alert_store.get_compliance_metrics(window_hours=hours)
+async def get_alert_compliance(hours: int = Query(24, ge=1, le=720), camera_id: Optional[str] = Query(None, alias="cameraId")):
+    return alert_store.get_compliance_metrics(window_hours=hours, camera_id=camera_id)
 
 
 @router.put("/alerts/{alert_id}/acknowledge", dependencies=[Depends(require_operator_or_admin)])

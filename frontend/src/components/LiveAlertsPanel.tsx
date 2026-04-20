@@ -88,9 +88,6 @@ export function LiveAlertsPanel() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] text-[var(--color-text-tertiary)]">
-            {liveAlerts.length} total
-          </span>
           {liveAlerts.length > 0 && (
             <Button
               variant="ghost"

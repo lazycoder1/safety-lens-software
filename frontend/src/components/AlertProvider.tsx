@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react"
 import { create } from "zustand"
 import { useAlertStore } from "@/stores/alertStore"
 import { useAuthStore } from "@/stores/authStore"
+import { reportError } from "@/lib/errorReporter"
 import type { Alert } from "@/types"
 import { WS_BASE } from "@/lib/api"
 
@@ -67,6 +68,7 @@ export function AlertProvider() {
       }
 
       ws.onerror = () => {
+        reportError("WebSocket connection error", { component: "AlertProvider", extra: { url: ws.url } })
         ws.close()
       }
     }

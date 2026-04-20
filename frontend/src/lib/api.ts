@@ -5,6 +5,8 @@ export const WS_BASE =
   import.meta.env.VITE_WS_URL ||
   `ws://${window.location.hostname}:8000`
 
+import { reportError } from "@/lib/errorReporter"
+
 const TOKEN_KEY = "safetylens_token"
 
 export function getToken(): string | null {
@@ -39,10 +41,11 @@ export class ApiError extends Error {
 const NETWORK_RETRY_DELAYS_MS = [250, 750, 1500]
 const DEFAULT_TIMEOUT_MS = 30000
 
-async function request(path: string, options?: RequestInit) {
+async function request(path: string, options?: RequestInit & { retryOnTimeout?: boolean }) {
+  const { retryOnTimeout, ...fetchOptions } = options ?? {}
   const token = getToken()
   const headers: Record<string, string> = {
-    ...(options?.headers as Record<string, string>),
+    ...(fetchOptions?.headers as Record<string, string>),
   }
   if (token) {
     headers["Authorization"] = `Bearer ${token}`
@@ -54,20 +57,26 @@ async function request(path: string, options?: RequestInit) {
     const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
     let res: Response
     try {
-      res = await fetch(`${API_BASE}${path}`, { ...options, headers, signal: controller.signal })
+      res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, signal: controller.signal })
     } catch (err: unknown) {
       clearTimeout(timer)
       const isAbort = (err as { name?: string })?.name === "AbortError"
       const isNetwork = err instanceof TypeError
-      if (isAbort) {
-        // Don't retry timeouts — server may have processed the request.
+      const isRetryable = isNetwork || (isAbort && retryOnTimeout)
+      if (isAbort && !retryOnTimeout) {
+        reportError(err, { url: path, extra: { type: "timeout" } })
         throw new ApiError("Server didn't respond in time. Please try again.", { isTimeout: true })
       }
-      if (isNetwork && attempt < totalAttempts - 1) {
+      if (isRetryable && attempt < totalAttempts - 1) {
         await new Promise((r) => setTimeout(r, NETWORK_RETRY_DELAYS_MS[attempt]))
         continue
       }
+      if (isAbort) {
+        reportError(err, { url: path, extra: { type: "timeout_exhausted" } })
+        throw new ApiError("Could not reach server. Check that the backend is running.", { isTimeout: true })
+      }
       if (isNetwork) {
+        reportError(err, { url: path, extra: { type: "network_exhausted" } })
         throw new ApiError("Can't reach the server. Check your connection and try again.", { isNetwork: true })
       }
       throw err
@@ -98,7 +107,11 @@ async function request(path: string, options?: RequestInit) {
         else if (res.status >= 500) message = "Server error — please try again later"
         else message = "Something went wrong"
       }
-      throw new ApiError(message, { status: res.status, payload: parsedPayload })
+      const apiErr = new ApiError(message, { status: res.status, payload: parsedPayload })
+      if (res.status >= 500) {
+        reportError(apiErr, { url: path, requestId: res.headers.get("X-Request-ID") || undefined })
+      }
+      throw apiErr
     }
     return res.json()
   }
@@ -112,6 +125,7 @@ export async function apiLogin(username: string, password: string) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
+    retryOnTimeout: true,
   })
 }
 
@@ -209,12 +223,16 @@ export async function fetchTelegramGroups(bot_token: string) {
   })
 }
 
-export async function getAlertTimeSeries(hours: number = 24) {
-  return request(`/api/alerts/time-series?hours=${hours}`)
+export async function getAlertTimeSeries(hours: number = 24, cameraId?: string) {
+  const params = new URLSearchParams({ hours: String(hours) })
+  if (cameraId) params.set("cameraId", cameraId)
+  return request(`/api/alerts/time-series?${params}`)
 }
 
-export async function getComplianceMetrics(hours: number = 24) {
-  return request(`/api/alerts/compliance?hours=${hours}`)
+export async function getComplianceMetrics(hours: number = 24, cameraId?: string) {
+  const params = new URLSearchParams({ hours: String(hours) })
+  if (cameraId) params.set("cameraId", cameraId)
+  return request(`/api/alerts/compliance?${params}`)
 }
 
 // Zones
@@ -327,8 +345,9 @@ export async function getAlerts(params?: {
   return request(`/api/alerts${qs ? `?${qs}` : ""}`)
 }
 
-export async function getAlertStats() {
-  return request("/api/alerts/stats")
+export async function getAlertStats(cameraId?: string) {
+  const params = cameraId ? `?cameraId=${cameraId}` : ""
+  return request(`/api/alerts/stats${params}`)
 }
 
 export async function acknowledgeAlert(id: string) {

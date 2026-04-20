@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react"
-import { Link } from "react-router-dom"
-import { AlertTriangle, CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react"
+import { Link, useNavigate } from "react-router-dom"
+import { AlertTriangle, CheckCircle2, ShieldAlert, RefreshCw, TrendingUp, TrendingDown, Minus } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { useAlertStore } from "@/stores/alertStore"
@@ -14,12 +14,7 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
 } from "recharts"
-
-const PIE_COLORS = ["#dc2626", "#f97316", "#2563eb", "#f59e0b", "#059669", "#8b5cf6", "#a3a3a3"]
 
 interface Stats {
   total: number
@@ -39,9 +34,19 @@ interface Compliance {
   active_p1_count: number
   active_p2_count: number
   window_hours: number
+  prev_safety_compliance_pct?: number
+  prev_ppe_compliance_pct?: number
+  prev_mtta_seconds?: number | null
 }
 
 type TrafficLight = "green" | "amber" | "red"
+type TimeRange = 24 | 168 | 720
+
+const TIME_RANGES: { value: TimeRange; label: string }[] = [
+  { value: 24, label: "24h" },
+  { value: 168, label: "7d" },
+  { value: 720, label: "30d" },
+]
 
 function lightFromThresholds(value: number, green: number, amber: number): TrafficLight {
   if (value >= green) return "green"
@@ -65,24 +70,65 @@ function formatMtta(seconds: number | null): string {
   return s === 0 ? `${m}m` : `${m}m ${s}s`
 }
 
+function TrendBadge({ current, previous, inverted }: { current: number; previous: number | undefined | null; inverted?: boolean }) {
+  if (previous == null || previous === 0) return null
+  const delta = current - previous
+  if (Math.abs(delta) < 0.1) return (
+    <span className="inline-flex items-center gap-0.5 text-[10px] text-[var(--color-text-tertiary)]">
+      <Minus className="w-3 h-3" /> 0%
+    </span>
+  )
+  const pct = Math.abs(delta).toFixed(1)
+  const improving = inverted ? delta > 0 : delta < 0
+  const color = improving ? "text-[var(--color-success)]" : "text-[var(--color-critical)]"
+  const Icon = delta > 0 ? TrendingUp : TrendingDown
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium ${color}`}>
+      <Icon className="w-3 h-3" /> {pct}%
+    </span>
+  )
+}
+
+function MttaTrendBadge({ current, previous }: { current: number | null; previous: number | null | undefined }) {
+  if (current == null || previous == null) return null
+  const delta = current - previous
+  if (Math.abs(delta) < 1) return null
+  // Lower MTTA is better
+  const improving = delta < 0
+  const pct = Math.abs(Math.round((delta / previous) * 100))
+  const color = improving ? "text-[var(--color-success)]" : "text-[var(--color-critical)]"
+  const Icon = improving ? TrendingDown : TrendingUp
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium ${color}`}>
+      <Icon className="w-3 h-3" /> {pct}%
+    </span>
+  )
+}
+
 
 export function Dashboard() {
   const { fetchAlerts } = useAlertStore()
+  const navigate = useNavigate()
   const [stats, setStats] = useState<Stats | null>(null)
   const [compliance, setCompliance] = useState<Compliance | null>(null)
   const [cameraCount, setCameraCount] = useState({ total: 0, online: 0 })
+  const [cameras, setCameras] = useState<{ id: string; name: string }[]>([])
   const [timeSeries, setTimeSeries] = useState<any[]>([])
   const [refreshing, setRefreshing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [timeRange, setTimeRange] = useState<TimeRange>(24)
+  const [selectedCamera, setSelectedCamera] = useState<string>("")
 
-  const loadData = async () => {
+  const loadData = async (hours: TimeRange = timeRange, camId: string = selectedCamera) => {
     setRefreshing(true)
     try {
       await fetchAlerts()
+      const cameraFilter = camId || undefined
       const [s, cams, ts, comp] = await Promise.all([
-        getAlertStats(),
+        getAlertStats(cameraFilter),
         getCameras(),
-        getAlertTimeSeries(24),
-        getComplianceMetrics(24),
+        getAlertTimeSeries(hours, cameraFilter),
+        getComplianceMetrics(hours, cameraFilter),
       ])
       setStats(s)
       setCompliance(comp)
@@ -95,6 +141,8 @@ export function Dashboard() {
       const camList = Array.isArray(cams) ? cams : []
       const online = camList.filter((c: any) => c.status === "online").length
       setCameraCount({ total: camList.length, online })
+      setCameras(camList.map((c: any) => ({ id: c.id, name: c.name || c.id })))
+      setLastUpdated(new Date())
     } catch {
       // stats may not be available yet
     }
@@ -102,28 +150,31 @@ export function Dashboard() {
   }
 
   useEffect(() => {
-    loadData()
-    const interval = setInterval(loadData, 30000)
+    loadData(timeRange, selectedCamera)
+    const interval = setInterval(() => loadData(timeRange, selectedCamera), 30000)
     return () => clearInterval(interval)
-  }, [])
+  }, [timeRange, selectedCamera])
 
   const kpis = useMemo(() => {
     if (!compliance) return []
     const uptimePct =
       cameraCount.total > 0 ? Math.round((cameraCount.online / cameraCount.total) * 100) : 0
     const offline = cameraCount.total - cameraCount.online
+    const rangeLabel = timeRange === 24 ? "24h" : timeRange === 168 ? "7d" : "30d"
     return [
       {
         label: "Safety Compliance",
         value: `${compliance.safety_compliance_pct}%`,
-        caption: "last 24h · no P1/P2 violations",
+        caption: `last ${rangeLabel} · no P1/P2 violations`,
         light: lightFromThresholds(compliance.safety_compliance_pct, 98, 90),
+        trend: <TrendBadge current={compliance.safety_compliance_pct} previous={compliance.prev_safety_compliance_pct} />,
       },
       {
         label: "PPE Compliance",
         value: `${compliance.ppe_compliance_pct}%`,
-        caption: "last 24h · helmet + vest",
+        caption: `last ${rangeLabel} · helmet + vest`,
         light: lightFromThresholds(compliance.ppe_compliance_pct, 95, 85),
+        trend: <TrendBadge current={compliance.ppe_compliance_pct} previous={compliance.prev_ppe_compliance_pct} />,
       },
       {
         label: "Camera Uptime",
@@ -138,14 +189,15 @@ export function Dashboard() {
           cameraCount.total === 0
             ? ("amber" as TrafficLight)
             : lightFromThresholds(uptimePct, 100, 80),
+        trend: null,
       },
       {
         label: "Mean Time to Acknowledge",
         value: formatMtta(compliance.mtta_seconds),
         caption:
           compliance.mtta_seconds == null
-            ? "no alerts acked in 24h"
-            : "avg ack time · last 24h",
+            ? `no alerts acked in ${rangeLabel}`
+            : `avg ack time · last ${rangeLabel}`,
         light:
           compliance.mtta_seconds == null
             ? ("amber" as TrafficLight)
@@ -154,9 +206,10 @@ export function Dashboard() {
               : compliance.mtta_seconds <= 600
                 ? "amber"
                 : "red",
+        trend: <MttaTrendBadge current={compliance.mtta_seconds} previous={compliance.prev_mtta_seconds} />,
       },
     ]
-  }, [compliance, cameraCount])
+  }, [compliance, cameraCount, timeRange])
 
   const safetyBanner = useMemo(() => {
     if (!compliance) return null
@@ -204,16 +257,18 @@ export function Dashboard() {
       .sort((a, b) => b.count - a.count)
   }, [stats])
 
-  const violationsByType = useMemo(() => {
-    if (!stats?.byRule) return []
-    return Object.entries(stats.byRule)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
+  const violationsByCamera = useMemo(() => {
+    if (!stats?.byCamera) return []
+    return Object.entries(stats.byCamera)
+      .map(([camera, count]) => ({ camera, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 7)
   }, [stats])
 
   const severityTrend = timeSeries
 
   const maxZoneCount = violationsByZone[0]?.count || 1
+  const maxCameraCount = violationsByCamera[0]?.count || 1
 
   if (!stats || !compliance) {
     return (
@@ -228,15 +283,54 @@ export function Dashboard() {
       {/* Page header */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Dashboard</h1>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={loadData}
-          disabled={refreshing}
-        >
-          <RefreshCw className={`w-4 h-4 mr-1.5 ${refreshing ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-3">
+          {/* Camera selector */}
+          <select
+            value={selectedCamera}
+            onChange={(e) => setSelectedCamera(e.target.value)}
+            className="text-xs font-medium border rounded-[var(--radius-md)] px-2.5 py-1.5 bg-white text-[var(--color-text-primary)] cursor-pointer outline-none focus:ring-1 focus:ring-[var(--color-info)]"
+          >
+            <option value="">All Cameras</option>
+            {cameras.map((cam) => (
+              <option key={cam.id} value={cam.id}>{cam.name}</option>
+            ))}
+          </select>
+
+          {/* Time range selector */}
+          <div className="flex items-center bg-[var(--color-bg-tertiary)] rounded-[var(--radius-md)] p-0.5">
+            {TIME_RANGES.map((r) => (
+              <button
+                key={r.value}
+                onClick={() => setTimeRange(r.value)}
+                className={`px-3 py-1 text-xs font-medium rounded-[var(--radius-sm)] transition-colors cursor-pointer ${
+                  timeRange === r.value
+                    ? "bg-white text-[var(--color-text-primary)] shadow-sm"
+                    : "text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+                }`}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Last updated + refresh */}
+          <div className="flex items-center gap-2">
+            {lastUpdated && (
+              <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                {lastUpdated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => loadData()}
+              disabled={refreshing}
+            >
+              <RefreshCw className={`w-4 h-4 mr-1.5 ${refreshing ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
+        </div>
       </div>
 
       {/* Safety status banner */}
@@ -284,14 +378,17 @@ export function Dashboard() {
               <p className="text-xs font-medium text-[var(--color-text-secondary)] mb-1">
                 {kpi.label}
               </p>
-              <p className={`text-2xl font-bold mb-1 ${value}`}>{kpi.value}</p>
+              <div className="flex items-baseline gap-2 mb-1">
+                <p className={`text-2xl font-bold ${value}`}>{kpi.value}</p>
+                {kpi.trend}
+              </div>
               <p className="text-xs text-[var(--color-text-tertiary)]">{kpi.caption}</p>
             </Card>
           )
         })}
       </div>
 
-      {/* Severity breakdown */}
+      {/* Severity breakdown — clickable */}
       <Card>
         <CardHeader>
           <CardTitle>Alert Severity Breakdown</CardTitle>
@@ -310,8 +407,10 @@ export function Dashboard() {
               return (
                 <div
                   key={sev}
-                  className="rounded-[var(--radius-md)] p-3 text-center"
+                  className="rounded-[var(--radius-md)] p-3 text-center cursor-pointer hover:opacity-80 transition-opacity"
                   style={{ backgroundColor: c.bg }}
+                  onClick={() => navigate(`/alerts?severity=${sev}`)}
+                  title={`View ${sev} alerts`}
                 >
                   <p className="text-2xl font-bold" style={{ color: c.color }}>
                     {count}
@@ -371,7 +470,7 @@ export function Dashboard() {
 
       {/* Bottom row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Top Violating Zones */}
+        {/* Alerts by Zone */}
         <Card>
           <CardHeader>
             <CardTitle>Alerts by Zone</CardTitle>
@@ -397,7 +496,7 @@ export function Dashboard() {
                         }}
                       />
                     </div>
-                    <span className="text-sm font-semibold text-[var(--color-text-primary)] w-8 text-right">
+                    <span className="text-sm font-semibold text-[var(--color-text-primary)] w-12 text-right">
                       {item.count}
                     </span>
                   </div>
@@ -407,49 +506,37 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Violation Types */}
+        {/* Top Cameras */}
         <Card>
           <CardHeader>
-            <CardTitle>Alert Types</CardTitle>
+            <CardTitle>Top Cameras</CardTitle>
           </CardHeader>
           <CardContent>
-            {violationsByType.length === 0 ? (
+            {violationsByCamera.length === 0 ? (
               <p className="text-sm text-[var(--color-text-tertiary)] py-4 text-center">
                 No alerts yet.
               </p>
             ) : (
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={violationsByType}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={50}
-                      outerRadius={80}
-                      paddingAngle={2}
-                      dataKey="value"
-                    >
-                      {violationsByType.map((_, idx) => (
-                        <Cell key={idx} fill={PIE_COLORS[idx % PIE_COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "white",
-                        border: "1px solid var(--color-border-default)",
-                        borderRadius: "var(--radius-md)",
-                        fontSize: 12,
-                      }}
-                    />
-                    <Legend
-                      wrapperStyle={{ fontSize: 11 }}
-                      formatter={(value: string) => (
-                        <span className="text-[var(--color-text-secondary)]">{value}</span>
-                      )}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
+              <div className="space-y-3">
+                {violationsByCamera.map((item) => (
+                  <div key={item.camera} className="flex items-center gap-3">
+                    <span className="text-sm font-medium text-[var(--color-text-primary)] w-40 shrink-0 truncate">
+                      {item.camera}
+                    </span>
+                    <div className="flex-1 h-6 bg-[var(--color-bg-tertiary)] rounded-[var(--radius-sm)] overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--color-warning)] rounded-[var(--radius-sm)] transition-all"
+                        style={{
+                          width: `${(item.count / maxCameraCount) * 100}%`,
+                          opacity: 0.3 + (item.count / maxCameraCount) * 0.7,
+                        }}
+                      />
+                    </div>
+                    <span className="text-sm font-semibold text-[var(--color-text-primary)] w-12 text-right">
+                      {item.count}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </CardContent>

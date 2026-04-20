@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from "react"
-import { Bell, User, LogOut, KeyRound, ChevronDown } from "lucide-react"
+import { User, LogOut, KeyRound, ChevronDown } from "lucide-react"
 import { useNavigate } from "react-router-dom"
-import { getAlerts } from "@/lib/api"
 import { useAuthStore } from "@/stores/authStore"
 import { Badge } from "@/components/ui/badge"
 
@@ -12,22 +11,10 @@ const roleBadgeVariant: Record<string, "default" | "info" | "warning"> = {
 }
 
 export function Topbar() {
-  const [activeCount, setActiveCount] = useState(0)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
   const { user, logout } = useAuthStore()
-
-  useEffect(() => {
-    const load = () => {
-      getAlerts({ status: "active", limit: 100 })
-        .then((alerts: any[]) => setActiveCount(alerts.length))
-        .catch(() => {})
-    }
-    load()
-    const interval = setInterval(load, 30000)
-    return () => clearInterval(interval)
-  }, [])
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -49,20 +36,6 @@ export function Topbar() {
       <div />
 
       <div className="flex items-center gap-3">
-        <button
-          onClick={() => navigate("/alerts")}
-          className="relative p-2 rounded-[var(--radius-md)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] transition-colors cursor-pointer"
-        >
-          <Bell className="w-4.5 h-4.5" />
-          {activeCount > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-[var(--color-critical)] text-white text-[10px] font-semibold px-1">
-              {activeCount > 99 ? "99+" : activeCount}
-            </span>
-          )}
-        </button>
-
-        <div className="w-px h-6 bg-[var(--color-border-default)]" />
-
         <div className="relative" ref={menuRef}>
           <button
             onClick={() => setMenuOpen(!menuOpen)}

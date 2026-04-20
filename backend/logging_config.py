@@ -20,9 +20,13 @@ Env vars:
 import json
 import logging
 import os
+import socket
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+SERVICE_NAME = "safetylens"
+HOSTNAME = socket.gethostname()
 
 DEFAULT_LOGS_DIR = Path(__file__).parent / "logs"
 LOGS_DIR = Path(os.environ.get("SAFETYLENS_LOG_DIR", str(DEFAULT_LOGS_DIR)))
@@ -33,10 +37,15 @@ DEFAULT_LOG_BACKUP_COUNT = 8
 class JSONFormatter(logging.Formatter):
     """One JSON object per line — parseable by jq, journalctl, ELK."""
 
+    _env = os.environ.get("SAFETYLENS_ENV", "dev").lower()
+
     def format(self, record: logging.LogRecord) -> str:
         entry = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
+            "service": SERVICE_NAME,
+            "environment": self._env,
+            "host": HOSTNAME,
             "logger": record.name,
             "message": record.getMessage(),
         }
@@ -130,20 +139,32 @@ def setup_logging() -> None:
         console.setFormatter(ColorConsoleFormatter())
     root_logger.addHandler(console)
 
-    # ── File handler (always JSON, always DEBUG) ─────────────────────
+    # ── File handlers ──────────────────────────────────────────────────
     LOGS_DIR.mkdir(exist_ok=True)
     max_bytes = int(os.environ.get("SAFETYLENS_LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES)))
     backup_count = int(os.environ.get("SAFETYLENS_LOG_BACKUP_COUNT", str(DEFAULT_LOG_BACKUP_COUNT)))
 
+    # Main log — INFO and above (requests, state changes, startup)
     file_handler = RotatingFileHandler(
         LOGS_DIR / "safetylens.log",
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",
     )
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(file_handler)
+
+    # Error log — WARNING and above only (the "something is wrong" log)
+    error_file_handler = RotatingFileHandler(
+        LOGS_DIR / "errors.log",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    error_file_handler.setLevel(logging.WARNING)
+    error_file_handler.setFormatter(JSONFormatter())
+    root_logger.addHandler(error_file_handler)
 
     # ── Optional level override ──────────────────────────────────────
     if level_override and hasattr(logging, level_override):

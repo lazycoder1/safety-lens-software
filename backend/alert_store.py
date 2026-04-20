@@ -2,6 +2,7 @@
 Alert persistence with PostgreSQL for SafetyLens backend.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -198,38 +199,54 @@ def mark_false_positive(alert_id: str) -> dict | None:
     return get_alert(alert_id)
 
 
-def get_stats() -> dict:
+def get_stats(camera_id: str | None = None) -> dict:
+    cam_filter = ""
+    cam_active_filter = " WHERE status = 'active'"
+    params: list = []
+    cam_params: list = []
+    if camera_id:
+        cam_filter = " WHERE camera_id = %s"
+        cam_active_filter = " WHERE status = 'active' AND camera_id = %s"
+        params = [camera_id]
+        cam_params = [camera_id]
+
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT COUNT(*) as cnt FROM alerts")
+            cur.execute("SELECT COUNT(*) as cnt FROM alerts" + cam_filter, params)
             total = cur.fetchone()["cnt"]
 
-            cur.execute("SELECT COUNT(*) as cnt FROM alerts WHERE status = 'active'")
+            cur.execute("SELECT COUNT(*) as cnt FROM alerts" + cam_active_filter, cam_params)
             active = cur.fetchone()["cnt"]
 
-            cur.execute("SELECT COUNT(*) as cnt FROM alerts WHERE status = 'acknowledged'")
+            cur.execute("SELECT COUNT(*) as cnt FROM alerts WHERE status = 'acknowledged'" +
+                        (" AND camera_id = %s" if camera_id else ""), cam_params)
             acknowledged = cur.fetchone()["cnt"]
 
-            cur.execute("SELECT COUNT(*) as cnt FROM alerts WHERE status = 'resolved'")
+            cur.execute("SELECT COUNT(*) as cnt FROM alerts WHERE status = 'resolved'" +
+                        (" AND camera_id = %s" if camera_id else ""), cam_params)
             resolved = cur.fetchone()["cnt"]
 
             by_severity = {}
-            cur.execute("SELECT severity, COUNT(*) as cnt FROM alerts GROUP BY severity")
+            cur.execute("SELECT severity, COUNT(*) as cnt FROM alerts" + cam_active_filter +
+                        " GROUP BY severity", cam_params)
             for row in cur.fetchall():
                 by_severity[row["severity"]] = row["cnt"]
 
             by_rule = {}
-            cur.execute("SELECT rule, COUNT(*) as cnt FROM alerts GROUP BY rule ORDER BY cnt DESC")
+            cur.execute("SELECT rule, COUNT(*) as cnt FROM alerts" + cam_active_filter +
+                        " GROUP BY rule ORDER BY cnt DESC", cam_params)
             for row in cur.fetchall():
                 by_rule[row["rule"]] = row["cnt"]
 
             by_zone = {}
-            cur.execute("SELECT zone, COUNT(*) as cnt FROM alerts GROUP BY zone ORDER BY cnt DESC")
+            cur.execute("SELECT zone, COUNT(*) as cnt FROM alerts" + cam_active_filter +
+                        " GROUP BY zone ORDER BY cnt DESC", cam_params)
             for row in cur.fetchall():
                 by_zone[row["zone"]] = row["cnt"]
 
             by_camera = {}
-            cur.execute("SELECT camera_name, COUNT(*) as cnt FROM alerts GROUP BY camera_name ORDER BY cnt DESC")
+            cur.execute("SELECT camera_name, COUNT(*) as cnt FROM alerts" + cam_active_filter +
+                        " GROUP BY camera_name ORDER BY cnt DESC", cam_params)
             for row in cur.fetchall():
                 by_camera[row["camera_name"]] = row["cnt"]
 
@@ -245,21 +262,23 @@ def get_stats() -> dict:
     }
 
 
-def get_time_series(hours: int = 24) -> list[dict]:
+def get_time_series(hours: int = 24, camera_id: str | None = None) -> list[dict]:
     """Return hourly alert counts by severity for the last N hours."""
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    cam_clause = " AND camera_id = %s" if camera_id else ""
+    params: list = [since] + ([camera_id] if camera_id else [])
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT
+                f"""SELECT
                     date_trunc('hour', timestamp::timestamp) as hour,
                     severity,
                     COUNT(*) as count
                 FROM alerts
-                WHERE timestamp >= %s
+                WHERE timestamp >= %s{cam_clause}
                 GROUP BY hour, severity
                 ORDER BY hour""",
-                (since,),
+                params,
             )
             rows = cur.fetchall()
 
@@ -274,7 +293,7 @@ def get_time_series(hours: int = 24) -> list[dict]:
     return list(hourly.values())
 
 
-def get_compliance_metrics(window_hours: int = 24) -> dict:
+def get_compliance_metrics(window_hours: int = 24, camera_id: str | None = None) -> dict:
     """Aggregate safety KPIs over the last N hours.
 
     - safety_compliance_pct: % of hour-buckets with zero P1/P2 alerts
@@ -284,43 +303,76 @@ def get_compliance_metrics(window_hours: int = 24) -> dict:
     """
     since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     since_iso = since.isoformat()
+    cam_clause = " AND camera_id = %s" if camera_id else ""
+    cam_params: list = [camera_id] if camera_id else []
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Hourly buckets labeled with whether they contain P1/P2 alerts or Missing-X (PPE) alerts
             cur.execute(
-                """SELECT
+                f"""SELECT
                     date_trunc('hour', timestamp::timestamp) AS hour,
                     bool_or(severity IN ('P1','P2')) AS has_critical,
                     bool_or(rule LIKE %s) AS has_ppe_miss
                 FROM alerts
-                WHERE timestamp >= %s
+                WHERE timestamp >= %s{cam_clause}
                 GROUP BY hour""",
-                ("Missing %", since_iso),
+                ["Missing %", since_iso] + cam_params,
             )
             bucket_rows = cur.fetchall()
             bad_safety_hours = sum(1 for r in bucket_rows if r["has_critical"])
             bad_ppe_hours = sum(1 for r in bucket_rows if r["has_ppe_miss"])
 
-            # MTTA: only alerts whose timestamp falls in the window AND were acknowledged
             cur.execute(
-                """SELECT AVG(EXTRACT(EPOCH FROM (acknowledged_at::timestamp - timestamp::timestamp))) AS mtta
+                f"""SELECT AVG(EXTRACT(EPOCH FROM (acknowledged_at::timestamp - timestamp::timestamp))) AS mtta
                 FROM alerts
-                WHERE acknowledged_at IS NOT NULL AND timestamp >= %s""",
-                (since_iso,),
+                WHERE acknowledged_at IS NOT NULL AND timestamp >= %s{cam_clause}""",
+                [since_iso] + cam_params,
             )
             mtta_row = cur.fetchone()
             mtta = mtta_row["mtta"] if mtta_row and mtta_row["mtta"] is not None else None
 
-            # Current active alerts by severity (point-in-time, not window-scoped)
             cur.execute(
-                "SELECT severity, COUNT(*) AS cnt FROM alerts WHERE status='active' GROUP BY severity"
+                "SELECT severity, COUNT(*) AS cnt FROM alerts WHERE status='active'" +
+                (" AND camera_id = %s" if camera_id else "") +
+                " GROUP BY severity",
+                cam_params,
             )
             active_by_sev = {row["severity"]: row["cnt"] for row in cur.fetchall()}
 
     total_hours = max(window_hours, 1)
     safety_pct = round(100.0 * (total_hours - bad_safety_hours) / total_hours, 1)
     ppe_pct = round(100.0 * (total_hours - bad_ppe_hours) / total_hours, 1)
+
+    # Previous period for trend comparison
+    prev_start = since - timedelta(hours=window_hours)
+    prev_start_iso = prev_start.isoformat()
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""SELECT
+                    date_trunc('hour', timestamp::timestamp) AS hour,
+                    bool_or(severity IN ('P1','P2')) AS has_critical,
+                    bool_or(rule LIKE %s) AS has_ppe_miss
+                FROM alerts
+                WHERE timestamp >= %s AND timestamp < %s{cam_clause}
+                GROUP BY hour""",
+                ["Missing %", prev_start_iso, since_iso] + cam_params,
+            )
+            prev_rows = cur.fetchall()
+            prev_bad_safety = sum(1 for r in prev_rows if r["has_critical"])
+            prev_bad_ppe = sum(1 for r in prev_rows if r["has_ppe_miss"])
+
+            cur.execute(
+                f"""SELECT AVG(EXTRACT(EPOCH FROM (acknowledged_at::timestamp - timestamp::timestamp))) AS mtta
+                FROM alerts
+                WHERE acknowledged_at IS NOT NULL AND timestamp >= %s AND timestamp < %s{cam_clause}""",
+                [prev_start_iso, since_iso] + cam_params,
+            )
+            prev_mtta_row = cur.fetchone()
+            prev_mtta = prev_mtta_row["mtta"] if prev_mtta_row and prev_mtta_row["mtta"] is not None else None
+
+    prev_safety_pct = round(100.0 * (total_hours - prev_bad_safety) / total_hours, 1)
+    prev_ppe_pct = round(100.0 * (total_hours - prev_bad_ppe) / total_hours, 1)
 
     return {
         "safety_compliance_pct": max(0.0, min(100.0, safety_pct)),
@@ -329,6 +381,9 @@ def get_compliance_metrics(window_hours: int = 24) -> dict:
         "active_p1_count": int(active_by_sev.get("P1", 0)),
         "active_p2_count": int(active_by_sev.get("P2", 0)),
         "window_hours": window_hours,
+        "prev_safety_compliance_pct": max(0.0, min(100.0, prev_safety_pct)),
+        "prev_ppe_compliance_pct": max(0.0, min(100.0, prev_ppe_pct)),
+        "prev_mtta_seconds": round(float(prev_mtta), 1) if prev_mtta is not None else None,
     }
 
 
@@ -535,3 +590,38 @@ def _parse_iso_timestamp(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+# ── Auto-resolve stale alerts ─────────────────────────────────────────────
+
+AUTO_RESOLVE_MAX_AGE_HOURS = 24
+AUTO_RESOLVE_INTERVAL_HOURS = 1
+
+
+def auto_resolve_stale_alerts(max_age_hours: int = AUTO_RESOLVE_MAX_AGE_HOURS) -> int:
+    """Resolve active alerts older than max_age_hours. Returns count resolved."""
+    now = datetime.now(timezone.utc).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE alerts SET status = 'resolved', resolved_at = %s "
+                "WHERE status = 'active' AND timestamp < %s",
+                (now, cutoff),
+            )
+            count = cur.rowcount
+        conn.commit()
+    if count:
+        logger.info("Auto-resolved %d stale alerts older than %dh", count, max_age_hours)
+    return count
+
+
+async def auto_resolve_loop() -> None:
+    """Background loop that auto-resolves stale alerts every hour."""
+    await asyncio.to_thread(auto_resolve_stale_alerts)  # Run once at startup
+    while True:
+        await asyncio.sleep(AUTO_RESOLVE_INTERVAL_HOURS * 60 * 60)
+        try:
+            await asyncio.to_thread(auto_resolve_stale_alerts)
+        except Exception:
+            logger.exception("Auto-resolve loop failed")

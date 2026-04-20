@@ -65,7 +65,7 @@ YOLOE_COLORS = [
 
 # ── Auth middleware paths ───────────────────────────────────────────────────
 
-PUBLIC_PATHS = {"/api/auth/login", "/api/auth/register", "/api/health", "/docs", "/openapi.json"}
+PUBLIC_PATHS = {"/api/auth/login", "/api/auth/register", "/api/health", "/api/errors", "/docs", "/openapi.json"}
 PUBLIC_PREFIXES = ("/api/stream/", "/api/snapshots/")
 
 # ── Violation detection threshold ───────────────────────────────────────────

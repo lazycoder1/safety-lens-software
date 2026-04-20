@@ -35,6 +35,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Shield,
+  ShieldCheck,
   Settings,
   Search,
   Car,
@@ -112,12 +113,12 @@ export function Sidebar() {
         collapsed ? "w-[56px]" : "w-[240px]"
       )}
     >
-      <div className={cn("flex items-center gap-2.5 px-4 h-14 border-b", collapsed && "justify-center px-0")}>
+      <NavLink to="/live" className={cn("flex items-center gap-2.5 px-4 h-14 border-b cursor-pointer", collapsed && "justify-center px-0")}>
         <div className="w-7 h-7 rounded-[var(--radius-md)] bg-[var(--color-text-primary)] flex items-center justify-center shrink-0">
-          <Shield className="w-4 h-4 text-white" />
+          <ShieldCheck className="w-4 h-4 text-white" />
         </div>
         {!collapsed && <span className="font-semibold text-sm tracking-tight">SafetyLens</span>}
-      </div>
+      </NavLink>
 
       <nav className="flex-1 overflow-y-auto py-3">
         {navGroups.map((group) => (
