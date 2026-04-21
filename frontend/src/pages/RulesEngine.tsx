@@ -15,18 +15,21 @@ import {
 import * as Switch from "@radix-ui/react-switch"
 import * as Tabs from "@radix-ui/react-tabs"
 import { Card } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { SeverityBadge } from "@/components/ui/SeverityBadge"
 import { cn } from "@/lib/utils"
 import {
-  mockRules,
   triggerOptions,
   conditionTypes,
   actionTypes,
-  type EngineRule,
 } from "@/data/mockRules"
+import type { EngineRule } from "@/types"
 import {
+  getAutomationRules,
+  toggleAutomationRule,
+  deleteAutomationRule,
   getSafetyRules,
   createSafetyRule,
   updateSafetyRule,
@@ -278,8 +281,37 @@ function SafetyRulesTab() {
 
   if (loading) {
     return (
-      <div className="py-12 text-center text-sm text-[var(--color-text-tertiary)]">
-        Loading safety rules...
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <Skeleton className="h-5 w-28" />
+            <Skeleton className="h-4 w-72 mt-1" />
+          </div>
+          <Skeleton className="h-9 w-28 rounded-[var(--radius-md)]" />
+        </div>
+        <div className="border border-[var(--color-border-default)] rounded-[var(--radius-lg)] overflow-hidden">
+          <div className="bg-[var(--color-bg-secondary)] border-b border-[var(--color-border-default)] px-4 py-2.5 flex gap-4">
+            {["w-20", "w-12", "w-32", "w-16", "w-16", "w-20", "w-16", "w-16"].map((w, i) => (
+              <Skeleton key={i} className={`h-3 ${w}`} />
+            ))}
+          </div>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-4 px-4 py-3 border-b border-[var(--color-border-default)] last:border-0">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-5 w-12 rounded-full" />
+              <div className="flex gap-1">
+                {Array.from({ length: 2 }).map((_, j) => (
+                  <Skeleton key={j} className="h-5 w-16 rounded-full" />
+                ))}
+              </div>
+              <Skeleton className="h-5 w-16 rounded-full" />
+              <Skeleton className="h-5 w-10 rounded-full" />
+              <Skeleton className="h-4 w-8" />
+              <Skeleton className="h-5 w-9 rounded-full" />
+              <Skeleton className="h-4 w-16 ml-auto" />
+            </div>
+          ))}
+        </div>
       </div>
     )
   }
@@ -596,9 +628,25 @@ function SafetyRulesTab() {
 
 function AutomationRulesTab() {
   const navigate = useNavigate()
-  const [rules, setRules] = useState<EngineRule[]>(mockRules)
+  const [rules, setRules] = useState<EngineRule[]>([])
+  const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+
+  const fetchRules = useCallback(async () => {
+    try {
+      const data = await getAutomationRules()
+      setRules(data)
+    } catch {
+      toast.error("Failed to load automation rules")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchRules()
+  }, [fetchRules])
 
   const filtered = rules.filter(
     (r) =>
@@ -606,14 +654,57 @@ function AutomationRulesTab() {
       r.description.toLowerCase().includes(search.toLowerCase())
   )
 
-  function toggleRule(id: string) {
+  async function toggleRule(id: string) {
+    // Optimistic update
     setRules((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)))
+    try {
+      await toggleAutomationRule(id)
+    } catch {
+      // Revert on failure
+      setRules((prev) => prev.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)))
+      toast.error("Failed to toggle rule")
+    }
   }
 
-  function confirmDelete() {
+  async function confirmDelete() {
     if (!deleteTarget) return
-    setRules((prev) => prev.filter((r) => r.id !== deleteTarget))
+    try {
+      await deleteAutomationRule(deleteTarget)
+      setRules((prev) => prev.filter((r) => r.id !== deleteTarget))
+      toast.success("Rule deleted")
+    } catch {
+      toast.error("Failed to delete rule")
+    }
     setDeleteTarget(null)
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <Skeleton className="h-5 w-36" />
+            <Skeleton className="h-4 w-40 mt-1" />
+          </div>
+          <Skeleton className="h-9 w-28 rounded-[var(--radius-md)]" />
+        </div>
+        <Skeleton className="h-9 w-full rounded-[var(--radius-md)]" />
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i} className="flex items-start gap-4">
+            <Skeleton className="h-5 w-9 rounded-full mt-0.5" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="h-3 w-72" />
+              <Skeleton className="h-3 w-96" />
+              <div className="flex gap-2">
+                <Skeleton className="h-5 w-24 rounded-full" />
+                <Skeleton className="h-5 w-20 rounded-full" />
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
+    )
   }
 
   return (

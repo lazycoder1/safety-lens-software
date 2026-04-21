@@ -260,6 +260,20 @@ export async function deleteZone(cameraId: string, zoneId: string) {
   return request(`/api/cameras/${cameraId}/zones/${zoneId}`, { method: "DELETE" })
 }
 
+// RTSP
+export async function testRtspConnection(rtspUrl: string): Promise<{
+  success: boolean
+  resolution: [number, number] | null
+  snapshot_b64: string | null
+  error: string | null
+}> {
+  return request("/api/rtsp/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rtsp_url: rtspUrl }),
+  })
+}
+
 // Cameras
 export async function getCameras() {
   return request("/api/cameras")
@@ -470,7 +484,7 @@ export async function createDetectionRule(rule: {
 }
 
 // Safety Rules
-import type { ModelInstallJob, ModelStatus, PPERule, SafetyRule } from "@/types"
+import type { EngineRule, ModelInstallJob, ModelStatus, PPERule, SafetyRule } from "@/types"
 
 export async function getSafetyRules(): Promise<SafetyRule[]> {
   return request("/api/safety-rules")
@@ -506,6 +520,36 @@ export async function assignRuleCameras(ruleId: string, cameraIds: string[]) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ camera_ids: cameraIds }),
   })
+}
+
+// Automation Rules
+
+export async function getAutomationRules(): Promise<EngineRule[]> {
+  return request("/api/automation-rules")
+}
+
+export async function createAutomationRule(rule: Omit<EngineRule, "id" | "lastTriggered">): Promise<EngineRule> {
+  return request("/api/automation-rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rule),
+  })
+}
+
+export async function updateAutomationRule(id: string, updates: Partial<EngineRule>): Promise<EngineRule> {
+  return request(`/api/automation-rules/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  })
+}
+
+export async function toggleAutomationRule(id: string): Promise<EngineRule> {
+  return request(`/api/automation-rules/${id}/toggle`, { method: "PUT" })
+}
+
+export async function deleteAutomationRule(id: string): Promise<void> {
+  return request(`/api/automation-rules/${id}`, { method: "DELETE" })
 }
 
 // PPE Rules (deprecated — use Safety Rules)

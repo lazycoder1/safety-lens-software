@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Card } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { getConfig, updateGlobalConfig, updateVlmConfig, updateTelegramConfig, testTelegramConfig } from "@/lib/api"
 
 export function SystemSettings() {
@@ -29,6 +30,7 @@ export function SystemSettings() {
   })
   const [telegramTest, setTelegramTest] = useState<{ status: string; message?: string } | null>(null)
 
+  const [configLoaded, setConfigLoaded] = useState(false)
   const [saved, setSaved] = useState(false)
   const globalTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const vlmTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -52,8 +54,9 @@ export function SystemSettings() {
         if (cfg.telegram) {
           setTelegram((prev) => ({ ...prev, ...cfg.telegram }))
         }
+        setConfigLoaded(true)
       })
-      .catch(() => {})
+      .catch(() => { setConfigLoaded(true) })
   }, [])
 
   const flash = useCallback(() => {
@@ -111,6 +114,30 @@ export function SystemSettings() {
     } catch (e: any) {
       setTelegramTest({ status: "error", message: e.message })
     }
+  }
+
+  if (!configLoaded) {
+    return (
+      <div className="space-y-6 max-w-2xl p-6">
+        <Skeleton className="h-7 w-36" />
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i}>
+            <Skeleton className="h-4 w-32 mb-4" />
+            <div className="space-y-5">
+              {Array.from({ length: 4 }).map((_, j) => (
+                <div key={j} className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <Skeleton className="h-4 w-28" />
+                    <Skeleton className="h-3 w-10" />
+                  </div>
+                  <Skeleton className="h-8 w-full rounded-[var(--radius-md)]" />
+                </div>
+              ))}
+            </div>
+          </Card>
+        ))}
+      </div>
+    )
   }
 
   return (

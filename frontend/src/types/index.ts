@@ -233,6 +233,32 @@ export interface PPERule {
   enabled: boolean
 }
 
+export interface RuleCondition {
+  type: string
+  params: Record<string, string>
+}
+
+export interface RuleAction {
+  type: string
+  params: Record<string, string>
+}
+
+export interface EngineRule {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  trigger: string
+  cameras: string[]
+  conditions: RuleCondition[]
+  thenActions: RuleAction[]
+  elseActions: RuleAction[]
+  cooldownSeconds: number
+  priority: number
+  lastTriggered: string | null
+  preset: string | null
+}
+
 export interface DetectionRule {
   id: string
   name: string

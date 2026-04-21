@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { CheckCircle2, XCircle, Trash2, KeyRound, Copy, X, Loader2, RefreshCw } from "lucide-react"
 import { Card } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { getUsers, approveUser, rejectUser, updateUserRole, deleteUser, resetUserPassword } from "@/lib/api"
@@ -273,8 +274,43 @@ export function UserManagement() {
 
   if (loading) {
     return (
-      <div className="flex h-64 items-center justify-center text-[var(--color-text-tertiary)]">
-        Loading users...
+      <div className="p-6 space-y-6">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-7 w-40" />
+          <Skeleton className="h-4 w-16" />
+        </div>
+        <Card>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-[var(--color-border-default)]">
+                  {["Username", "Role", "Status", "Created", "Last Login", "Actions"].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left">
+                      <Skeleton className="h-3 w-16" />
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <tr key={i} className="border-b border-[var(--color-border-default)] last:border-0">
+                    <td className="px-4 py-3"><Skeleton className="h-4 w-24" /></td>
+                    <td className="px-4 py-3"><Skeleton className="h-7 w-24 rounded-[var(--radius-md)]" /></td>
+                    <td className="px-4 py-3"><Skeleton className="h-5 w-16 rounded-full" /></td>
+                    <td className="px-4 py-3"><Skeleton className="h-4 w-28" /></td>
+                    <td className="px-4 py-3"><Skeleton className="h-4 w-28" /></td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1">
+                        <Skeleton className="h-7 w-7 rounded-[var(--radius-md)]" />
+                        <Skeleton className="h-7 w-7 rounded-[var(--radius-md)]" />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
       </div>
     )
   }

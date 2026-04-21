@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react"
 import { Trash2 } from "lucide-react"
 import { Card } from "@/components/ui/card"
-import { getCameras, getZones, addZone, deleteZone, API_BASE } from "@/lib/api"
+import { Skeleton } from "@/components/ui/skeleton"
+import { getCameras, getZones, addZone, deleteZone, updateZone, API_BASE } from "@/lib/api"
 import { PolygonDrawer } from "@/components/zones/PolygonDrawer"
 import type { Zone } from "@/types"
 
@@ -14,6 +15,7 @@ interface Camera {
 
 export function ZoneManagement() {
   const [cameras, setCameras] = useState<Camera[]>([])
+  const [loading, setLoading] = useState(true)
   const [selectedCamId, setSelectedCamId] = useState<string>("")
   const [zones, setZones] = useState<Zone[]>([])
 
@@ -25,7 +27,7 @@ export function ZoneManagement() {
       if (online.length > 0 && !selectedCamId) {
         setSelectedCamId(online[0].id)
       }
-    }).catch(() => {})
+    }).catch(() => {}).finally(() => setLoading(false))
   }, [])
 
   // Load zones when camera changes
@@ -42,6 +44,13 @@ export function ZoneManagement() {
     setZones(updated)
   }
 
+  async function handleUpdateZone(zoneId: string, updates: { points: number[][] }) {
+    if (!selectedCamId) return
+    await updateZone(selectedCamId, zoneId, updates)
+    const updated = await getZones(selectedCamId)
+    setZones(updated)
+  }
+
   async function handleDeleteZone(zoneId: string) {
     if (!selectedCamId) return
     try {
@@ -50,6 +59,43 @@ export function ZoneManagement() {
     } catch {
       // ignore
     }
+  }
+
+  if (loading) {
+    return (
+      <div className="p-6 space-y-6">
+        <div>
+          <Skeleton className="h-7 w-40" />
+          <Skeleton className="h-4 w-72 mt-1" />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="space-y-4">
+            <Card>
+              <Skeleton className="h-4 w-28 mb-3" />
+              <div className="space-y-1.5">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-10 w-full rounded-[var(--radius-md)]" />
+                ))}
+              </div>
+            </Card>
+            <Card>
+              <div className="flex items-center justify-between mb-3">
+                <Skeleton className="h-4 w-14" />
+                <Skeleton className="h-3 w-16" />
+              </div>
+              <div className="space-y-2">
+                {Array.from({ length: 2 }).map((_, i) => (
+                  <Skeleton key={i} className="h-14 w-full rounded-[var(--radius-md)]" />
+                ))}
+              </div>
+            </Card>
+          </div>
+          <div className="lg:col-span-2">
+            <Skeleton className="aspect-video w-full rounded-[var(--radius-lg)]" />
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -134,6 +180,8 @@ export function ZoneManagement() {
               imageUrl={`${API_BASE}/api/stream/${selectedCamId}`}
               existingZones={zones}
               onSave={handleSaveZone}
+              onDelete={handleDeleteZone}
+              onUpdate={handleUpdateZone}
             />
           ) : (
             <Card className="flex items-center justify-center h-64">

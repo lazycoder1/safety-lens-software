@@ -1,4 +1,4 @@
-import { Outlet } from "react-router-dom"
+import { Outlet, useLocation } from "react-router-dom"
 import { Sidebar } from "./Sidebar"
 import { Topbar } from "./Topbar"
 import { Toaster } from "sonner"
@@ -8,7 +8,12 @@ import { ViolationModal } from "./ViolationModal"
 import { LiveAlertsPanel } from "./LiveAlertsPanel"
 import { LicenseGate } from "./LicenseGate"
 
+const HIDE_LIVE_ALERTS_ON = ["/alerts"]
+
 export function Layout() {
+  const { pathname } = useLocation()
+  const showLiveAlerts = !HIDE_LIVE_ALERTS_ON.some((p) => pathname.startsWith(p))
+
   return (
     <div className="flex h-screen overflow-hidden">
       <AlertProvider />
@@ -20,7 +25,7 @@ export function Layout() {
           <main className="flex-1 overflow-y-auto bg-[var(--color-bg-secondary)]">
             <Outlet />
           </main>
-          <LiveAlertsPanel />
+          {showLiveAlerts && <LiveAlertsPanel />}
         </div>
       </div>
       <Toaster position="top-right" richColors expand={false} visibleToasts={3} />

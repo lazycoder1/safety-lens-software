@@ -7,6 +7,8 @@ import { useAuthStore } from "@/stores/authStore"
 import type { Camera, SafetyRule } from "@/types"
 import { CameraCard } from "@/components/cameras/CameraCard"
 import { SearchInput } from "@/components/ui/SearchInput"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Card } from "@/components/ui/card"
 import { getConfiguredDetectionKeys, usesZoneIntrusion } from "@/components/cameras/detectionCatalog"
 
 export function CameraConfig() {
@@ -16,6 +18,7 @@ export function CameraConfig() {
 
   const [cameras, setCameras] = useState<Camera[]>([])
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
+  const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
   const [zoneCounts, setZoneCounts] = useState<Record<string, number>>({})
 
@@ -39,6 +42,8 @@ export function CameraConfig() {
       setZoneCounts(Object.fromEntries(zoneEntries))
     } catch {
       // silently fail for now
+    } finally {
+      setLoading(false)
     }
   }, [])
 
@@ -67,6 +72,46 @@ export function CameraConfig() {
     } catch {
       // ignore
     }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-6 p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <Skeleton className="h-7 w-28" />
+            <Skeleton className="h-4 w-72 mt-2" />
+          </div>
+          {isAdmin && <Skeleton className="h-9 w-32 rounded-[var(--radius-md)]" />}
+        </div>
+        <div className="flex items-center gap-4">
+          <Skeleton className="h-4 w-24" />
+          <Skeleton className="h-4 w-20" />
+        </div>
+        <Skeleton className="h-9 w-80 rounded-[var(--radius-md)]" />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Card key={i} className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-5 w-36" />
+                <Skeleton className="h-5 w-16 rounded-full" />
+              </div>
+              <Skeleton className="h-4 w-24" />
+              <div className="flex flex-wrap gap-1.5">
+                {Array.from({ length: 3 }).map((_, j) => (
+                  <Skeleton key={j} className="h-5 w-20 rounded-full" />
+                ))}
+              </div>
+              <div className="flex items-center gap-2 pt-2">
+                <Skeleton className="h-8 w-16 rounded-[var(--radius-md)]" />
+                <Skeleton className="h-8 w-16 rounded-[var(--radius-md)]" />
+                <Skeleton className="h-8 w-16 rounded-[var(--radius-md)]" />
+              </div>
+            </Card>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (

@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { AlertTriangle, CheckCircle2, ShieldAlert, RefreshCw, TrendingUp, TrendingDown, Minus } from "lucide-react"
+import { AlertTriangle, CheckCircle2, ShieldAlert, TrendingUp, TrendingDown, Minus } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { useAlertStore } from "@/stores/alertStore"
 import { getAlertStats, getCameras, getAlertTimeSeries, getComplianceMetrics } from "@/lib/api"
 import {
@@ -114,13 +114,11 @@ export function Dashboard() {
   const [cameraCount, setCameraCount] = useState({ total: 0, online: 0 })
   const [cameras, setCameras] = useState<{ id: string; name: string }[]>([])
   const [timeSeries, setTimeSeries] = useState<any[]>([])
-  const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [timeRange, setTimeRange] = useState<TimeRange>(24)
   const [selectedCamera, setSelectedCamera] = useState<string>("")
 
   const loadData = async (hours: TimeRange = timeRange, camId: string = selectedCamera) => {
-    setRefreshing(true)
     try {
       await fetchAlerts()
       const cameraFilter = camId || undefined
@@ -146,7 +144,6 @@ export function Dashboard() {
     } catch {
       // stats may not be available yet
     }
-    setRefreshing(false)
   }
 
   useEffect(() => {
@@ -272,8 +269,67 @@ export function Dashboard() {
 
   if (!stats || !compliance) {
     return (
-      <div className="flex items-center justify-center h-64 text-sm text-[var(--color-text-tertiary)]">
-        Loading dashboard data...
+      <div className="space-y-6 p-6">
+        {/* Header skeleton */}
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-7 w-32" />
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-8 w-28 rounded-[var(--radius-md)]" />
+            <Skeleton className="h-8 w-36 rounded-[var(--radius-md)]" />
+          </div>
+        </div>
+
+        {/* Safety banner skeleton */}
+        <Skeleton className="h-14 w-full rounded-[var(--radius-md)]" />
+
+        {/* KPI cards skeleton */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i} className="border-l-4 border-l-[var(--color-bg-tertiary)]">
+              <Skeleton className="h-3.5 w-28 mb-2" />
+              <Skeleton className="h-8 w-20 mb-2" />
+              <Skeleton className="h-3 w-36" />
+            </Card>
+          ))}
+        </div>
+
+        {/* Severity breakdown skeleton */}
+        <Card>
+          <CardHeader><Skeleton className="h-5 w-44" /></CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-4 gap-3">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-20 rounded-[var(--radius-md)]" />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Chart skeleton */}
+        <Card>
+          <CardHeader><Skeleton className="h-5 w-32" /></CardHeader>
+          <CardContent><Skeleton className="h-72 w-full" /></CardContent>
+        </Card>
+
+        {/* Bottom row skeleton */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <Card key={i}>
+              <CardHeader><Skeleton className="h-5 w-32" /></CardHeader>
+              <CardContent>
+                <div className="space-y-3">
+                  {Array.from({ length: 4 }).map((_, j) => (
+                    <div key={j} className="flex items-center gap-3">
+                      <Skeleton className="h-4 w-32 shrink-0" />
+                      <Skeleton className="h-6 flex-1" />
+                      <Skeleton className="h-4 w-10" />
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     )
   }
@@ -313,23 +369,12 @@ export function Dashboard() {
             ))}
           </div>
 
-          {/* Last updated + refresh */}
-          <div className="flex items-center gap-2">
-            {lastUpdated && (
-              <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                {lastUpdated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </span>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => loadData()}
-              disabled={refreshing}
-            >
-              <RefreshCw className={`w-4 h-4 mr-1.5 ${refreshing ? "animate-spin" : ""}`} />
-              Refresh
-            </Button>
-          </div>
+          {/* Last updated */}
+          {lastUpdated && (
+            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+              {lastUpdated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
         </div>
       </div>
 

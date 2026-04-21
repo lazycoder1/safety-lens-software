@@ -9,7 +9,6 @@ import {
   Clock,
   AlertTriangle,
   XCircle,
-  RefreshCw,
   Loader2,
 } from "lucide-react"
 import { severityConfig, severityOrder } from "@/lib/constants"
@@ -22,8 +21,8 @@ import { SeverityBadge } from "@/components/ui/SeverityBadge"
 import { StatusBadge } from "@/components/ui/StatusBadge"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
-import { API_BASE, WS_BASE } from "@/lib/api"
-import { playP1AlertSound } from "@/lib/alertSound"
+import { Skeleton } from "@/components/ui/skeleton"
+import { API_BASE } from "@/lib/api"
 
 const severities: Severity[] = ["P1", "P2", "P3", "P4"]
 const statuses: AlertStatus[] = ["active", "acknowledged", "resolved", "snoozed"]
@@ -39,7 +38,7 @@ type SortField = "timestamp" | "severity" | "confidence"
 type SortDir = "asc" | "desc"
 
 export function AlertCenter() {
-  const { alerts, loading, fetchAlerts, acknowledge, snooze, resolve, markFalsePositive, addOrUpdateAlert } = useAlertStore()
+  const { alerts, loading, fetchAlerts, acknowledge, snooze, resolve, markFalsePositive } = useAlertStore()
   const userRole = useAuthStore((s) => s.user?.role)
   const canAct = userRole === "admin" || userRole === "operator"
 
@@ -53,29 +52,6 @@ export function AlertCenter() {
   useEffect(() => {
     fetchAlerts()
   }, [fetchAlerts])
-
-  // WebSocket for live updates
-  useEffect(() => {
-    let ws: WebSocket | null = null
-    function connect() {
-      ws = new WebSocket(`${WS_BASE}/ws/alerts`)
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data)
-        if (msg.type === "alert" && msg.data) {
-          addOrUpdateAlert(msg.data)
-          if (msg.data.severity === "P1") {
-            playP1AlertSound()
-          }
-        } else if (msg.type === "updated" && msg.data) {
-          addOrUpdateAlert(msg.data)
-        }
-      }
-      ws.onclose = () => setTimeout(connect, 2000)
-      ws.onerror = () => ws?.close()
-    }
-    connect()
-    return () => ws?.close()
-  }, [addOrUpdateAlert])
 
   const toggleSev = useCallback((s: Severity) => {
     setSevFilter((prev) => {
@@ -185,10 +161,47 @@ export function AlertCenter() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="flex flex-col items-center gap-3 text-[var(--color-text-secondary)]">
-          <Loader2 size={24} className="animate-spin" />
-          <span className="text-sm">Loading alerts...</span>
+      <div className="flex h-full overflow-hidden">
+        <div className="flex-1 flex flex-col min-w-0">
+          <div className="px-6 pt-6 pb-4">
+            <div className="flex items-center justify-between mb-4">
+              <Skeleton className="h-7 w-32" />
+            </div>
+            <div className="flex flex-wrap items-center gap-3 mb-3">
+              <div className="flex items-center gap-1.5">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-7 w-14 rounded-full" />
+                ))}
+              </div>
+              <div className="flex items-center gap-1.5">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-7 w-24 rounded-full" />
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto px-6">
+            <div className="border border-[var(--color-border-default)] rounded-[var(--radius-lg)] overflow-hidden">
+              <div className="bg-[var(--color-bg-secondary)] border-b border-[var(--color-border-default)] px-4 py-3 flex gap-4">
+                {["w-10", "w-16", "w-28", "w-20", "w-32", "w-12", "w-24", "w-16", "w-20"].map((w, i) => (
+                  <Skeleton key={i} className={`h-3.5 ${w}`} />
+                ))}
+              </div>
+              {Array.from({ length: 10 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-4 px-4 py-3.5 border-b border-[var(--color-border-default)] last:border-0">
+                  <Skeleton className="h-3 w-3 rounded-full" />
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="h-4 w-20" />
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-4 w-10" />
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-5 w-16 rounded-full" />
+                  <Skeleton className="h-4 w-20" />
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     )
@@ -202,10 +215,6 @@ export function AlertCenter() {
         <div className="px-6 pt-6 pb-4">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Alert Center</h1>
-            <Button variant="ghost" size="sm" onClick={fetchAlerts} className="gap-1.5 text-xs">
-              <RefreshCw size={12} />
-              Refresh
-            </Button>
           </div>
 
           {/* Filter bar */}

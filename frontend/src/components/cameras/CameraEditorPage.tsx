@@ -18,7 +18,9 @@ import {
   getZones,
   installModels,
   previewCameraPlan,
+  testRtspConnection,
   updateCamera,
+  updateZone,
 } from "@/lib/api"
 import type { Camera, CameraProfile, ExecutionPlan, SafetyRule, Zone } from "@/types"
 import {
@@ -71,6 +73,9 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
   const [rtspPassword, setRtspPassword] = useState("")
   const [replaceStoredCredentials, setReplaceStoredCredentials] = useState(false)
   const [selectedDetections, setSelectedDetections] = useState<CameraDetectionKey[]>([])
+  const [rtspTestStatus, setRtspTestStatus] = useState<"idle" | "testing" | "success" | "failed">("idle")
+  const [rtspTestError, setRtspTestError] = useState("")
+  const [rtspResolution, setRtspResolution] = useState<[number, number] | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -207,6 +212,17 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       toast.success("Zone saved")
     } catch (error: any) {
       toast.error(error.message || "Failed to save zone")
+    }
+  }
+
+  async function handleUpdateZone(zoneId: string, updates: { points: number[][] }) {
+    if (!cameraId) return
+    try {
+      await updateZone(cameraId, zoneId, updates)
+      await refreshZones(cameraId)
+      toast.success("Zone updated")
+    } catch (error: any) {
+      toast.error(error.message || "Failed to update zone")
     }
   }
 
@@ -545,7 +561,13 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                   </p>
                 </div>
 
-                <PolygonDrawer imageUrl={`${API_BASE}/api/stream/${cameraId}`} existingZones={zones} onSave={handleSaveZone} />
+                <PolygonDrawer
+                  imageUrl={`${API_BASE}/api/stream/${cameraId}`}
+                  existingZones={zones}
+                  onSave={handleSaveZone}
+                  onDelete={handleDeleteZone}
+                  onUpdate={handleUpdateZone}
+                />
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">

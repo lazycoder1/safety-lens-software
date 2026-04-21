@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Check, X, Upload, Loader2, AlertTriangle } from "lucide-react"
 import { Card } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -134,8 +135,40 @@ export function LicenseStatus() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center p-12">
-        <Loader2 className="w-6 h-6 animate-spin text-[var(--color-text-tertiary)]" />
+      <div className="space-y-6 p-6">
+        <Skeleton className="h-7 w-24" />
+        <Card>
+          <div className="flex items-center gap-2 mb-5">
+            <Skeleton className="w-2.5 h-2.5 rounded-full" />
+            <Skeleton className="h-5 w-16 rounded-full" />
+          </div>
+          <div className="grid gap-3">
+            {["Customer", "License ID", "Issued by", "Cameras", "Expires", "Issued"].map((_, i) => (
+              <div key={i} className="flex items-center justify-between">
+                <Skeleton className="h-3.5 w-24" />
+                <Skeleton className="h-4 w-40" />
+              </div>
+            ))}
+          </div>
+        </Card>
+        <div>
+          <Skeleton className="h-4 w-32 mb-3" />
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="flex items-start gap-3 px-4 py-3 rounded-[var(--radius-md)] border bg-white">
+                <Skeleton className="w-4 h-4 mt-0.5 rounded" />
+                <div className="flex-1">
+                  <Skeleton className="h-4 w-48 mb-1" />
+                  <Skeleton className="h-3 w-64" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <Skeleton className="h-4 w-28 mb-3" />
+          <Skeleton className="h-32 w-full rounded-[var(--radius-lg)]" />
+        </div>
       </div>
     )
   }

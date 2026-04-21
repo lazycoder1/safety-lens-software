@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { getModels, installModels } from "@/lib/api"
 import type { ModelStatus } from "@/types"
 import { useModelInstallModal } from "@/components/ModelInstallModal"
@@ -55,6 +56,39 @@ export function SystemModels() {
     } catch (error: any) {
       toast.error(error.message || "Failed to start model setup")
     }
+  }
+
+  if (loading && models.length === 0) {
+    return (
+      <div className="space-y-6 p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <Skeleton className="h-7 w-24" />
+            <Skeleton className="h-4 w-80 mt-2" />
+          </div>
+          <Skeleton className="h-9 w-44 rounded-[var(--radius-md)]" />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Card key={i} className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <Skeleton className="h-5 w-36" />
+                  <Skeleton className="h-4 w-28 mt-1" />
+                </div>
+                <Skeleton className="h-6 w-20 rounded-full" />
+              </div>
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-3/4" />
+              </div>
+              <Skeleton className="h-9 w-36 rounded-[var(--radius-md)]" />
+            </Card>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (

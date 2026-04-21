@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
 import { deleteCamera, getCameraById, getSafetyRules, getZones, API_BASE } from "@/lib/api"
 import { useAuthStore } from "@/stores/authStore"
 import type { Camera, SafetyRule, Zone } from "@/types"
@@ -89,10 +90,55 @@ export function CameraDetailsPage() {
 
   if (loading) {
     return (
-      <div className="p-6">
-        <Card className="p-6">
-          <p className="text-sm text-[var(--color-text-secondary)]">Loading camera…</p>
-        </Card>
+      <div className="space-y-6 p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-8 w-56 mt-2" />
+            <Skeleton className="h-4 w-64 mt-1" />
+          </div>
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-9 w-20 rounded-[var(--radius-md)]" />
+            <Skeleton className="h-9 w-28 rounded-[var(--radius-md)]" />
+          </div>
+        </div>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="space-y-6">
+            <Skeleton className="aspect-video w-full rounded-[var(--radius-lg)]" />
+            <Card className="space-y-4">
+              <Skeleton className="h-5 w-24" />
+              <div className="space-y-3">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="flex items-center justify-between">
+                    <Skeleton className="h-4 w-20" />
+                    <Skeleton className="h-4 w-32" />
+                  </div>
+                ))}
+              </div>
+            </Card>
+            <Card className="space-y-4">
+              <Skeleton className="h-5 w-40" />
+              <div className="flex flex-wrap gap-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-6 w-24 rounded-full" />
+                ))}
+              </div>
+            </Card>
+          </div>
+          <Card className="space-y-4">
+            <Skeleton className="h-5 w-32" />
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-5 w-16 rounded-full" />
+              </div>
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-8" />
+              </div>
+            </div>
+          </Card>
+        </div>
       </div>
     )
   }
