@@ -12,6 +12,7 @@ from pathlib import Path
 import psycopg2
 from psycopg2.extras import Json
 
+from camera_connection import redact_camera_secrets
 from camera_config_utils import normalize_config
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -182,6 +183,19 @@ def get_redacted_config() -> dict:
     if db_url:
         database["url"] = _redact_database_url(db_url)
 
+    cameras = config.get("cameras", {})
+    for camera_id, camera in list(cameras.items()):
+        cameras[camera_id] = redact_camera_secrets(camera)
+
+    return config
+
+
+def get_public_config() -> dict:
+    """Return config data safe for normal API responses."""
+    config = json.loads(json.dumps(get_config()))
+    cameras = config.get("cameras", {})
+    for camera_id, camera in list(cameras.items()):
+        cameras[camera_id] = redact_camera_secrets(camera)
     return config
 
 

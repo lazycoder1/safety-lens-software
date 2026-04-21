@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { Plus } from "lucide-react"
+import { Plus, SearchCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getCameras, deleteCamera, getSafetyRules, getZones } from "@/lib/api"
 import { useAuthStore } from "@/stores/authStore"
@@ -79,10 +79,16 @@ export function CameraConfig() {
           </p>
         </div>
         {isAdmin && (
-          <Button onClick={() => navigate("/configure/cameras/new")}>
-            <Plus className="w-4 h-4" />
-            Add Camera
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button onClick={() => navigate("/configure/cameras/discover")}>
+              <SearchCheck className="w-4 h-4" />
+              Discover Cameras
+            </Button>
+            <Button variant="secondary" onClick={() => navigate("/configure/cameras/new")}>
+              <Plus className="w-4 h-4" />
+              Add Camera
+            </Button>
+          </div>
         )}
       </div>
 

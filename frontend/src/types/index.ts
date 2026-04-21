@@ -111,10 +111,100 @@ export interface Camera {
   yoloe_classes?: string[] | null
   stream_type: string
   rtsp_url: string
+  host?: string | null
+  rtsp_port?: number | null
+  onvif_port?: number | null
+  stream_path?: string | null
+  preferred_stream?: string | null
+  onvif_uuid?: string | null
+  discovery_fingerprint?: string | null
+  credentials_configured?: boolean
+  connection_summary?: string | null
   alert_classes?: string[] | null
   ppe_rule_ids?: string[] | null
   safety_rule_ids?: string[] | null
   custom_long_tail_terms?: string[] | null
+}
+
+export interface DiscoveredCamera {
+  fingerprint: string
+  source?: string
+  ip: string
+  host: string
+  name: string
+  vendor: string
+  model: string
+  location?: string
+  onvif_uuid?: string | null
+  onvif_xaddr?: string | null
+  onvif_port?: number | null
+  rtsp_port?: number | null
+  stream_path?: string
+  stream_candidates?: Array<{ label: string; name?: string; path: string }>
+  recommended_stream?: string
+  auth_state?: string
+  duplicate_state?: "none" | "exact" | "potential"
+  existing_camera_id?: string | null
+}
+
+export type DiscoveryCredentialMode = "inherit" | "override"
+
+export interface DiscoveryRowOverride {
+  displayName: string
+  zone: string
+  profile: CameraProfile
+  capabilities: CapabilityKey[]
+  preferredStream: "main" | "sub" | "mjpeg" | "custom"
+  streamPath: string
+  credentialMode: DiscoveryCredentialMode
+  username: string
+  password: string
+}
+
+export interface DiscoveryTestResult {
+  ok: boolean
+  auth_state: string
+  error?: string | null
+  error_code?: string | null
+  host: string
+  rtsp_port?: number | null
+  onvif_port?: number | null
+  stream_path?: string
+  preferred_stream?: string
+  stream_candidates?: Array<{ label: string; name?: string; path: string }>
+  recommended_stream?: string
+  preview_data_url?: string
+  latency_ms?: number
+  width?: number
+  height?: number
+  onvif_uuid?: string | null
+  discovery_fingerprint?: string | null
+  vendor?: string
+  model?: string
+  name?: string
+  duplicate_state?: "none" | "exact" | "potential"
+  existing_camera_id?: string | null
+}
+
+export interface DiscoveryImportResult {
+  created: Array<{
+    camera_id: string
+    name: string
+    zone: string
+    needs_zone_setup: boolean
+  }>
+  failed: Array<{
+    fingerprint: string
+    error_code: string
+    error: string
+    existing_camera_id?: string | null
+  }>
+  needs_zone_setup: Array<{
+    camera_id: string
+    name: string
+    zone: string
+    needs_zone_setup: boolean
+  }>
 }
 
 export interface Zone {

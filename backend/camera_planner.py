@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from camera_connection import normalize_camera_connection
 from capability_registry import (
     ALL_PPE_PROMPT_TERMS,
     CAPABILITY_REGISTRY,
@@ -220,6 +221,9 @@ def normalize_camera_record(camera: dict, cfg: dict | None = None) -> tuple[dict
 
     updated = deepcopy(camera)
     changed = False
+
+    if normalize_camera_connection(updated, existing_camera=camera):
+        changed = True
 
     execution_plan = build_execution_plan(updated, cfg)
     capabilities = execution_plan["capabilities"]

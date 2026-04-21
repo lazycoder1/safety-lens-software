@@ -9,6 +9,7 @@ import { AlertCenter } from "@/pages/AlertCenter"
 import { Dashboard } from "@/pages/Dashboard"
 import { CameraConfig } from "@/pages/CameraConfig"
 import { CameraSetupPage } from "@/pages/CameraSetupPage"
+import { CameraDiscoverPage } from "@/pages/CameraDiscoverPage"
 import { CameraDetailsPage } from "@/pages/CameraDetailsPage"
 import { CameraEditPage } from "@/pages/CameraEditPage"
 import { RulesEngine } from "@/pages/RulesEngine"
@@ -45,6 +46,14 @@ export default function App() {
             <Route path="/reports" element={<Placeholder title="Reports" />} />
             <Route path="/search" element={<ErrorBoundary><AISearch /></ErrorBoundary>} />
             <Route path="/configure/cameras" element={<ErrorBoundary><CameraConfig /></ErrorBoundary>} />
+            <Route
+              path="/configure/cameras/discover"
+              element={
+                <ProtectedRoute requiredRole={["admin"]}>
+                  <ErrorBoundary><CameraDiscoverPage /></ErrorBoundary>
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="/configure/cameras/new"
               element={

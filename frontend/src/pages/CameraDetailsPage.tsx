@@ -202,6 +202,9 @@ export function CameraDetailsPage() {
               />
               <InfoRow label="Purpose" value={purpose} />
               <InfoRow label="Profile" value={camera.profile} />
+              {camera.stream_type === "rtsp" && (
+                <InfoRow label="Connection" value={camera.connection_summary || camera.rtsp_url || "Configured"} />
+              )}
             </div>
           </Card>
 
@@ -302,7 +305,7 @@ export function CameraDetailsPage() {
               <div className="mt-3 space-y-2 text-sm text-[var(--color-text-secondary)]">
                 <p><span className="font-medium text-[var(--color-text-primary)]">Camera ID:</span> {camera.id}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Source Type:</span> {camera.stream_type === "rtsp" ? "RTSP" : "Video File"}</p>
-                <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Source Value:</span> {camera.stream_type === "rtsp" ? camera.rtsp_url : camera.video}</p>
+                <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Source Value:</span> {camera.stream_type === "rtsp" ? camera.connection_summary || camera.rtsp_url : camera.video}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">FPS:</span> {camera.fps}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Detection Engine:</span> {camera.demo}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Runtime Status:</span> {camera.runtime_status}</p>

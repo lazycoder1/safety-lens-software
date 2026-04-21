@@ -31,6 +31,7 @@ import {
   usesZoneIntrusion,
   type CameraDetectionKey,
 } from "./detectionCatalog"
+import { PROFILE_DEFAULTS, PROFILE_OPTIONS } from "./profileOptions"
 import { DetectionChecklist } from "./DetectionChecklist"
 import { Field } from "./helpers"
 import { PolygonDrawer } from "@/components/zones/PolygonDrawer"
@@ -38,30 +39,6 @@ import { useModelInstallModal } from "@/components/ModelInstallModal"
 
 interface CameraEditorPageProps {
   mode: "create" | "edit"
-}
-
-const PROFILE_OPTIONS: Array<{ key: CameraProfile; label: string; description: string }> = [
-  {
-    key: "general_safety",
-    label: "General Safety",
-    description: "Default safety monitoring for people, phones, vehicles, animals, and zones.",
-  },
-  {
-    key: "work_zone_ppe",
-    label: "Work Zone / PPE",
-    description: "PPE-focused cameras that still need person and zone context.",
-  },
-  {
-    key: "demo_advanced",
-    label: "Demo / Advanced",
-    description: "Advanced cameras that use long-tail detections such as fire and smoke.",
-  },
-]
-
-const PROFILE_DEFAULTS: Record<CameraProfile, CameraDetectionKey[]> = {
-  general_safety: ["person_presence", "mobile_phone"],
-  work_zone_ppe: ["helmet_required", "vest_required", "zone_intrusion"],
-  demo_advanced: ["fire_smoke"],
 }
 
 export function CameraEditorPage({ mode }: CameraEditorPageProps) {
@@ -90,6 +67,9 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
   const [streamType, setStreamType] = useState<"file" | "rtsp">("file")
   const [video, setVideo] = useState("")
   const [rtspUrl, setRtspUrl] = useState("")
+  const [rtspUsername, setRtspUsername] = useState("")
+  const [rtspPassword, setRtspPassword] = useState("")
+  const [replaceStoredCredentials, setReplaceStoredCredentials] = useState(false)
   const [selectedDetections, setSelectedDetections] = useState<CameraDetectionKey[]>([])
 
   useEffect(() => {
@@ -122,7 +102,10 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
         setProfile(existingCamera.profile || "general_safety")
         setStreamType((existingCamera.stream_type || "file") as "file" | "rtsp")
         setVideo(existingCamera.video || videoData[0] || "")
-        setRtspUrl(existingCamera.rtsp_url || "")
+        setRtspUrl(existingCamera.connection_summary || existingCamera.rtsp_url || "")
+        setRtspUsername("")
+        setRtspPassword("")
+        setReplaceStoredCredentials(false)
         setSelectedDetections(getConfiguredDetectionKeys(existingCamera, ruleData))
       } catch (error: any) {
         toast.error(error.message || "Failed to load camera")
@@ -154,6 +137,9 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
 
   useEffect(() => {
     if (loading) return
+    const shouldSendCredentialUpdate =
+      streamType === "rtsp" &&
+      (!isEdit || replaceStoredCredentials || Boolean(rtspUsername.trim()) || Boolean(rtspPassword))
     let cancelled = false
     const timer = window.setTimeout(async () => {
       setPreviewLoading(true)
@@ -166,6 +152,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
           stream_type: streamType,
           video: streamType === "file" ? video : "",
           rtsp_url: streamType === "rtsp" ? rtspUrl : "",
+          username: shouldSendCredentialUpdate ? rtspUsername.trim() : undefined,
+          password: shouldSendCredentialUpdate ? rtspPassword : undefined,
           safety_rule_ids: [...selectedRuleIds, ...preservedRuleIds],
         })
         if (!cancelled) {
@@ -182,7 +170,22 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [loading, name, zone, profile, streamType, video, rtspUrl, selectedDetections, selectedRuleIds, preservedRuleIds])
+  }, [
+    loading,
+    name,
+    zone,
+    profile,
+    streamType,
+    video,
+    rtspUrl,
+    rtspUsername,
+    rtspPassword,
+    replaceStoredCredentials,
+    selectedDetections,
+    selectedRuleIds,
+    preservedRuleIds,
+    isEdit,
+  ])
 
   function handleProfileChange(nextProfile: CameraProfile) {
     setProfile(nextProfile)
@@ -251,6 +254,10 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       return
     }
 
+    const shouldSendCredentialUpdate =
+      streamType === "rtsp" &&
+      (!isEdit || replaceStoredCredentials || Boolean(rtspUsername.trim()) || Boolean(rtspPassword))
+
     const payload = {
       name: name.trim(),
       zone: zone.trim(),
@@ -261,6 +268,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       rules: [],
       stream_type: streamType,
       rtsp_url: streamType === "rtsp" ? rtspUrl.trim() : "",
+      username: shouldSendCredentialUpdate ? rtspUsername.trim() : undefined,
+      password: shouldSendCredentialUpdate ? rtspPassword : undefined,
       safety_rule_ids: [...selectedRuleIds, ...preservedRuleIds],
     }
 
@@ -465,15 +474,54 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                 </select>
               </Field>
             ) : (
-              <Field label="RTSP URL">
-                <input
-                  type="text"
-                  value={rtspUrl}
-                  onChange={(event) => setRtspUrl(event.target.value)}
-                  placeholder="rtsp://192.168.1.100:554/stream1"
-                  className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 font-mono text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)]"
-                />
-              </Field>
+              <div className="space-y-4">
+                <Field label="RTSP URL">
+                  <input
+                    type="text"
+                    value={rtspUrl}
+                    onChange={(event) => setRtspUrl(event.target.value)}
+                    placeholder="rtsp://192.168.1.100:554/stream1"
+                    className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 font-mono text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)]"
+                  />
+                </Field>
+
+                {isEdit && camera?.credentials_configured && !replaceStoredCredentials ? (
+                  <div className="rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-[var(--color-bg-tertiary)] px-3 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium text-[var(--color-text-primary)]">Stored credentials are configured</p>
+                        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+                          Existing camera credentials will be preserved unless you choose to replace them.
+                        </p>
+                      </div>
+                      <Button variant="secondary" size="sm" type="button" onClick={() => setReplaceStoredCredentials(true)}>
+                        Replace Credentials
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Field label={isEdit ? "Username Override" : "Username"}>
+                      <input
+                        type="text"
+                        value={rtspUsername}
+                        onChange={(event) => setRtspUsername(event.target.value)}
+                        placeholder="admin"
+                        className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)]"
+                      />
+                    </Field>
+                    <Field label={isEdit ? "Password Override" : "Password"}>
+                      <input
+                        type="password"
+                        value={rtspPassword}
+                        onChange={(event) => setRtspPassword(event.target.value)}
+                        placeholder={isEdit ? "Leave blank to keep current unless replacing" : "Camera password"}
+                        className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)]"
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
             )}
           </Card>
 
@@ -644,6 +692,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                 <p><span className="font-medium text-[var(--color-text-primary)]">Camera ID:</span> {camera?.id || "Not created yet"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Source Type:</span> {streamType === "rtsp" ? "RTSP" : "Video File"}</p>
                 <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Source Value:</span> {streamType === "rtsp" ? rtspUrl || "Not set" : video || "Not set"}</p>
+                <p><span className="font-medium text-[var(--color-text-primary)]">Credentials Update:</span> {streamType === "rtsp" ? (replaceStoredCredentials || rtspUsername || rtspPassword ? "Provided in request" : camera?.credentials_configured ? "Preserve stored" : "None") : "N/A"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Profile:</span> {profile}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Capabilities:</span> {selectedDetections.join(", ") || "None"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Rule IDs:</span> {selectedRuleIds.join(", ") || "None"}</p>
@@ -655,4 +704,3 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     </div>
   )
 }
-

@@ -18,6 +18,7 @@ import licensing
 import model_manager
 import state
 import telegram_notifier
+from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan
 from capability_registry import CLASS_TERM_TO_CAPABILITY
 from config_manager import get_config
@@ -294,7 +295,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     cfg = get_config()
     cam = cfg["cameras"][camera_id]
     stream_type = cam.get("stream_type", "file")
-    video_source = cam.get("rtsp_url", "") if stream_type == "rtsp" else str(VIDEO_DIR / cam["video"])
+    video_source = build_rtsp_url(cam, include_credentials=True) if stream_type == "rtsp" else str(VIDEO_DIR / cam["video"])
     execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
     g = cfg["global"]
     target_fps = cam.get("fps", g["target_fps"])
@@ -539,4 +540,3 @@ def mjpeg_generator(camera_id: str):
         cfg = get_config()
         fps = cfg["global"]["target_fps"]
         time.sleep(1.0 / fps)
-

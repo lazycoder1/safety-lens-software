@@ -286,6 +286,15 @@ export async function addCamera(camera: {
   yoloe_classes?: string[]
   stream_type?: string
   rtsp_url?: string
+  host?: string
+  rtsp_port?: number | null
+  onvif_port?: number | null
+  stream_path?: string
+  preferred_stream?: string
+  username?: string
+  password?: string
+  onvif_uuid?: string
+  discovery_fingerprint?: string
   safety_rule_ids?: string[]
   custom_long_tail_terms?: string[]
 }) {
@@ -316,11 +325,80 @@ export async function previewCameraPlan(payload: {
   stream_type?: string
   video?: string
   rtsp_url?: string
+  host?: string
+  rtsp_port?: number | null
+  onvif_port?: number | null
+  stream_path?: string
+  preferred_stream?: string
+  username?: string
+  password?: string
+  onvif_uuid?: string
+  discovery_fingerprint?: string
   safety_rule_ids?: string[]
   yoloe_classes?: string[]
   custom_long_tail_terms?: string[]
 }) {
   return request("/api/camera-plans/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function discoverCameras(payload?: {
+  cidrs?: string[]
+  timeout_seconds?: number
+}) {
+  return request("/api/cameras/discover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  })
+}
+
+export async function testDiscoveredCamera(payload: {
+  fingerprint?: string
+  host?: string
+  ip?: string
+  name?: string
+  vendor?: string
+  model?: string
+  onvif_uuid?: string
+  onvif_xaddr?: string
+  onvif_port?: number | null
+  rtsp_port?: number | null
+  preferred_stream?: string
+  stream_path?: string
+  username?: string
+  password?: string
+}) {
+  return request("/api/cameras/discover/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function importDiscoveredCameras(payload: {
+  devices: Array<{
+    fingerprint?: string
+    host?: string
+    ip?: string
+    name: string
+    zone: string
+    profile?: string
+    capabilities?: string[]
+    preferred_stream?: string
+    stream_path?: string
+    username?: string
+    password?: string
+    onvif_uuid?: string
+    onvif_xaddr?: string
+    onvif_port?: number | null
+    rtsp_port?: number | null
+  }>
+}) {
+  return request("/api/cameras/discover/import", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

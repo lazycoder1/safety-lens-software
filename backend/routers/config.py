@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 import audit_store
-from config_manager import get_config, save_config
+from config_manager import get_config, get_public_config, save_config
 from dependencies import require_admin
 from video_processing import restart_all_cameras
 import telegram_notifier
@@ -44,7 +44,7 @@ class TelegramConfigUpdate(BaseModel):
 
 @router.get("/config")
 async def api_get_config():
-    return get_config()
+    return get_public_config()
 
 
 @router.put("/config/global", dependencies=[Depends(require_admin)])
