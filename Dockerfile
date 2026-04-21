@@ -39,4 +39,4 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "server:app", "--app-dir", "/app/backend", "--host", "0.0.0.0", "--port", "8000"]

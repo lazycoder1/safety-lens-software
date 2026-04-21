@@ -5,6 +5,9 @@ pydantic==2.12.5
 requests==2.32.5
 psycopg2-binary==2.9.11
 cryptography==46.0.7
+bcrypt==5.0.0
+PyJWT==2.10.1
+python-multipart==0.0.20
 numpy==2.4.2
 opencv-python==4.13.0.92
 pillow==12.1.1

@@ -1,0 +1,90 @@
+name: Deploy Backend To Vast
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "backend/**"
+      - "requirements.txt"
+      - "scripts/deploy_backend.sh"
+      - ".env.example"
+      - "Dockerfile"
+      - ".github/workflows/deploy-backend-vast.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VAST_HOST: ${{ secrets.VAST_HOST }}
+      VAST_PORT: ${{ secrets.VAST_PORT }}
+      VAST_USER: ${{ secrets.VAST_USER }}
+      VAST_DEPLOY_PATH: ${{ secrets.VAST_DEPLOY_PATH }}
+      VAST_SSH_PRIVATE_KEY: ${{ secrets.VAST_SSH_PRIVATE_KEY }}
+      VIDEO_ANALYTICS_BACKEND_ENV: ${{ secrets.VIDEO_ANALYTICS_BACKEND_ENV }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${VAST_HOST:?Set repository secret VAST_HOST}"
+          : "${VAST_SSH_PRIVATE_KEY:?Set repository secret VAST_SSH_PRIVATE_KEY}"
+
+          echo "DEPLOY_HOST=$VAST_HOST" >> "$GITHUB_ENV"
+          echo "DEPLOY_PORT=${VAST_PORT:-22}" >> "$GITHUB_ENV"
+          echo "DEPLOY_USER=${VAST_USER:-root}" >> "$GITHUB_ENV"
+          echo "DEPLOY_PATH=${VAST_DEPLOY_PATH:-/opt/safetylens/video-analytics}" >> "$GITHUB_ENV"
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$VAST_SSH_PRIVATE_KEY" > "$HOME/.ssh/vast_key"
+          chmod 600 "$HOME/.ssh/vast_key"
+          ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> "$HOME/.ssh/known_hosts"
+
+      - name: Sync backend source to Vast
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/vast_key" -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
+          rsync -az --omit-dir-times \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.venv/' \
+            --exclude '.deploy/' \
+            --exclude 'frontend/' \
+            --exclude 'test-videos/' \
+            --exclude 'models/' \
+            --exclude '*.pt' \
+            --exclude '*.onnx' \
+            --exclude '*.engine' \
+            --exclude 'backend/config.json' \
+            --exclude 'backend/logs/' \
+            --exclude 'backend/snapshots/' \
+            --exclude '.env' \
+            -e "ssh -i $HOME/.ssh/vast_key -p $DEPLOY_PORT" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+
+      - name: Upload backend env file
+        if: ${{ env.VIDEO_ANALYTICS_BACKEND_ENV != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$VIDEO_ANALYTICS_BACKEND_ENV" > backend.env
+          scp -i "$HOME/.ssh/vast_key" -P "$DEPLOY_PORT" backend.env "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/.env"
+          rm -f backend.env
+
+      - name: Run backend deploy script on Vast
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/vast_key" -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && bash ./scripts/deploy_backend.sh --install-systemd --env-file '$DEPLOY_PATH/.env'"
+
