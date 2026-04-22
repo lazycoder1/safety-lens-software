@@ -170,3 +170,22 @@ def test_check_yoloe_violations_all_ppe_present(mock_cfg):
     dets = [_det("person", 0.9), _det("hairnet", 0.85), _det("gloves", 0.8)]
     violations = check_yoloe_violations(dets, "cam3")
     assert violations == []
+
+
+@mock.patch("detection.get_config")
+def test_check_yoloe_violations_uses_safety_rule_ids_when_yoloe_classes_are_stale(mock_cfg):
+    mock_cfg.return_value = {
+        "cameras": {
+            "cam5": {
+                "safety_rule_ids": ["ppe_helmet"],
+                "ppe_rule_ids": [],
+                "yoloe_classes": ["person", "safety vest"],
+            }
+        },
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
+    }
+    dets = [{"class": "person", "confidence": 0.91, "bbox": [0, 0, 100, 200]}]
+    violations = check_yoloe_violations(dets, "cam5")
+    assert len(violations) == 1
+    assert violations[0]["rule"] == "Missing helmet"
+    assert violations[0]["severity"] == "P2"

@@ -202,8 +202,6 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
     candidates = []
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
-    yoloe_classes = cam.get("yoloe_classes", [])
-
     persons = [d for d in detections if d["class"] == "person"]
     if not persons:
         return candidates
@@ -222,19 +220,19 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
                 key = rule["name"].lower()
                 ppe_groups[key] = rule["classes"]
                 severity_map[key] = rule.get("severity", "P2")
+        checked_groups: set[str] = set(ppe_groups)
     else:
         # Fallback: match yoloe_classes against all known PPE groups
         ppe_groups = get_ppe_groups()
         severity_map = get_ppe_severity_map()
-
-    # Build set of PPE groups that this camera monitors
-    checked_groups: set[str] = set()
-    for cls in yoloe_classes:
-        if cls == "person":
-            continue
-        for group_name, group_classes in ppe_groups.items():
-            if cls in group_classes:
-                checked_groups.add(group_name)
+        yoloe_classes = cam.get("yoloe_classes", [])
+        checked_groups = set()
+        for cls in yoloe_classes:
+            if cls == "person":
+                continue
+            for group_name, group_classes in ppe_groups.items():
+                if cls in group_classes:
+                    checked_groups.add(group_name)
 
     # Per-person check
     for group_name in checked_groups:

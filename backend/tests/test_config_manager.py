@@ -92,6 +92,43 @@ def test_load_config_normalizes_legacy_camera_rule_fields():
     assert camera["execution_plan"]["run_ppe_specialist"] is True
 
 
+def test_load_config_rebuilds_capabilities_from_safety_rule_ids_when_stale():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_stale": {
+                "name": "TMEIC PE Stores",
+                "demo": "yolo+yoloe",
+                "rules": ["Person Detection", "Mobile Phone Usage"],
+                "yoloe_classes": ["person", "safety vest"],
+                "safety_rule_ids": ["ppe_vest", "ppe_helmet", "alert_mobile_phone"],
+                "ppe_rule_ids": ["ppe_vest"],
+                "capabilities": ["person_presence", "mobile_phone", "vest_required"],
+                "execution_plan": {
+                    "capabilities": ["person_presence", "mobile_phone", "vest_required"],
+                    "ppe_prompt_terms": ["safety vest"],
+                    "required_model_keys": ["coco_primary", "ppe_specialist"],
+                    "run_coco_primary": True,
+                    "run_ppe_specialist": True,
+                    "run_yoloe_long_tail": False,
+                },
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_stale"]
+
+    assert "ppe_helmet" in camera["ppe_rule_ids"]
+    assert "helmet_required" in camera["capabilities"]
+    assert "hard hat" in camera["yoloe_classes"]
+    assert "safety helmet" in camera["yoloe_classes"]
+    assert "hard hat" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+
+
 # ── get_config ───────────────────────────────────────────────────────────────
 
 def test_get_config_loads_on_first_call():

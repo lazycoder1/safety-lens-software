@@ -47,13 +47,14 @@ def _ordered_capabilities(capabilities: list[str]) -> list[CapabilityKey]:
 
 
 def infer_capabilities_from_camera(camera: dict, cfg: dict) -> list[CapabilityKey]:
-    explicit = [normalize_capability_key(value) for value in _ensure_list(camera.get("capabilities"))]
-    explicit_caps = [value for value in explicit if value]
-    if explicit_caps:
-        return _ordered_capabilities(explicit_caps)
+    rule_ids = _ensure_list(camera.get("safety_rule_ids"))
+    if not rule_ids:
+        explicit = [normalize_capability_key(value) for value in _ensure_list(camera.get("capabilities"))]
+        explicit_caps = [value for value in explicit if value]
+        if explicit_caps:
+            return _ordered_capabilities(explicit_caps)
 
     capabilities: list[CapabilityKey] = []
-    rule_ids = _ensure_list(camera.get("safety_rule_ids"))
     rule_map = {rule["id"]: rule for rule in cfg.get("safety_rules", [])}
 
     for rule_id in rule_ids:
@@ -225,13 +226,23 @@ def normalize_camera_record(camera: dict, cfg: dict | None = None) -> tuple[dict
     if normalize_camera_connection(updated, existing_camera=camera):
         changed = True
 
+    # Keep rule-derived fields coherent even when only safety_rule_ids changed.
+    from camera_config_utils import sync_camera_rule_fields
+
+    if sync_camera_rule_fields(updated):
+        changed = True
+
     execution_plan = build_execution_plan(updated, cfg)
     capabilities = execution_plan["capabilities"]
     profile = execution_plan["profile"]
     custom_long_tail_terms = derive_custom_long_tail_terms(updated, cfg)
     if not _ensure_list(updated.get("safety_rule_ids")) and capabilities:
         updated["safety_rule_ids"] = default_rule_ids_for_capabilities(capabilities)
-        updated["ppe_rule_ids"] = [value for value in updated["safety_rule_ids"] if value.startswith("ppe_")]
+        changed = True
+
+    derived_ppe_rule_ids = [value for value in _ensure_list(updated.get("safety_rule_ids")) if value.startswith("ppe_")]
+    if updated.get("ppe_rule_ids") != derived_ppe_rule_ids:
+        updated["ppe_rule_ids"] = derived_ppe_rule_ids
         changed = True
 
     next_fields = {
