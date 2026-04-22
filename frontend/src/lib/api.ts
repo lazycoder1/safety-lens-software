@@ -458,33 +458,8 @@ export async function markFalsePositive(id: string) {
   return request(`/api/alerts/${id}/false-positive`, { method: "PUT" })
 }
 
-// Detection Rules
-export async function getDetectionRules() {
-  return request("/api/detection-rules")
-}
-
-export async function toggleDetectionRule(ruleId: string) {
-  return request(`/api/detection-rules/${ruleId}/toggle`, { method: "PUT" })
-}
-
-export async function createDetectionRule(rule: {
-  name: string
-  model: string
-  promptType: string
-  prompts: string[]
-  confidenceThreshold: number
-  severity: string
-  category?: string
-}) {
-  return request("/api/detection-rules", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(rule),
-  })
-}
-
 // Safety Rules
-import type { EngineRule, ModelInstallJob, ModelStatus, PPERule, SafetyRule } from "@/types"
+import type { EngineRule, ModelInstallJob, ModelStatus, SafetyRule } from "@/types"
 
 export async function getSafetyRules(): Promise<SafetyRule[]> {
   return request("/api/safety-rules")
@@ -550,36 +525,6 @@ export async function toggleAutomationRule(id: string): Promise<EngineRule> {
 
 export async function deleteAutomationRule(id: string): Promise<void> {
   return request(`/api/automation-rules/${id}`, { method: "DELETE" })
-}
-
-// PPE Rules (deprecated — use Safety Rules)
-
-export async function getPPERules(): Promise<PPERule[]> {
-  return request("/api/ppe-rules")
-}
-
-export async function createPPERule(rule: { name: string; yoloe_classes: string[]; severity: string }): Promise<PPERule> {
-  return request("/api/ppe-rules", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(rule),
-  })
-}
-
-export async function updatePPERule(id: string, updates: Partial<PPERule>): Promise<PPERule> {
-  return request(`/api/ppe-rules/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(updates),
-  })
-}
-
-export async function togglePPERule(id: string): Promise<PPERule> {
-  return request(`/api/ppe-rules/${id}/toggle`, { method: "PUT" })
-}
-
-export async function deletePPERule(id: string): Promise<void> {
-  return request(`/api/ppe-rules/${id}`, { method: "DELETE" })
 }
 
 // Models

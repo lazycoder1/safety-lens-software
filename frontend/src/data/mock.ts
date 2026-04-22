@@ -1,4 +1,4 @@
-import type { Severity, AlertStatus, CameraStatus, DetectionRule } from "@/types"
+import type { Severity, AlertStatus, CameraStatus } from "@/types"
 export type { Severity, AlertStatus, CameraStatus }
 
 export interface PipelineStage {
@@ -52,6 +52,11 @@ export interface KPI {
   value: string | number
   change: number
   changeLabel: string
+}
+
+export interface AlertRoutingRule {
+  id: string
+  name: string
 }
 
 const PLACEHOLDER_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='240' fill='%23f5f5f5'%3E%3Crect width='320' height='240'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23a3a3a3' font-family='system-ui' font-size='14'%3ECamera Feed%3C/text%3E%3C/svg%3E"
@@ -116,19 +121,19 @@ export const alerts: MockAlert[] = Array.from({ length: 50 }, (_, i) => {
   }
 }).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
-export const detectionRules: DetectionRule[] = [
-  { id: "r1", name: "Hard Hat Detection", model: "YOLOE", promptType: "text", prompts: ["hard hat", "safety helmet"], confidenceThreshold: 0.5, severity: "P2", enabled: true, camerasCount: 16, category: "PPE" },
-  { id: "r2", name: "Safety Vest Detection", model: "YOLOE", promptType: "text", prompts: ["safety vest", "high visibility vest"], confidenceThreshold: 0.5, severity: "P2", enabled: true, camerasCount: 18, category: "PPE" },
-  { id: "r3", name: "Safety Goggles", model: "YOLOE", promptType: "text", prompts: ["safety goggles", "protective eyewear"], confidenceThreshold: 0.45, severity: "P2", enabled: true, camerasCount: 6, category: "PPE" },
-  { id: "r4", name: "Safety Harness", model: "YOLOE", promptType: "visual", prompts: ["harness-ref.jpg"], confidenceThreshold: 0.5, severity: "P2", enabled: true, camerasCount: 4, category: "PPE" },
-  { id: "r5", name: "Zone Intrusion", model: "YOLO26", promptType: "internal", prompts: ["person"], confidenceThreshold: 0.6, severity: "P1", enabled: true, camerasCount: 8, category: "Zone Safety" },
-  { id: "r6", name: "Person Fall Detection", model: "YOLO-pose", promptType: "internal", prompts: ["pose-keypoints"], confidenceThreshold: 0.55, severity: "P1", enabled: true, camerasCount: 20, category: "Emergency" },
-  { id: "r7", name: "Mobile Phone Usage", model: "YOLO26", promptType: "internal", prompts: ["cell phone"], confidenceThreshold: 0.6, severity: "P2", enabled: true, camerasCount: 14, category: "Behavior" },
-  { id: "r8", name: "Animal Detection", model: "YOLOE", promptType: "text", prompts: ["snake", "dog", "cat"], confidenceThreshold: 0.4, severity: "P3", enabled: true, camerasCount: 6, category: "Environment" },
-  { id: "r9", name: "Gangway Blockage", model: "VLM", promptType: "text", prompts: ["Is the gangway clear and unobstructed?"], confidenceThreshold: 0.5, severity: "P3", enabled: true, camerasCount: 4, category: "Environment" },
-  { id: "r10", name: "Fire / Smoke Detection", model: "YOLOE", promptType: "text", prompts: ["fire", "smoke", "flames"], confidenceThreshold: 0.35, severity: "P1", enabled: true, camerasCount: 20, category: "Emergency" },
-  { id: "r11", name: "Head Cap vs Helmet", model: "YOLOE", promptType: "text", prompts: ["hair net", "head cap", "hard hat"], confidenceThreshold: 0.45, severity: "P2", enabled: false, camerasCount: 0, category: "PPE" },
-  { id: "r12", name: "Forklift Operator Helmet", model: "YOLOE", promptType: "text", prompts: ["forklift", "hard hat"], confidenceThreshold: 0.5, severity: "P2", enabled: true, camerasCount: 5, category: "PPE" },
+export const alertRoutingRules: AlertRoutingRule[] = [
+  { id: "r1", name: "Hard Hat Detection" },
+  { id: "r2", name: "Safety Vest Detection" },
+  { id: "r3", name: "Safety Goggles" },
+  { id: "r4", name: "Safety Harness" },
+  { id: "r5", name: "Zone Intrusion" },
+  { id: "r6", name: "Person Fall Detection" },
+  { id: "r7", name: "Mobile Phone Usage" },
+  { id: "r8", name: "Animal Detection" },
+  { id: "r9", name: "Gangway Blockage" },
+  { id: "r10", name: "Fire / Smoke Detection" },
+  { id: "r11", name: "Head Cap vs Helmet" },
+  { id: "r12", name: "Forklift Operator Helmet" },
 ]
 
 export const kpis: KPI[] = [

@@ -225,14 +225,6 @@ export interface SafetyRule {
   enabled: boolean
 }
 
-export interface PPERule {
-  id: string
-  name: string
-  yoloe_classes: string[]
-  severity: Severity
-  enabled: boolean
-}
-
 export interface RuleCondition {
   type: string
   params: Record<string, string>
@@ -257,19 +249,6 @@ export interface EngineRule {
   priority: number
   lastTriggered: string | null
   preset: string | null
-}
-
-export interface DetectionRule {
-  id: string
-  name: string
-  model: string
-  promptType: string
-  prompts: string[]
-  confidenceThreshold: number
-  severity: Severity
-  enabled: boolean
-  camerasCount: number
-  category: string
 }
 
 export interface User {

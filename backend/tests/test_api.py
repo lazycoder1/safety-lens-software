@@ -362,15 +362,18 @@ def test_telegram_test_endpoint(mock_test):
 # ── GET /api/alert-rules-available ───────────────────────────────────────────
 
 def test_available_alert_rules_endpoint():
-    resp = client.get("/api/alert-rules-available")
+    import auth_store
+
+    token = auth_store.create_token("admin-test", "admin", "admin")
+    resp = client.get("/api/alert-rules-available", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     data = resp.json()
-    assert "mobile_phone" in data
-    assert "animal_intrusion" in data
-    assert "person_detected" in data
-    assert "vehicle_detected" in data
-    assert data["mobile_phone"]["rule"] == "Mobile Phone Usage"
-    assert data["mobile_phone"]["severity"] == "P3"
+    assert "alert_mobile_phone" in data
+    assert "alert_animal" in data
+    assert "alert_person" in data
+    assert "alert_vehicle" in data
+    assert data["alert_mobile_phone"]["rule"] == "Mobile Phone Usage"
+    assert data["alert_mobile_phone"]["severity"] == "P3"
 
 
 # ── GET /api/videos ──────────────────────────────────────────────────────────
@@ -480,107 +483,6 @@ def test_delete_camera(mock_stop):
 def test_delete_camera_not_found():
     resp = client.delete("/api/cameras/cam999")
     assert resp.status_code == 404
-
-
-# ── Detection Rules API ─────────────────────────────────────────────────────
-
-def test_get_detection_rules_defaults():
-    resp = client.get("/api/detection-rules")
-    assert resp.status_code == 200
-    rules = resp.json()
-    assert len(rules) == 12
-    assert rules[0]["name"] == "Hard Hat Detection"
-    assert rules[0]["enabled"] is True
-
-
-def test_get_detection_rules_from_config():
-    cfg = config_manager.get_config()
-    cfg["detection_rules"] = [
-        {"id": "r1", "name": "Custom Rule", "enabled": True, "model": "YOLOE",
-         "prompts": ["test"], "confidenceThreshold": 0.5, "severity": "P2",
-         "promptType": "text", "camerasCount": 0, "category": "Custom"},
-    ]
-    config_manager.save_config(cfg)
-
-    resp = client.get("/api/detection-rules")
-    assert resp.status_code == 200
-    rules = resp.json()
-    assert len(rules) == 1
-    assert rules[0]["name"] == "Custom Rule"
-
-
-def test_toggle_detection_rule():
-    resp = client.get("/api/detection-rules")
-    rules = resp.json()
-    first_rule = rules[0]
-    assert first_rule["enabled"] is True
-
-    resp = client.put(f"/api/detection-rules/{first_rule['id']}/toggle")
-    assert resp.status_code == 200
-    assert resp.json()["enabled"] is False
-
-    resp = client.put(f"/api/detection-rules/{first_rule['id']}/toggle")
-    assert resp.status_code == 200
-    assert resp.json()["enabled"] is True
-
-
-def test_toggle_detection_rule_persists():
-    resp = client.get("/api/detection-rules")
-    rule_id = resp.json()[0]["id"]
-
-    client.put(f"/api/detection-rules/{rule_id}/toggle")
-
-    config_manager._config = None
-    cfg = config_manager.load_config()
-    rule = next(r for r in cfg["detection_rules"] if r["id"] == rule_id)
-    assert rule["enabled"] is False
-
-
-def test_toggle_detection_rule_not_found():
-    resp = client.put("/api/detection-rules/r999/toggle")
-    assert resp.status_code == 404
-
-
-def test_create_detection_rule():
-    resp = client.post("/api/detection-rules", json={
-        "name": "Welding Mask",
-        "model": "YOLOE",
-        "promptType": "text",
-        "prompts": ["welding mask", "face shield"],
-        "confidenceThreshold": 0.45,
-        "severity": "P2",
-    })
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["name"] == "Welding Mask"
-    assert data["enabled"] is True
-    assert data["category"] == "Custom"
-    assert data["prompts"] == ["welding mask", "face shield"]
-    assert "id" in data
-
-
-def test_create_detection_rule_increments_id():
-    client.post("/api/detection-rules", json={
-        "name": "Rule A", "model": "YOLOE", "promptType": "text",
-        "prompts": ["a"], "confidenceThreshold": 0.5, "severity": "P2",
-    })
-    resp = client.post("/api/detection-rules", json={
-        "name": "Rule B", "model": "YOLOE", "promptType": "text",
-        "prompts": ["b"], "confidenceThreshold": 0.5, "severity": "P2",
-    })
-    data = resp.json()
-    rule_num = int(data["id"].replace("r", ""))
-    assert rule_num > 12
-
-
-def test_create_detection_rule_appears_in_list():
-    client.post("/api/detection-rules", json={
-        "name": "New Custom Rule", "model": "VLM", "promptType": "text",
-        "prompts": ["test"], "confidenceThreshold": 0.6, "severity": "P3",
-    })
-    resp = client.get("/api/detection-rules")
-    names = [r["name"] for r in resp.json()]
-    assert "New Custom Rule" in names
 
 
 # ── Enhanced stats ──────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ import {
   RefreshCw,
   ExternalLink,
 } from "lucide-react"
-import { cameras, detectionRules } from "@/data/mock"
+import { cameras, alertRoutingRules } from "@/data/mock"
 import { severityConfig, severityVariantMap } from "@/lib/constants"
 import type { Severity } from "@/types"
 import { cn } from "@/lib/utils"
@@ -117,7 +117,7 @@ export function AlertRouting() {
   const [testConfig, setTestConfig] = useState<TestAlertConfig>({
     severity: "P2",
     cameraId: cameras[0].id,
-    ruleId: detectionRules[0].id,
+    ruleId: alertRoutingRules[0].id,
     channels: { inApp: true, telegram: true, whatsapp: false, sms: false, plc: false, emailDigest: false },
   })
   const [testResults, setTestResults] = useState<TestResult[] | null>(null)
@@ -923,7 +923,7 @@ export function AlertRouting() {
                   }
                   className="w-full px-3 py-1.5 text-sm border rounded-[var(--radius-md)] bg-white text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-info)] focus:border-transparent cursor-pointer"
                 >
-                  {detectionRules.map((rule) => (
+                  {alertRoutingRules.map((rule) => (
                     <option key={rule.id} value={rule.id}>
                       {rule.name}
                     </option>
