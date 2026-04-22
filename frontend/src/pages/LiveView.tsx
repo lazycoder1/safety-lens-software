@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom"
 import {
   Maximize2,
   AlertTriangle,
+  Brain,
   WifiOff,
   Grid2x2,
   Grid3x3,
