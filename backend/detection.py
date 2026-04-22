@@ -148,11 +148,7 @@ def apply_camera_overlay(
             cv2.putText(annotated, zone_name, (cx - tw // 2, cy - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
         cv2.addWeighted(overlay, 0.15, annotated, 0.85, 0, annotated)
 
-    if demo_label is not None:
-        overlay_text = f"{cam_name} | {demo_label}"
-    else:
-        cam_demo = cam.get("demo", "yolo")
-        overlay_text = f"{cam_name} | {cam_demo.upper()}"
+    overlay_text = cam_name
 
     overlay_font_scale = max(0.5, w_img / 1400)
     overlay_thickness = max(1, int(w_img / 600))

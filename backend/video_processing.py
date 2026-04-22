@@ -70,26 +70,6 @@ def _normalize_detection_batch(detections: list[dict], model_family: str) -> lis
     return normalized
 
 
-def _overlay_label_for_plan(execution_plan: dict) -> str:
-    if execution_plan.get("run_coco_primary") and execution_plan.get("run_ppe_specialist") and execution_plan.get("run_yoloe_long_tail"):
-        return "COCO + PPE + YOLOE"
-    if execution_plan.get("run_coco_primary") and execution_plan.get("run_ppe_specialist"):
-        return "COCO + PPE"
-    if execution_plan.get("run_coco_primary") and execution_plan.get("run_yoloe_long_tail"):
-        return "COCO + YOLOE"
-    if execution_plan.get("run_ppe_specialist"):
-        return "PPE Specialist"
-    if execution_plan.get("run_yoloe_long_tail"):
-        return "YOLOE"
-    return "YOLO26"
-
-
-def _count_color_for_plan(execution_plan: dict) -> tuple[int, int, int]:
-    if execution_plan.get("run_ppe_specialist") or execution_plan.get("run_yoloe_long_tail"):
-        return (37, 99, 235)
-    return (34, 197, 94)
-
-
 def create_alert(
     camera_id: str,
     rule: str,
@@ -224,6 +204,7 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
 def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: dict, *, conf: float, device: str, imgsz: int):
     annotated = frame.copy()
     detections: list[dict] = []
+    visible_detection_count = 0
 
     if execution_plan.get("run_coco_primary"):
         results = model_manager.predict(
@@ -240,6 +221,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             show_overlay=False,
         )
         detections.extend(_normalize_detection_batch(coco_detections, "coco_primary"))
+        visible_detection_count += len(coco_detections)
 
     if execution_plan.get("run_ppe_specialist") and execution_plan.get("ppe_prompt_terms"):
         ppe_prompts = execution_plan["ppe_prompt_terms"]
@@ -251,7 +233,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             imgsz=imgsz,
             classes=ppe_prompts,
         )
-        annotated, ppe_detections = draw_detections(
+        _ppe_annotated, ppe_detections = draw_detections(
             annotated,
             results,
             camera_id,
@@ -271,7 +253,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             imgsz=imgsz,
             classes=long_tail_prompts,
         )
-        annotated, long_tail_detections = draw_detections(
+        _long_tail_annotated, long_tail_detections = draw_detections(
             annotated,
             results,
             camera_id,
@@ -284,9 +266,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
     annotated = apply_camera_overlay(
         annotated,
         camera_id=camera_id,
-        detection_count=len(detections),
-        demo_label=_overlay_label_for_plan(execution_plan),
-        count_color=_count_color_for_plan(execution_plan),
+        detection_count=visible_detection_count,
     )
     return annotated, detections
 
