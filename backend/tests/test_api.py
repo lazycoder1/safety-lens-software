@@ -435,6 +435,19 @@ def test_update_camera(mock_restart):
     mock_restart.assert_called_once_with("cam1")
 
 
+def test_get_cameras_derives_display_rules_from_safety_rule_ids():
+    from routers.cameras import _camera_public_payload
+
+    cfg = config_manager.get_config()
+    cam_id = next(iter(cfg["cameras"]))
+    cfg["cameras"][cam_id]["rules"] = ["Stale Rule Label"]
+    cfg["cameras"][cam_id]["safety_rule_ids"] = ["ppe_helmet", "alert_mobile_phone"]
+    config_manager.save_config(cfg)
+
+    camera = _camera_public_payload(cam_id, cfg["cameras"][cam_id], cfg)
+    assert camera["rules"] == ["Helmet", "Mobile Phone Usage"]
+
+
 def test_preview_camera_plan():
     resp = client.post("/api/camera-plans/preview", json={
         "profile": "work_zone_ppe",

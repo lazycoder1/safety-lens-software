@@ -76,20 +76,21 @@ def infer_capabilities_from_camera(camera: dict, cfg: dict) -> list[CapabilityKe
         else:
             _append_unique(capabilities, "custom_long_tail")
 
-    for rule_name in _ensure_list(camera.get("rules")):
-        normalized = _normalize_text(rule_name)
-        if "zone intrusion" in normalized:
-            _append_unique(capabilities, "zone_intrusion")
-        if "person" in normalized:
-            _append_unique(capabilities, "person_presence")
-        if "vehicle" in normalized or "forklift" in normalized:
-            _append_unique(capabilities, "vehicle_presence")
-        if "animal" in normalized:
-            _append_unique(capabilities, "animal_presence")
-        if "phone" in normalized:
-            _append_unique(capabilities, "mobile_phone")
-        if "fire" in normalized or "smoke" in normalized:
-            _append_unique(capabilities, "fire_smoke")
+    if not rule_ids:
+        for rule_name in _ensure_list(camera.get("rules")):
+            normalized = _normalize_text(rule_name)
+            if "zone intrusion" in normalized:
+                _append_unique(capabilities, "zone_intrusion")
+            if "person" in normalized:
+                _append_unique(capabilities, "person_presence")
+            if "vehicle" in normalized or "forklift" in normalized:
+                _append_unique(capabilities, "vehicle_presence")
+            if "animal" in normalized:
+                _append_unique(capabilities, "animal_presence")
+            if "phone" in normalized:
+                _append_unique(capabilities, "mobile_phone")
+            if "fire" in normalized or "smoke" in normalized:
+                _append_unique(capabilities, "fire_smoke")
 
     return _ordered_capabilities(capabilities)
 

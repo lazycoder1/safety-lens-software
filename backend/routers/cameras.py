@@ -43,6 +43,14 @@ def _camera_runtime_status(cam_id: str, camera: dict) -> str:
 def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
     runtime_status = _camera_runtime_status(cam_id, cam)
     state.camera_runtime_status[cam_id] = runtime_status
+    from routers.safety_rules import _ensure_safety_rules
+
+    rule_map = {rule["id"]: rule for rule in _ensure_safety_rules(cfg)}
+    display_rules = [
+        rule_map[rule_id]["name"]
+        for rule_id in cam.get("safety_rule_ids", [])
+        if rule_id in rule_map
+    ] or cam.get("rules", [])
     payload = {
         "id": cam_id,
         "name": cam["name"],
@@ -52,7 +60,7 @@ def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
         "execution_plan": cam.get("execution_plan", build_execution_plan(cam, cfg)),
         "runtime_status": runtime_status,
         "demo": cam.get("demo", "yolo"),
-        "rules": cam.get("rules", []),
+        "rules": display_rules,
         "enabled": cam.get("enabled", True),
         "fps": cam.get("fps", cfg["global"]["target_fps"]),
         "video": cam.get("video", ""),
