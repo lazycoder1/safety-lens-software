@@ -180,6 +180,32 @@ def test_load_config_ignores_stale_legacy_alert_fields_when_rule_ids_exist():
     assert "animal_presence" not in camera["capabilities"]
 
 
+def test_load_config_ignores_stale_ppe_rule_ids_when_rule_ids_exist():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_stale": {
+                "name": "PPE Drift Camera",
+                "safety_rule_ids": ["alert_animal"],
+                "ppe_rule_ids": ["ppe_helmet", "ppe_hairnet"],
+                "capabilities": ["animal_presence", "helmet_required", "hairnet_required"],
+                "yoloe_classes": ["person", "hard hat", "hairnet"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_stale"]
+
+    assert camera["safety_rule_ids"] == ["alert_animal"]
+    assert camera["ppe_rule_ids"] == []
+    assert camera["capabilities"] == ["animal_presence"]
+    assert "helmet_required" not in camera["capabilities"]
+    assert "hairnet_required" not in camera["capabilities"]
+
+
 # ── get_config ───────────────────────────────────────────────────────────────
 
 def test_get_config_loads_on_first_call():

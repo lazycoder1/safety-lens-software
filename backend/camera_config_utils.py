@@ -78,8 +78,6 @@ def infer_rule_ids_from_camera(camera: dict) -> list[str]:
         rule_ids: list[str] = []
         for rule_id in explicit_rule_ids:
             _append_unique(rule_ids, rule_id)
-        for rule_id in _ensure_list(camera.get("ppe_rule_ids")):
-            _append_unique(rule_ids, rule_id)
         return rule_ids
 
     rule_ids: list[str] = []

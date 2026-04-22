@@ -508,6 +508,7 @@ def test_update_camera_replaces_stale_legacy_detection_fields():
     cam_id = _first_camera_id()
     cfg["cameras"][cam_id].update({
         "safety_rule_ids": ["alert_animal", "alert_mobile_phone", "ppe_helmet", "ppe_hairnet"],
+        "ppe_rule_ids": ["ppe_helmet", "ppe_hairnet"],
         "alert_classes": ["animal_intrusion", "mobile_phone"],
         "yoloe_classes": ["person", "hard hat", "hairnet", "cell phone"],
         "capabilities": ["animal_presence", "mobile_phone", "helmet_required", "hairnet_required"],
@@ -521,8 +522,31 @@ def test_update_camera_replaces_stale_legacy_detection_fields():
     assert resp.status_code == 200
     data = resp.json()
     assert data["safety_rule_ids"] == ["ppe_hairnet"]
+    assert data["ppe_rule_ids"] == ["ppe_hairnet"]
     assert data["alert_classes"] == []
     assert data["capabilities"] == ["hairnet_required"]
+
+
+def test_update_camera_can_remove_stale_ppe_rules():
+    cfg = config_manager.get_config()
+    cam_id = _first_camera_id()
+    cfg["cameras"][cam_id].update({
+        "safety_rule_ids": ["alert_animal", "ppe_helmet", "ppe_vest", "ppe_hairnet"],
+        "ppe_rule_ids": ["ppe_helmet", "ppe_vest", "ppe_hairnet"],
+        "capabilities": ["animal_presence", "helmet_required", "vest_required", "hairnet_required"],
+        "yoloe_classes": ["person", "hard hat", "safety vest", "hairnet"],
+    })
+    config_manager.save_config(cfg)
+
+    resp = api_put(f"/api/cameras/{cam_id}", json={
+        "capabilities": ["animal_presence"],
+        "safety_rule_ids": ["alert_animal"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["safety_rule_ids"] == ["alert_animal"]
+    assert data["ppe_rule_ids"] == []
+    assert data["capabilities"] == ["animal_presence"]
 
 
 def test_preview_camera_plan():
