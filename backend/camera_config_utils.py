@@ -73,10 +73,16 @@ def _append_unique(items: list[str], value: str):
 
 
 def infer_rule_ids_from_camera(camera: dict) -> list[str]:
-    rule_ids: list[str] = []
+    explicit_rule_ids = _ensure_list(camera.get("safety_rule_ids"))
+    if explicit_rule_ids:
+        rule_ids: list[str] = []
+        for rule_id in explicit_rule_ids:
+            _append_unique(rule_ids, rule_id)
+        for rule_id in _ensure_list(camera.get("ppe_rule_ids")):
+            _append_unique(rule_ids, rule_id)
+        return rule_ids
 
-    for rule_id in _ensure_list(camera.get("safety_rule_ids")):
-        _append_unique(rule_ids, rule_id)
+    rule_ids: list[str] = []
 
     for rule_id in _ensure_list(camera.get("ppe_rule_ids")):
         _append_unique(rule_ids, rule_id)
@@ -103,14 +109,16 @@ def infer_rule_ids_from_camera(camera: dict) -> list[str]:
 def sync_camera_rule_fields(camera: dict) -> bool:
     changed = False
     rule_ids = infer_rule_ids_from_camera(camera)
+    has_explicit_rule_ids = bool(_ensure_list(camera.get("safety_rule_ids")))
 
     if camera.get("safety_rule_ids") != rule_ids:
         camera["safety_rule_ids"] = rule_ids
         changed = True
 
     derived_alert_classes = [RULE_ID_TO_LEGACY_ALERT[rule_id] for rule_id in rule_ids if rule_id in RULE_ID_TO_LEGACY_ALERT]
+    alert_classes_source = derived_alert_classes if has_explicit_rule_ids else [*_ensure_list(camera.get("alert_classes")), *derived_alert_classes]
     alert_classes = []
-    for value in [*_ensure_list(camera.get("alert_classes")), *derived_alert_classes]:
+    for value in alert_classes_source:
         if value in LEGACY_ALERT_MAP or value in RULE_ID_TO_LEGACY_ALERT.values():
             _append_unique(alert_classes, value)
     if camera.get("alert_classes") != alert_classes:

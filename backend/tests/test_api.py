@@ -503,6 +503,28 @@ def test_get_cameras_derives_display_rules_from_safety_rule_ids():
     assert camera["rules"] == ["Helmet", "Mobile Phone Usage"]
 
 
+def test_update_camera_replaces_stale_legacy_detection_fields():
+    cfg = config_manager.get_config()
+    cam_id = _first_camera_id()
+    cfg["cameras"][cam_id].update({
+        "safety_rule_ids": ["alert_animal", "alert_mobile_phone", "ppe_helmet", "ppe_hairnet"],
+        "alert_classes": ["animal_intrusion", "mobile_phone"],
+        "yoloe_classes": ["person", "hard hat", "hairnet", "cell phone"],
+        "capabilities": ["animal_presence", "mobile_phone", "helmet_required", "hairnet_required"],
+    })
+    config_manager.save_config(cfg)
+
+    resp = api_put(f"/api/cameras/{cam_id}", json={
+        "capabilities": ["hairnet_required"],
+        "safety_rule_ids": ["ppe_hairnet"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["safety_rule_ids"] == ["ppe_hairnet"]
+    assert data["alert_classes"] == []
+    assert data["capabilities"] == ["hairnet_required"]
+
+
 def test_preview_camera_plan():
     resp = api_post("/api/camera-plans/preview", json={
         "profile": "work_zone_ppe",

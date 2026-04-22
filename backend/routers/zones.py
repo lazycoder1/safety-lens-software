@@ -57,6 +57,10 @@ async def api_add_zone(cam_id: str, body: ZoneCreate):
     if "zone_intrusion" not in alert_classes:
         alert_classes.append("zone_intrusion")
         cfg["cameras"][cam_id]["alert_classes"] = alert_classes
+    safety_rule_ids = cfg["cameras"][cam_id].get("safety_rule_ids", [])
+    if "alert_zone_intrusion" not in safety_rule_ids:
+        safety_rule_ids.append("alert_zone_intrusion")
+        cfg["cameras"][cam_id]["safety_rule_ids"] = safety_rule_ids
     sync_camera_rule_fields(cfg["cameras"][cam_id])
 
     save_config(cfg)
