@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge"
+import { Check } from "lucide-react"
 import type { SafetyRule } from "@/types"
 import {
   getDetectionCatalog,
@@ -81,24 +82,32 @@ export function DetectionChecklist({
               {groupOptions.map((option) => {
                 const checked = selected.has(option.key)
                 return (
-                  <label
+                  <button
+                    type="button"
                     key={option.key}
+                    onClick={() => toggleKey(option.key)}
+                    disabled={!option.available}
+                    aria-pressed={checked}
+                    aria-label={`${checked ? "Disable" : "Enable"} ${option.label}`}
                     className={`rounded-[var(--radius-lg)] border p-3 transition-colors ${
                       option.available
                         ? checked
                           ? "border-[var(--color-info)] bg-[var(--color-info-bg)] cursor-pointer"
                           : "border-[var(--color-border-default)] hover:border-[var(--color-border-active)] cursor-pointer"
                         : "border-[var(--color-border-default)] bg-[var(--color-bg-secondary)] opacity-60 cursor-not-allowed"
-                    }`}
+                    } text-left`}
                   >
                     <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={!option.available}
-                        onChange={() => toggleKey(option.key)}
-                        className="mt-0.5 accent-[var(--color-info)]"
-                      />
+                      <span
+                        aria-hidden="true"
+                        className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${
+                          checked
+                            ? "border-[var(--color-info)] bg-[var(--color-info)] text-white"
+                            : "border-[var(--color-border-default)] bg-white text-transparent"
+                        }`}
+                      >
+                        <Check className="h-3 w-3" />
+                      </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <p className="text-sm font-semibold text-[var(--color-text-primary)]">
@@ -113,7 +122,7 @@ export function DetectionChecklist({
                         </p>
                       </div>
                     </div>
-                  </label>
+                  </button>
                 )
               })}
             </div>
