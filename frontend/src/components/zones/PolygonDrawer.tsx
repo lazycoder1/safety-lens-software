@@ -28,6 +28,13 @@ export interface PolygonDrawerProps {
   onDraftStateChange?: (hasDraft: boolean) => void
 }
 
+function getDefaultZoneName(zoneType: string, zoneCount: number): string {
+  const zoneTypeLabel =
+    ZONE_TYPES.find((item) => item.key === zoneType)?.label.replace(" Area", "") ||
+    "Zone"
+  return `${zoneTypeLabel} ${zoneCount}`
+}
+
 /* ── geometry helpers ── */
 
 function isPointInPolygon(px: number, py: number, polygon: number[][]): boolean {
@@ -422,6 +429,15 @@ export function PolygonDrawer({
     setSelectedZoneId(null)
   }
 
+  function startNewZone() {
+    setCurrentPoints([])
+    setNewZoneType("restricted")
+    setNewZoneName(getDefaultZoneName("restricted", existingZones.length + 1))
+    setDrawingMode(true)
+    setEditingZoneId(null)
+    setSelectedZoneId(null)
+  }
+
   async function handleInlineDelete(zoneId: string) {
     if (!onDelete) return
     try {
@@ -527,6 +543,9 @@ export function PolygonDrawer({
           <div className="space-y-3">
             {!editingZoneId && (
               <>
+                <p className="text-sm text-[var(--color-text-secondary)]">
+                  Zones are saved separately from the camera. Click <strong>Save Zone</strong> here before saving the camera.
+                </p>
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium text-[var(--color-text-primary)]">Zone Name</label>
                   <input
@@ -597,7 +616,7 @@ export function PolygonDrawer({
           </div>
         </Card>
       ) : (
-        <Button onClick={() => setDrawingMode(true)}>
+        <Button onClick={startNewZone}>
           <Plus className="w-4 h-4" />
           Draw Zone
         </Button>

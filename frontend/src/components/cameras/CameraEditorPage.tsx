@@ -272,7 +272,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     }
     if (requiresZone && hasUnsavedZoneDraft) {
       zoneSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
-      toast.error("Save or cancel the zone draft before saving the camera")
+      toast.error("Zone draft not saved yet. In the Zones section, click Save Zone or Cancel.")
       return
     }
 
