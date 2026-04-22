@@ -48,9 +48,8 @@ def test_load_config_returns_default_values():
     assert cfg["global"]["target_fps"] == 6
     assert cfg["global"]["yolo_conf"] == 0.35
     assert cfg["vlm"]["model"] == "qwen3-vl:8b"
-    assert "cam1" in cfg["cameras"]
-    assert "cam2" in cfg["cameras"]
-    assert "cam3" in cfg["cameras"]
+    assert set(cfg["cameras"]) == {"cam2"}
+    assert cfg["cameras"]["cam2"]["name"] == "Warehouse Aisle"
 
 
 def test_load_config_reads_existing_file():
@@ -58,7 +57,7 @@ def test_load_config_reads_existing_file():
     _test_config.write_text(json.dumps(custom))
     cfg = config_manager.load_config()
     assert cfg["global"]["target_fps"] == 10
-    assert "cam1" in cfg["cameras"]
+    assert "cam2" in cfg["cameras"]
 
 
 def test_load_config_normalizes_legacy_camera_rule_fields():
@@ -214,9 +213,10 @@ def test_update_config_nested_key():
 
 def test_update_config_camera_property():
     config_manager.load_config()
-    config_manager.update_config("cameras.cam1.fps", 12)
+    cam_id = next(iter(config_manager.get_config()["cameras"]))
+    config_manager.update_config(f"cameras.{cam_id}.fps", 12)
     cfg = config_manager.get_config()
-    assert cfg["cameras"]["cam1"]["fps"] == 12
+    assert cfg["cameras"][cam_id]["fps"] == 12
 
 
 def test_update_config_returns_full_config():
@@ -231,14 +231,10 @@ def test_update_config_returns_full_config():
 
 def test_default_config_camera_structure():
     cfg = config_manager.DEFAULT_CONFIG
-    cam1 = cfg["cameras"]["cam1"]
-    assert cam1["name"] == "Welding Bay"
-    assert cam1["demo"] == "yolo"
-    assert "Hard Hat Detection" in cam1["rules"]
-
-    cam3 = cfg["cameras"]["cam3"]
-    assert cam3["demo"] == "yoloe"
-    assert "person" in cam3["yoloe_classes"]
+    cam2 = cfg["cameras"]["cam2"]
+    assert cam2["name"] == "Warehouse Aisle"
+    assert cam2["demo"] == "yolo+vlm"
+    assert "Gangway Blockage (VLM)" in cam2["rules"]
 
 
 def test_default_config_vlm_keywords():

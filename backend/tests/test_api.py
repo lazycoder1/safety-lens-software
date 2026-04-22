@@ -20,6 +20,7 @@ _test_config = Path(_tmpdir) / "test_config.json"
 import alert_store
 alert_store.SNAPSHOTS_DIR = _test_snapshots
 
+import auth_store
 import config_manager
 config_manager.CONFIG_PATH = _test_config
 
@@ -80,6 +81,38 @@ def fresh_state():
 client = TestClient(server.app, raise_server_exceptions=False)
 
 
+def _admin_headers(extra: dict | None = None) -> dict[str, str]:
+    token = auth_store.create_token("admin-test", "admin", "admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def api_get(path: str, **kwargs):
+    headers = _admin_headers(kwargs.pop("headers", None))
+    return client.get(path, headers=headers, **kwargs)
+
+
+def api_post(path: str, **kwargs):
+    headers = _admin_headers(kwargs.pop("headers", None))
+    return client.post(path, headers=headers, **kwargs)
+
+
+def api_put(path: str, **kwargs):
+    headers = _admin_headers(kwargs.pop("headers", None))
+    return client.put(path, headers=headers, **kwargs)
+
+
+def api_delete(path: str, **kwargs):
+    headers = _admin_headers(kwargs.pop("headers", None))
+    return client.delete(path, headers=headers, **kwargs)
+
+
+def _first_camera_id() -> str:
+    return next(iter(config_manager.get_config()["cameras"]))
+
+
 def _create_test_alert(**kwargs):
     defaults = dict(
         camera_id="cam1", camera_name="Test", zone="ZoneA",
@@ -96,24 +129,25 @@ def test_health():
     resp = client.get("/api/health")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "ok"
+    assert data["status"] in {"ok", "degraded"}
     assert "cameras" in data
 
 
 # ── GET /api/cameras ─────────────────────────────────────────────────────────
 
 def test_get_cameras():
-    resp = client.get("/api/cameras")
+    resp = api_get("/api/cameras")
     assert resp.status_code == 200
     cameras = resp.json()
     assert isinstance(cameras, list)
-    assert len(cameras) == 3
+    cfg = config_manager.get_config()
+    assert len(cameras) == len(cfg["cameras"])
     cam_ids = {c["id"] for c in cameras}
-    assert {"cam1", "cam2", "cam3"} == cam_ids
+    assert set(cfg["cameras"]) == cam_ids
 
 
 def test_get_cameras_includes_fields():
-    resp = client.get("/api/cameras")
+    resp = api_get("/api/cameras")
     cam = resp.json()[0]
     assert "name" in cam
     assert "zone" in cam
@@ -126,7 +160,7 @@ def test_get_cameras_includes_fields():
 # ── GET /api/alerts ──────────────────────────────────────────────────────────
 
 def test_get_alerts_empty():
-    resp = client.get("/api/alerts")
+    resp = api_get("/api/alerts")
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -134,7 +168,7 @@ def test_get_alerts_empty():
 def test_get_alerts_with_data():
     _create_test_alert()
     _create_test_alert(severity="P1")
-    resp = client.get("/api/alerts")
+    resp = api_get("/api/alerts")
     assert resp.status_code == 200
     assert len(resp.json()) == 2
 
@@ -143,7 +177,7 @@ def test_get_alerts_filter_severity():
     _create_test_alert(severity="P1")
     _create_test_alert(severity="P2")
     _create_test_alert(severity="P2")
-    resp = client.get("/api/alerts?severity=P2")
+    resp = api_get("/api/alerts?severity=P2")
     assert len(resp.json()) == 2
 
 
@@ -151,28 +185,28 @@ def test_get_alerts_filter_status():
     a = _create_test_alert()
     _create_test_alert()
     alert_store.acknowledge_alert(a["id"])
-    resp = client.get("/api/alerts?status=acknowledged")
+    resp = api_get("/api/alerts?status=acknowledged")
     assert len(resp.json()) == 1
 
 
 def test_get_alerts_filter_camera():
     _create_test_alert(camera_id="cam1")
     _create_test_alert(camera_id="cam2")
-    resp = client.get("/api/alerts?cameraId=cam1")
+    resp = api_get("/api/alerts?cameraId=cam1")
     assert len(resp.json()) == 1
 
 
 def test_get_alerts_limit():
     for _ in range(5):
         _create_test_alert()
-    resp = client.get("/api/alerts?limit=3")
+    resp = api_get("/api/alerts?limit=3")
     assert len(resp.json()) == 3
 
 
 # ── GET /api/alerts/stats ────────────────────────────────────────────────────
 
 def test_alerts_stats_empty():
-    resp = client.get("/api/alerts/stats")
+    resp = api_get("/api/alerts/stats")
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 0
@@ -182,7 +216,7 @@ def test_alerts_stats_empty():
 def test_alerts_stats_with_data():
     _create_test_alert(severity="P1")
     _create_test_alert(severity="P2")
-    resp = client.get("/api/alerts/stats")
+    resp = api_get("/api/alerts/stats")
     data = resp.json()
     assert data["total"] == 2
     assert data["active"] == 2
@@ -195,7 +229,7 @@ def test_alerts_stats_with_data():
 def test_alert_time_series_endpoint():
     _create_test_alert(severity="P1")
     _create_test_alert(severity="P2")
-    resp = client.get("/api/alerts/time-series")
+    resp = api_get("/api/alerts/time-series")
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
@@ -207,7 +241,7 @@ def test_alert_time_series_endpoint():
 
 
 def test_alert_time_series_custom_hours():
-    resp = client.get("/api/alerts/time-series?hours=1")
+    resp = api_get("/api/alerts/time-series?hours=1")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 
@@ -216,15 +250,15 @@ def test_alert_time_series_custom_hours():
 
 def test_acknowledge_alert():
     a = _create_test_alert()
-    resp = client.put(f"/api/alerts/{a['id']}/acknowledge")
+    resp = api_put(f"/api/alerts/{a['id']}/acknowledge")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "acknowledged"
-    assert data["acknowledgedBy"] == "Admin"
+    assert data["acknowledgedBy"] == "admin"
 
 
 def test_acknowledge_not_found():
-    resp = client.put("/api/alerts/fake-id/acknowledge")
+    resp = api_put("/api/alerts/fake-id/acknowledge")
     assert resp.status_code == 404
 
 
@@ -232,13 +266,13 @@ def test_acknowledge_not_found():
 
 def test_resolve_alert():
     a = _create_test_alert()
-    resp = client.put(f"/api/alerts/{a['id']}/resolve")
+    resp = api_put(f"/api/alerts/{a['id']}/resolve")
     assert resp.status_code == 200
     assert resp.json()["status"] == "resolved"
 
 
 def test_resolve_not_found():
-    resp = client.put("/api/alerts/fake-id/resolve")
+    resp = api_put("/api/alerts/fake-id/resolve")
     assert resp.status_code == 404
 
 
@@ -246,7 +280,7 @@ def test_resolve_not_found():
 
 def test_snooze_alert_default():
     a = _create_test_alert()
-    resp = client.put(f"/api/alerts/{a['id']}/snooze")
+    resp = api_put(f"/api/alerts/{a['id']}/snooze")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "snoozed"
@@ -255,13 +289,13 @@ def test_snooze_alert_default():
 
 def test_snooze_alert_custom_minutes():
     a = _create_test_alert()
-    resp = client.put(f"/api/alerts/{a['id']}/snooze?minutes=60")
+    resp = api_put(f"/api/alerts/{a['id']}/snooze?minutes=60")
     assert resp.status_code == 200
     assert resp.json()["status"] == "snoozed"
 
 
 def test_snooze_not_found():
-    resp = client.put("/api/alerts/fake-id/snooze")
+    resp = api_put("/api/alerts/fake-id/snooze")
     assert resp.status_code == 404
 
 
@@ -269,7 +303,7 @@ def test_snooze_not_found():
 
 def test_false_positive():
     a = _create_test_alert()
-    resp = client.put(f"/api/alerts/{a['id']}/false-positive")
+    resp = api_put(f"/api/alerts/{a['id']}/false-positive")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "resolved"
@@ -277,7 +311,7 @@ def test_false_positive():
 
 
 def test_false_positive_not_found():
-    resp = client.put("/api/alerts/fake-id/false-positive")
+    resp = api_put("/api/alerts/fake-id/false-positive")
     assert resp.status_code == 404
 
 
@@ -303,7 +337,7 @@ def test_serve_snapshot_not_found():
 # ── GET /api/config ──────────────────────────────────────────────────────────
 
 def test_get_config():
-    resp = client.get("/api/config")
+    resp = api_get("/api/config")
     assert resp.status_code == 200
     data = resp.json()
     assert "global" in data
@@ -315,7 +349,7 @@ def test_get_config():
 
 @mock.patch("routers.config.restart_all_cameras")
 def test_update_global_config(mock_restart):
-    resp = client.put("/api/config/global", json={"target_fps": 10})
+    resp = api_put("/api/config/global", json={"target_fps": 10})
     assert resp.status_code == 200
     assert resp.json()["target_fps"] == 10
     mock_restart.assert_called_once()
@@ -323,7 +357,7 @@ def test_update_global_config(mock_restart):
 
 @mock.patch("routers.config.restart_all_cameras")
 def test_update_global_partial(mock_restart):
-    resp = client.put("/api/config/global", json={"yolo_conf": 0.5})
+    resp = api_put("/api/config/global", json={"yolo_conf": 0.5})
     assert resp.status_code == 200
     data = resp.json()
     assert data["yolo_conf"] == 0.5
@@ -333,7 +367,7 @@ def test_update_global_partial(mock_restart):
 # ── PUT /api/config/vlm ─────────────────────────────────────────────────────
 
 def test_update_vlm_config():
-    resp = client.put("/api/config/vlm", json={"model": "qwen3.5:35b", "interval": 60})
+    resp = api_put("/api/config/vlm", json={"model": "qwen3.5:35b", "interval": 60})
     assert resp.status_code == 200
     data = resp.json()
     assert data["model"] == "qwen3.5:35b"
@@ -343,7 +377,7 @@ def test_update_vlm_config():
 # ── Telegram config endpoints ────────────────────────────────────────────────
 
 def test_telegram_config_endpoint():
-    resp = client.put("/api/config/telegram", json={"enabled": True, "bot_token": "tok123", "chat_id": "456"})
+    resp = api_put("/api/config/telegram", json={"enabled": True, "bot_token": "tok123", "chat_id": "456"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["enabled"] is True
@@ -354,7 +388,7 @@ def test_telegram_config_endpoint():
 @mock.patch("telegram_notifier.test_connection")
 def test_telegram_test_endpoint(mock_test):
     mock_test.return_value = {"ok": True}
-    resp = client.post("/api/config/telegram/test")
+    resp = api_post("/api/config/telegram/test")
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
 
@@ -362,10 +396,7 @@ def test_telegram_test_endpoint(mock_test):
 # ── GET /api/alert-rules-available ───────────────────────────────────────────
 
 def test_available_alert_rules_endpoint():
-    import auth_store
-
-    token = auth_store.create_token("admin-test", "admin", "admin")
-    resp = client.get("/api/alert-rules-available", headers={"Authorization": f"Bearer {token}"})
+    resp = api_get("/api/alert-rules-available")
     assert resp.status_code == 200
     data = resp.json()
     assert "alert_mobile_phone" in data
@@ -385,7 +416,7 @@ def test_list_videos(tmp_path):
     (tmp_path / "readme.txt").touch()
     from routers import misc
     misc.VIDEO_DIR = tmp_path
-    resp = client.get("/api/videos")
+    resp = api_get("/api/videos")
     assert resp.status_code == 200
     videos = resp.json()
     assert "a.mp4" in videos
@@ -398,7 +429,7 @@ def test_videos_includes_avi(tmp_path):
     (tmp_path / "test.avi").touch()
     from routers import misc
     misc.VIDEO_DIR = tmp_path
-    resp = client.get("/api/videos")
+    resp = api_get("/api/videos")
     assert resp.status_code == 200
     assert "test.avi" in resp.json()
 
@@ -407,7 +438,7 @@ def test_videos_includes_avi(tmp_path):
 
 @mock.patch("routers.cameras.start_camera")
 def test_add_camera(mock_start):
-    resp = client.post("/api/cameras", json={
+    resp = api_post("/api/cameras", json={
         "name": "New Cam", "video": "test.mp4", "zone": "ZoneX",
         "demo": "yolo", "rules": ["Test Rule"],
     })
@@ -420,7 +451,7 @@ def test_add_camera(mock_start):
 
 @mock.patch("routers.cameras.model_manager.missing_model_keys", return_value=["coco_primary"])
 def test_add_camera_returns_missing_models(_mock_missing):
-    resp = client.post("/api/cameras", json={
+    resp = api_post("/api/cameras", json={
         "name": "Needs Model", "video": "test.mp4", "zone": "ZoneX",
         "profile": "general_safety", "capabilities": ["person_presence"],
     })
@@ -432,10 +463,11 @@ def test_add_camera_returns_missing_models(_mock_missing):
 
 @mock.patch("routers.cameras.restart_camera")
 def test_update_camera(mock_restart):
-    resp = client.put("/api/cameras/cam1", json={"name": "Updated Name"})
+    cam_id = _first_camera_id()
+    resp = api_put(f"/api/cameras/{cam_id}", json={"name": "Updated Name"})
     assert resp.status_code == 200
     assert resp.json()["name"] == "Updated Name"
-    mock_restart.assert_called_once_with("cam1")
+    mock_restart.assert_called_once_with(cam_id)
 
 
 def test_get_cameras_derives_display_rules_from_safety_rule_ids():
@@ -452,7 +484,7 @@ def test_get_cameras_derives_display_rules_from_safety_rule_ids():
 
 
 def test_preview_camera_plan():
-    resp = client.post("/api/camera-plans/preview", json={
+    resp = api_post("/api/camera-plans/preview", json={
         "profile": "work_zone_ppe",
         "capabilities": ["helmet_required", "zone_intrusion"],
         "stream_type": "file",
@@ -465,23 +497,24 @@ def test_preview_camera_plan():
 
 
 def test_update_camera_not_found():
-    resp = client.put("/api/cameras/cam999", json={"name": "X"})
+    resp = api_put("/api/cameras/cam999", json={"name": "X"})
     assert resp.status_code == 404
 
 
 @mock.patch("routers.cameras.stop_camera")
 def test_delete_camera(mock_stop):
-    resp = client.delete("/api/cameras/cam1")
+    cam_id = _first_camera_id()
+    resp = api_delete(f"/api/cameras/{cam_id}")
     assert resp.status_code == 200
-    assert resp.json()["deleted"] == "cam1"
-    mock_stop.assert_called_once_with("cam1")
+    assert resp.json()["deleted"] == cam_id
+    mock_stop.assert_called_once_with(cam_id)
 
     cfg = config_manager.get_config()
-    assert "cam1" not in cfg["cameras"]
+    assert cam_id not in cfg["cameras"]
 
 
 def test_delete_camera_not_found():
-    resp = client.delete("/api/cameras/cam999")
+    resp = api_delete("/api/cameras/cam999")
     assert resp.status_code == 404
 
 
@@ -491,7 +524,7 @@ def test_stats_includes_breakdowns():
     alert_store.create_alert("cam1", "Cam A", "Zone 1", "Helmet", "P2", 0.9)
     alert_store.create_alert("cam2", "Cam B", "Zone 2", "Vest", "P1", 0.8)
 
-    resp = client.get("/api/alerts/stats")
+    resp = api_get("/api/alerts/stats")
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 2

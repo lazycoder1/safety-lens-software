@@ -41,6 +41,10 @@ def admin_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def first_camera_id() -> str:
+    return next(iter(config_manager.get_config()["cameras"]))
+
+
 @pytest.fixture(autouse=True)
 def fresh_state():
     alert_store.SNAPSHOTS_DIR = _test_snapshots
@@ -72,7 +76,8 @@ def fresh_state():
 
 def test_cameras_endpoint_redacts_structured_credentials():
     cfg = config_manager.get_config()
-    cfg["cameras"]["cam1"].update({
+    cam_id = first_camera_id()
+    cfg["cameras"][cam_id].update({
         "stream_type": "rtsp",
         "host": "192.168.1.50",
         "rtsp_port": 554,
@@ -85,7 +90,7 @@ def test_cameras_endpoint_redacts_structured_credentials():
 
     resp = client.get("/api/cameras", headers=admin_headers())
     assert resp.status_code == 200
-    camera = next(item for item in resp.json() if item["id"] == "cam1")
+    camera = next(item for item in resp.json() if item["id"] == cam_id)
     assert "username" not in camera
     assert "password" not in camera
     assert camera["credentials_configured"] is True
@@ -143,7 +148,8 @@ def test_config_endpoint_redacts_camera_credentials():
 @mock.patch("routers.cameras.discover_cameras")
 def test_discover_endpoint_marks_duplicates(mock_discover):
     cfg = config_manager.get_config()
-    cfg["cameras"]["cam3"].update({
+    cam_id = first_camera_id()
+    cfg["cameras"][cam_id].update({
         "stream_type": "rtsp",
         "host": "192.168.29.250",
         "rtsp_port": 554,
@@ -174,13 +180,14 @@ def test_discover_endpoint_marks_duplicates(mock_discover):
     assert resp.status_code == 200
     device = resp.json()["devices"][0]
     assert device["duplicate_state"] == "exact"
-    assert device["existing_camera_id"] == "cam3"
+    assert device["existing_camera_id"] == cam_id
 
 
 @mock.patch("routers.cameras.test_camera_connection")
 def test_test_endpoint_annotates_duplicate_state(mock_test):
     cfg = config_manager.get_config()
-    cfg["cameras"]["cam1"].update({
+    cam_id = first_camera_id()
+    cfg["cameras"][cam_id].update({
         "stream_type": "rtsp",
         "host": "192.168.29.250",
         "rtsp_port": 554,
@@ -206,7 +213,7 @@ def test_test_endpoint_annotates_duplicate_state(mock_test):
     assert resp.status_code == 200
     data = resp.json()
     assert data["duplicate_state"] == "exact"
-    assert data["existing_camera_id"] == "cam1"
+    assert data["existing_camera_id"] == cam_id
 
 
 @mock.patch("routers.cameras.start_camera")

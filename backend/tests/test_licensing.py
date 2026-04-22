@@ -262,15 +262,15 @@ class TestComputeStatus:
         assert status.state == licensing.LicenseState.SUSPENDED
         assert status.days_until_suspension == 0
 
-    def test_no_heartbeat_with_fresh_license_is_grace(self):
+    def test_no_heartbeat_with_fresh_license_is_valid(self):
         now = datetime.now(timezone.utc)
-        # Heartbeat is None — treated as just-expired, so we're in grace
+        # Brand-new installs should not be penalized before the first heartbeat.
         status = licensing.compute_status(
             _license(now + timedelta(days=300)),
             None,
             now=now,
         )
-        assert status.state == licensing.LicenseState.GRACE
+        assert status.state == licensing.LicenseState.VALID
 
     def test_expired_heartbeat_within_grace_is_grace(self):
         now = datetime.now(timezone.utc)

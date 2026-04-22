@@ -354,8 +354,8 @@ def test_get_stats_resolved_tracking():
     assert stats["total"] == 2
     assert stats["active"] == 1
     assert stats["resolved"] == 1
-    assert stats["bySeverity"]["P1"] == 1
     assert stats["bySeverity"]["P2"] == 1
+    assert "P1" not in stats["bySeverity"]
 
 
 # ── get_time_series ──────────────────────────────────────────────────────────

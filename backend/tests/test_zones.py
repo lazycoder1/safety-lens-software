@@ -19,6 +19,7 @@ _test_config = Path(_tmpdir) / "test_config.json"
 import alert_store
 alert_store.SNAPSHOTS_DIR = _test_snapshots
 
+import auth_store
 import config_manager
 config_manager.CONFIG_PATH = _test_config
 
@@ -33,6 +34,15 @@ state.yoloe_model = None
 from fastapi.testclient import TestClient
 
 client = TestClient(server.app)
+
+
+def admin_headers() -> dict[str, str]:
+    token = auth_store.create_token("admin-test", "admin", "admin")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def first_camera_id() -> str:
+    return next(iter(config_manager.get_config()["cameras"]))
 
 
 @pytest.fixture(autouse=True)
@@ -57,22 +67,20 @@ def fresh_state():
 # ── Zone CRUD API Tests ──────────────────────────────────────────────────────
 
 def test_get_zones_empty():
-    cfg = config_manager.get_config()
-    cam_id = list(cfg["cameras"].keys())[0]
-    resp = client.get(f"/api/cameras/{cam_id}/zones")
+    cam_id = first_camera_id()
+    resp = client.get(f"/api/cameras/{cam_id}/zones", headers=admin_headers())
     assert resp.status_code == 200
     assert resp.json() == []
 
 
 def test_add_zone():
-    cfg = config_manager.get_config()
-    cam_id = list(cfg["cameras"].keys())[0]
+    cam_id = first_camera_id()
     resp = client.post(f"/api/cameras/{cam_id}/zones", json={
         "name": "Test Restricted Zone",
         "type": "restricted",
         "color": "#dc2626",
         "points": [[0.1, 0.1], [0.5, 0.1], [0.5, 0.5], [0.1, 0.5]],
-    })
+    }, headers=admin_headers())
     assert resp.status_code == 200
     zone = resp.json()
     assert zone["name"] == "Test Restricted Zone"
@@ -82,14 +90,13 @@ def test_add_zone():
 
 
 def test_add_zone_auto_enables_zone_intrusion():
-    cfg = config_manager.get_config()
-    cam_id = list(cfg["cameras"].keys())[0]
+    cam_id = first_camera_id()
     client.post(f"/api/cameras/{cam_id}/zones", json={
         "name": "Auto Zone",
         "type": "restricted",
         "color": "#dc2626",
         "points": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
-    })
+    }, headers=admin_headers())
     # Reload config and check alert_classes
     cfg = config_manager.load_config()
     cam = cfg["cameras"][cam_id]
@@ -98,15 +105,14 @@ def test_add_zone_auto_enables_zone_intrusion():
 
 
 def test_get_zones_after_add():
-    cfg = config_manager.get_config()
-    cam_id = list(cfg["cameras"].keys())[0]
+    cam_id = first_camera_id()
     client.post(f"/api/cameras/{cam_id}/zones", json={
         "name": "Zone A",
         "type": "restricted",
         "color": "#dc2626",
         "points": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]],
-    })
-    resp = client.get(f"/api/cameras/{cam_id}/zones")
+    }, headers=admin_headers())
+    resp = client.get(f"/api/cameras/{cam_id}/zones", headers=admin_headers())
     assert resp.status_code == 200
     zones = resp.json()
     assert len(zones) == 1
@@ -114,38 +120,36 @@ def test_get_zones_after_add():
 
 
 def test_delete_zone():
-    cfg = config_manager.get_config()
-    cam_id = list(cfg["cameras"].keys())[0]
+    cam_id = first_camera_id()
     resp = client.post(f"/api/cameras/{cam_id}/zones", json={
         "name": "To Delete",
         "type": "caution",
         "color": "#f59e0b",
         "points": [[0.0, 0.0], [0.5, 0.0], [0.5, 0.5]],
-    })
+    }, headers=admin_headers())
     zone_id = resp.json()["id"]
-    resp = client.delete(f"/api/cameras/{cam_id}/zones/{zone_id}")
+    resp = client.delete(f"/api/cameras/{cam_id}/zones/{zone_id}", headers=admin_headers())
     assert resp.status_code == 200
     # Verify deleted
-    resp = client.get(f"/api/cameras/{cam_id}/zones")
+    resp = client.get(f"/api/cameras/{cam_id}/zones", headers=admin_headers())
     assert len(resp.json()) == 0
 
 
 def test_zone_not_found_camera():
-    resp = client.get("/api/cameras/nonexistent/zones")
+    resp = client.get("/api/cameras/nonexistent/zones", headers=admin_headers())
     assert resp.status_code == 404
 
 
 def test_add_multiple_zones():
-    cfg = config_manager.get_config()
-    cam_id = list(cfg["cameras"].keys())[0]
+    cam_id = first_camera_id()
     for i in range(3):
         client.post(f"/api/cameras/{cam_id}/zones", json={
             "name": f"Zone {i}",
             "type": "restricted",
             "color": "#dc2626",
             "points": [[0.1 * i, 0.1], [0.1 * i + 0.1, 0.1], [0.1 * i + 0.1, 0.2]],
-        })
-    resp = client.get(f"/api/cameras/{cam_id}/zones")
+        }, headers=admin_headers())
+    resp = client.get(f"/api/cameras/{cam_id}/zones", headers=admin_headers())
     assert len(resp.json()) == 3
 
 

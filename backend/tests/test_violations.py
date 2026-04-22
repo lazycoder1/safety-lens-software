@@ -12,9 +12,12 @@ from detection import (
 from routers.safety_rules import DEFAULT_SAFETY_RULES
 
 
-def _det(cls, conf=0.8):
+def _det(cls, conf=0.8, bbox=None):
     """Shorthand to build a detection dict."""
-    return {"class": cls, "confidence": conf}
+    detection = {"class": cls, "confidence": conf}
+    if bbox is not None:
+        detection["bbox"] = bbox
+    return detection
 
 
 def _cfg_with_alert_classes(cam_id, alert_classes):
@@ -141,7 +144,7 @@ def test_check_yoloe_violations_missing_ppe(mock_cfg):
         "safety_rules": list(DEFAULT_SAFETY_RULES),
     }
     # person detected but no hairnet, no gloves
-    dets = [_det("person", 0.9)]
+    dets = [_det("person", 0.9, [0, 0, 100, 200])]
     violations = check_yoloe_violations(dets, "cam3")
     assert len(violations) == 2
     rules = {v["rule"] for v in violations}
@@ -167,7 +170,11 @@ def test_check_yoloe_violations_all_ppe_present(mock_cfg):
         "cameras": {"cam3": {"yoloe_classes": ["person", "hairnet", "gloves"]}},
         "safety_rules": list(DEFAULT_SAFETY_RULES),
     }
-    dets = [_det("person", 0.9), _det("hairnet", 0.85), _det("gloves", 0.8)]
+    dets = [
+        _det("person", 0.9, [0, 0, 100, 200]),
+        _det("hairnet", 0.85, [20, 10, 40, 40]),
+        _det("gloves", 0.8, [30, 120, 70, 180]),
+    ]
     violations = check_yoloe_violations(dets, "cam3")
     assert violations == []
 
