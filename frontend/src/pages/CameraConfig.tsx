@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Plus, SearchCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getCameras, deleteCamera, getSafetyRules, getZones } from "@/lib/api"
+import { getCameras, deleteCamera, getSafetyRules } from "@/lib/api"
 import { useAuthStore } from "@/stores/authStore"
 import type { Camera, SafetyRule } from "@/types"
 import { CameraCard } from "@/components/cameras/CameraCard"
@@ -20,26 +20,11 @@ export function CameraConfig() {
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
-  const [zoneCounts, setZoneCounts] = useState<Record<string, number>>({})
-
   const fetchData = useCallback(async () => {
     try {
       const [cameraData, ruleData]: [Camera[], SafetyRule[]] = await Promise.all([getCameras(), getSafetyRules()])
       setCameras(cameraData)
       setSafetyRules(ruleData)
-
-      const zoneCameraIds = cameraData
-        .filter((camera: Camera) => usesZoneIntrusion(getConfiguredDetectionKeys(camera, ruleData)))
-        .map((camera: Camera) => camera.id)
-
-      const zoneEntries = await Promise.all(
-        zoneCameraIds.map(async (cameraId: string) => {
-          const zones = await getZones(cameraId).catch(() => [])
-          return [cameraId, zones.length] as const
-        })
-      )
-
-      setZoneCounts(Object.fromEntries(zoneEntries))
     } catch {
       // silently fail for now
     } finally {
@@ -160,7 +145,7 @@ export function CameraConfig() {
             key={camera.id}
             camera={camera}
             safetyRules={safetyRules}
-            zoneCount={zoneCounts[camera.id] ?? null}
+            zoneCount={usesZoneIntrusion(getConfiguredDetectionKeys(camera, safetyRules)) ? (camera.zones?.length ?? 0) : null}
             canEdit={isAdmin}
             onView={() => navigate(`/configure/cameras/${camera.id}`)}
             onEdit={() => navigate(`/configure/cameras/${camera.id}/edit`)}

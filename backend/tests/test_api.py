@@ -151,10 +151,30 @@ def test_get_cameras_includes_fields():
     cam = resp.json()[0]
     assert "name" in cam
     assert "zone" in cam
+    assert "zones" in cam
     assert "demo" in cam
     assert "rules" in cam
     assert "enabled" in cam
     assert "status" in cam
+
+
+def test_get_cameras_includes_saved_zones():
+    cfg = config_manager.get_config()
+    cam_id = _first_camera_id()
+    cfg["cameras"][cam_id]["zones"] = [
+        {
+            "id": "z1",
+            "name": "Saved Zone",
+            "type": "restricted",
+            "color": "#dc2626",
+            "points": [[0.1, 0.1], [0.3, 0.1], [0.3, 0.3], [0.1, 0.3]],
+        }
+    ]
+    config_manager.save_config(cfg)
+
+    resp = api_get("/api/cameras")
+    cam = next(item for item in resp.json() if item["id"] == cam_id)
+    assert cam["zones"][0]["name"] == "Saved Zone"
 
 
 # ── GET /api/alerts ──────────────────────────────────────────────────────────

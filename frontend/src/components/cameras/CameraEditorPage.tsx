@@ -98,7 +98,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
 
         const existingCamera = await getCameraById(cameraId)
         if (cancelled) return
-        const zoneData = await getZones(existingCamera.id).catch(() => [])
+        const zoneData = await getZones(existingCamera.id).catch(() => existingCamera.zones || [])
         if (cancelled) return
 
         setCamera(existingCamera)
@@ -201,7 +201,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
   }
 
   async function refreshZones(targetCameraId: string) {
-    const updatedZones = await getZones(targetCameraId).catch(() => [])
+    const updatedZones = await getZones(targetCameraId).catch(() => zones)
     setZones(updatedZones)
   }
 

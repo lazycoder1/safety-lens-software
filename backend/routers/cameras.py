@@ -66,6 +66,7 @@ def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
         "video": cam.get("video", ""),
         "yoloe_classes": cam.get("yoloe_classes", []),
         "stream_type": cam.get("stream_type", "file"),
+        "zones": cam.get("zones", []),
         "alert_classes": cam.get("alert_classes", []),
         "ppe_rule_ids": cam.get("ppe_rule_ids", []),
         "safety_rule_ids": cam.get("safety_rule_ids", []),

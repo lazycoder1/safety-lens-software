@@ -38,7 +38,7 @@ export function CameraDetailsPage() {
       try {
         const [cameraData, ruleData] = await Promise.all([getCameraById(cameraId), getSafetyRules()])
         if (cancelled) return
-        const zoneData = await getZones(cameraData.id).catch(() => [])
+        const zoneData = await getZones(cameraData.id).catch(() => cameraData.zones || [])
         if (cancelled) return
         setCamera(cameraData)
         setSafetyRules(ruleData)

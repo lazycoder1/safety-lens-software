@@ -110,6 +110,7 @@ export interface Camera {
   enabled: boolean
   yoloe_classes?: string[] | null
   stream_type: string
+  zones?: Zone[] | null
   rtsp_url: string
   host?: string | null
   rtsp_port?: number | null
