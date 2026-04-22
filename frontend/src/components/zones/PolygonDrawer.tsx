@@ -25,6 +25,7 @@ export interface PolygonDrawerProps {
   onSave: (zone: { name: string; type: string; color: string; points: number[][] }) => Promise<void>
   onDelete?: (zoneId: string) => Promise<void>
   onUpdate?: (zoneId: string, updates: { points: number[][] }) => Promise<void>
+  onDraftStateChange?: (hasDraft: boolean) => void
 }
 
 /* ── geometry helpers ── */
@@ -58,6 +59,7 @@ export function PolygonDrawer({
   onSave,
   onDelete,
   onUpdate,
+  onDraftStateChange,
 }: PolygonDrawerProps) {
   // drawing state
   const [drawingMode, setDrawingMode] = useState(false)
@@ -197,6 +199,10 @@ export function PolygonDrawer({
   useEffect(() => {
     drawCanvas()
   }, [drawCanvas])
+
+  useEffect(() => {
+    onDraftStateChange?.(currentPoints.length > 0)
+  }, [currentPoints.length, onDraftStateChange])
 
   useEffect(() => {
     const img = imgRef.current

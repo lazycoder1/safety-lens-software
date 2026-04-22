@@ -322,6 +322,18 @@ export function CameraDetailsPage() {
                     : "Not applicable"
                 }
               />
+              {zones.length > 0 && (
+                <div className="pt-2">
+                  <p className="text-sm text-[var(--color-text-secondary)]">Saved zones</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {zones.map((item) => (
+                      <Badge key={item.id} variant="info">
+                        {item.name}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </Card>
         </div>

@@ -61,6 +61,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
   const [camera, setCamera] = useState<Camera | null>(null)
   const [zones, setZones] = useState<Zone[]>([])
+  const [hasUnsavedZoneDraft, setHasUnsavedZoneDraft] = useState(false)
   const [planPreview, setPlanPreview] = useState<{ execution_plan: ExecutionPlan; missing_model_keys: string[] } | null>(null)
 
   const [name, setName] = useState("")
@@ -267,6 +268,11 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     }
     if (streamType === "rtsp" && !rtspUrl.trim()) {
       toast.error("RTSP URL is required")
+      return
+    }
+    if (requiresZone && hasUnsavedZoneDraft) {
+      zoneSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+      toast.error("Save or cancel the zone draft before saving the camera")
       return
     }
 
@@ -567,9 +573,18 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                   onSave={handleSaveZone}
                   onDelete={handleDeleteZone}
                   onUpdate={handleUpdateZone}
+                  onDraftStateChange={setHasUnsavedZoneDraft}
                 />
 
                 <div className="space-y-2">
+                  {hasUnsavedZoneDraft && (
+                    <div className="rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[var(--color-warning-bg)] px-3 py-2">
+                      <p className="text-sm font-medium text-[var(--color-text-primary)]">Zone draft not saved yet</p>
+                      <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+                        Click <strong>Save Zone</strong> inside the drawing panel before saving the camera.
+                      </p>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-medium text-[var(--color-text-primary)]">Configured Zones</p>
                     <span className="text-xs text-[var(--color-text-secondary)]">
@@ -699,7 +714,9 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
               <Button onClick={() => void submitCamera()} disabled={saving}>
                 {saving
                   ? isEdit ? "Saving…" : "Creating…"
-                  : isEdit ? "Save Camera Changes" : requiresZone ? "Save and Continue to Zones" : "Create Camera"}
+                  : hasUnsavedZoneDraft
+                    ? "Save Zone Draft First"
+                    : isEdit ? "Save Camera Changes" : requiresZone ? "Save and Continue to Zones" : "Create Camera"}
               </Button>
               <Button variant="secondary" onClick={() => navigate(isEdit && cameraId ? `/configure/cameras/${cameraId}` : "/configure/cameras")}>
                 Cancel
