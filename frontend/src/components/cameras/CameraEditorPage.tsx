@@ -135,6 +135,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
   )
   const purpose = preservedRuleIds.length > 0 ? "Custom monitoring" : deriveCameraPurpose(selectedDetections)
   const showLegacyNote = camera ? cameraNeedsLegacyNormalization(camera) : false
+  const needsZoneSetup = requiresZone && zones.length === 0
 
   useEffect(() => {
     if (!showZoneFocus || !requiresZone || !zoneSectionRef.current) return
@@ -210,7 +211,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     try {
       await addZone(cameraId, newZone)
       await refreshZones(cameraId)
-      toast.success("Zone saved")
+      toast.success("Zone saved. Save camera changes too if you edited detections or profile.")
     } catch (error: any) {
       toast.error(error.message || "Failed to save zone")
     }
@@ -385,14 +386,15 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
         </div>
       </div>
 
-      {showZoneFocus && requiresZone && zones.length === 0 && (
+      {showZoneFocus && needsZoneSetup && (
         <Card className="border-[var(--color-warning)] bg-[var(--color-warning-bg)] p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 text-[var(--color-warning)]" />
             <div>
               <p className="text-sm font-semibold text-[var(--color-text-primary)]">One more step: draw a restricted zone</p>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                This camera has Zone Intrusion enabled. Add at least one zone before treating setup as complete.
+                This camera has Zone Intrusion enabled. Use this order:
+                {" "}Draw Zone, Save Zone, then Save Camera Changes if you also changed detections or profile.
               </p>
             </div>
           </div>
@@ -567,6 +569,16 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                   </p>
                 </div>
 
+                {needsZoneSetup && (
+                  <div className="rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[var(--color-warning-bg)] px-3 py-2">
+                    <p className="text-sm font-medium text-[var(--color-text-primary)]">Required sequence</p>
+                    <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+                      1. Click <strong>Draw Zone</strong> 2. Draw the polygon 3. Click <strong>Save Zone</strong>
+                      4. Click <strong>Save Camera Changes</strong> only if you edited other camera settings.
+                    </p>
+                  </div>
+                )}
+
                 <PolygonDrawer
                   imageUrl={`${API_BASE}/api/stream/${cameraId}`}
                   existingZones={zones}
@@ -716,7 +728,9 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                   ? isEdit ? "Saving…" : "Creating…"
                   : hasUnsavedZoneDraft
                     ? "Save Zone Draft First"
-                    : isEdit ? "Save Camera Changes" : requiresZone ? "Save and Continue to Zones" : "Create Camera"}
+                    : needsZoneSetup
+                      ? "Zone Still Needs Saving"
+                      : isEdit ? "Save Camera Changes" : requiresZone ? "Save and Continue to Zones" : "Create Camera"}
               </Button>
               <Button variant="secondary" onClick={() => navigate(isEdit && cameraId ? `/configure/cameras/${cameraId}` : "/configure/cameras")}>
                 Cancel
