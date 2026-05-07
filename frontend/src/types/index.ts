@@ -19,9 +19,10 @@ export type CapabilityKey =
   | "boots_required"
   | "goggles_required"
   | "fire_smoke"
+  | "face_recognition"
   | "custom_long_tail"
 export type CameraRuntimeStatus = "running" | "starting" | "awaiting_model_install" | "offline" | "error"
-export type ModelKey = "coco_primary" | "ppe_specialist" | "yoloe_long_tail"
+export type ModelKey = "coco_primary" | "ppe_specialist" | "yoloe_long_tail" | "face_recognition"
 
 export interface ExecutionPlan {
   profile: CameraProfile
@@ -30,6 +31,7 @@ export interface ExecutionPlan {
   run_coco_primary: boolean
   run_ppe_specialist: boolean
   run_yoloe_long_tail: boolean
+  run_face_recognition?: boolean
   tracking_enabled: boolean
   zones_required: boolean
   association_enabled: boolean
@@ -224,6 +226,7 @@ export interface SafetyRule {
   model: "yolo" | "yoloe"
   severity: Severity
   enabled: boolean
+  threshold?: number | null
 }
 
 export interface RuleCondition {

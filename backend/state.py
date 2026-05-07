@@ -2,10 +2,9 @@
 
 import logging
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import WebSocket
-from ultralytics import YOLO
 
 import model_manager
 
@@ -14,8 +13,8 @@ logger = logging.getLogger("safetylens")
 # ── Mutable state ───────────────────────────────────────────────────────────
 
 alert_subscribers: list[WebSocket] = []
-model: Optional[YOLO] = None
-yoloe_model: Optional[YOLO] = None
+model: Any = None
+yoloe_model: Any = None
 camera_frames: dict[str, Optional[bytes]] = {}
 camera_clean_frames: dict[str, Optional[bytes]] = {}
 camera_detections: dict[str, list] = {}

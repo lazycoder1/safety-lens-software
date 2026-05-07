@@ -80,6 +80,55 @@ Prod: RTSP cameras      --> video_processor thread --> YOLO --> alerts
 
 **Effort estimate:** ~5 days
 
+### Face Recognition Product Workflow
+
+Face recognition should work as an identity signal that other workflows can use. The first implementation emits `face_match`, `face_unknown`, and `face_low_quality` events with camera, timestamp, bounding box, confidence, snapshot, and matched person metadata when available. Rules and gate automation consume these events later.
+
+**Primary use cases:**
+- **Gate verification:** a gate camera recognizes enrolled employees, visitors, contractors, unknown people, and watchlist people. ANPR + face + rules can later decide whether to open or hold a gate.
+- **Visitor and contractor access:** temporary people are enrolled with an expiry date. Expired visitors still log as matched people but become warning/rule inputs.
+- **Unknown person at sensitive cameras:** unknown faces at gates, control rooms, server rooms, storage rooms, or after-hours cameras become reviewable events and future alerts.
+- **Watchlist/blocklist:** admins can enroll restricted people in a watchlist group so future rules can escalate them.
+- **Review/audit:** managers and admins can search recent face logs to explain who was seen, where, when, and why a gate/rule decision happened.
+
+**Enrollment workflow:**
+1. Admin opens `/configure/faces` and selects **Enroll Face**.
+2. Admin chooses photo upload or live camera capture.
+3. System validates exactly one usable face, minimum face size, embedding quality, and duplicate risk.
+4. Admin enters name, group, optional validity date, consent confirmation, and consent method.
+5. System stores the photo, embedding, consent metadata, and enrolled-face record.
+
+**Live matching workflow:**
+1. Face recognition is enabled per camera through camera capabilities.
+2. The video loop runs SCRFD + ArcFace only on cameras whose execution plan includes face recognition.
+3. Each detected face is classified as matched, unknown, or low quality.
+4. Events are written to `face_logs` with cooldown/deduping so repeated frames do not flood the log.
+5. Live overlays can show a plain operational label: person name, unknown person, or low-quality face.
+
+**Face log review workflow:**
+- `/configure/faces` shows enrolled face cards and a recent-match feed.
+- Logs are filterable by camera, event type, person/group, and time range in future search/reporting work.
+- Each log should preserve the camera name, event type, timestamp, match confidence, snapshot, and quality reason when applicable.
+
+**Future rules integration:**
+- Conditions: `face_match`, `face_unknown`, `face_low_quality`, `face_in_group`, `face_not_in_group`, `person_valid_until_expired`.
+- Actions: `create_alert`, `send_telegram`, `open_gate`, `hold_gate`, `trigger_webhook`, `trigger_plc`.
+- Example gate rule: `IF plate in Whitelist AND face in Employees THEN open_gate ELSE hold_gate + create_alert`.
+
+**Consent and retention requirements:**
+- Consent is mandatory for enrollment.
+- Consent method is stored with the enrollment record.
+- Admin deletion should deactivate biometric matching while preserving historical logs.
+- Full retention-policy controls and legal review are required before production rollout.
+
+**Partner demo script:**
+1. Enroll `Rajesh Kumar` as an employee using upload or live capture.
+2. Enable Face Recognition on a gate camera.
+3. Run a clip where Rajesh appears and show a `face_match` event.
+4. Run a clip with an unknown person and show a `face_unknown` event.
+5. Enroll a watchlist person and show how the event becomes a future rule input.
+6. Open the Rules Engine mock and explain how ANPR + face events will drive gate automation.
+
 ---
 
 ### AI Search Module (NOT BUILT — Phase 2)

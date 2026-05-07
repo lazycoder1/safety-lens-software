@@ -131,8 +131,8 @@ if [[ -z "${JWT_SECRET:-}" ]]; then
   warn "JWT_SECRET is empty. Tokens will invalidate whenever the backend restarts."
 fi
 
-if [[ ! -f "$PROJECT_DIR/yolo26n.pt" && ! -f "$PROJECT_DIR/models/coco_primary/yolo26n.pt" ]]; then
-  warn "COCO model missing (yolo26n.pt). Cameras will stay paused until it is installed."
+if [[ ! -f "$PROJECT_DIR/yolo26m.pt" && ! -f "$PROJECT_DIR/models/coco_primary/yolo26m.pt" ]]; then
+  warn "COCO model missing (yolo26m.pt). Cameras will stay paused until it is installed."
 fi
 
 if [[ ! -f "$PROJECT_DIR/yoloe-11s-seg.pt" && ! -f "$PROJECT_DIR/models/yoloe_open_vocab/yoloe-11s-seg.pt" ]]; then

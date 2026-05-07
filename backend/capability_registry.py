@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-ModelKey = Literal["coco_primary", "ppe_specialist", "yoloe_long_tail"]
+ModelKey = Literal["coco_primary", "ppe_specialist", "yoloe_long_tail", "face_recognition"]
 CameraProfile = Literal["general_safety", "work_zone_ppe", "demo_advanced"]
 CapabilityKey = Literal[
     "person_presence",
@@ -21,6 +21,7 @@ CapabilityKey = Literal[
     "boots_required",
     "goggles_required",
     "fire_smoke",
+    "face_recognition",
     "custom_long_tail",
 ]
 InputScope = Literal["full_frame", "object_crop"]
@@ -207,6 +208,18 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_association": False,
         "prompt_terms": ["fire", "smoke", "flames"],
         "safety_rule_ids": ["alert_fire_smoke"],
+    },
+    "face_recognition": {
+        "key": "face_recognition",
+        "label": "Face Recognition",
+        "group": "Advanced",
+        "model_family": "face_recognition",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": False,
+        "requires_association": False,
+        "prompt_terms": ["face recognition", "face"],
+        "safety_rule_ids": [],
     },
     "custom_long_tail": {
         "key": "custom_long_tail",

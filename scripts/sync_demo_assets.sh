@@ -34,7 +34,7 @@ Uploads gitignored demo assets to the Vast backend host:
 - backend/config.json
 - test-videos/
 - models/
-- root-level model files such as yolo26n.pt and yoloe-11s-seg.pt
+- root-level model files such as yolo26m.pt and yoloe-11s-seg.pt
 
 Options:
   --host HOST            Vast public IP or hostname
@@ -130,6 +130,22 @@ sync_dir() {
   fi
 }
 
+sync_first_existing_file() {
+  local dst="$1"
+  local label="$2"
+  shift 2
+
+  local candidate=""
+  for candidate in "$@"; do
+    if [[ -f "$candidate" ]]; then
+      sync_file "$candidate" "$dst" "$label"
+      return 0
+    fi
+  done
+
+  warn "Skipping missing $label"
+}
+
 ensure_remote_dirs
 
 if [[ "$SYNC_CONFIG" == "yes" ]]; then
@@ -143,6 +159,7 @@ fi
 sync_dir "$PROJECT_DIR/test-videos" "$REMOTE_DIR/test-videos" "test-videos"
 sync_dir "$PROJECT_DIR/models" "$REMOTE_DIR/models" "models"
 
+sync_first_existing_file "$REMOTE_DIR/yolo26m.pt" "yolo26m.pt" "$PROJECT_DIR/yolo26m.pt" "$WORKSPACE_DIR/yolo26m.pt"
 sync_file "$PROJECT_DIR/yolo26n.pt" "$REMOTE_DIR/yolo26n.pt" "yolo26n.pt"
 sync_file "$PROJECT_DIR/yoloe-11s-seg.pt" "$REMOTE_DIR/yoloe-11s-seg.pt" "yoloe-11s-seg.pt"
 sync_file "$PROJECT_DIR/mobileclip_blt.ts" "$REMOTE_DIR/mobileclip_blt.ts" "mobileclip_blt.ts"

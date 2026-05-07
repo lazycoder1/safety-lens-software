@@ -3,15 +3,19 @@ SafetyLens constants — paths, class maps, color palettes, public routes.
 """
 
 from pathlib import Path
+import os
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).parent.parent
-YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26n.pt"  # COCO pretrained YOLO26 — 80 classes, NMS-free
+YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26m.pt"  # COCO pretrained YOLO26 — 80 classes, NMS-free
 YOLOE_MODEL_PATH = PROJECT_ROOT / "yoloe-11s-seg.pt"
 VIDEO_DIR = PROJECT_ROOT / "test-videos"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
+MODEL_SERVER_URL = os.environ.get("SAFETYLENS_MODEL_SERVER_URL", "").rstrip("/")
+MODEL_SERVER_TOKEN = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
+MODEL_SERVER_TIMEOUT_SECONDS = float(os.environ.get("SAFETYLENS_MODEL_SERVER_TIMEOUT_SECONDS", "30"))
 
 # ── COCO class names (80 classes) ───────────────────────────────────────────
 

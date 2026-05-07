@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dependencies import require_admin
 
@@ -54,6 +54,7 @@ class SafetyRuleCreate(BaseModel):
     classes: list[str]
     model: str = "yoloe"  # "yolo" | "yoloe"
     severity: str = "P2"
+    threshold: Optional[int] = Field(default=None, ge=1)
 
 
 class SafetyRuleUpdate(BaseModel):
@@ -63,6 +64,7 @@ class SafetyRuleUpdate(BaseModel):
     model: Optional[str] = None
     severity: Optional[str] = None
     enabled: Optional[bool] = None
+    threshold: Optional[int] = Field(default=None, ge=1)
 
 
 def _migrate_config(cfg: dict):
@@ -179,7 +181,7 @@ async def api_create_safety_rule(body: SafetyRuleCreate):
     while rule_id in existing_ids:
         rule_id = f"{base_id}_{counter}"
         counter += 1
-    rule = {"id": rule_id, "enabled": True, **body.model_dump()}
+    rule = {"id": rule_id, "enabled": True, **body.model_dump(exclude_none=True)}
     rules.append(rule)
     save_config(cfg)
     logger.info("Safety rule created", extra={"rule_id": rule_id, "name": body.name})
@@ -192,7 +194,7 @@ async def api_update_safety_rule(rule_id: str, body: SafetyRuleUpdate):
     rules = _ensure_safety_rules(cfg)
     for rule in rules:
         if rule["id"] == rule_id:
-            updates = body.model_dump(exclude_none=True)
+            updates = body.model_dump(exclude_unset=True)
             # Validate name uniqueness if changing name
             if "name" in updates:
                 if any(r["name"].lower() == updates["name"].lower() and r["id"] != rule_id for r in rules):

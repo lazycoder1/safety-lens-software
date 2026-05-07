@@ -14,16 +14,18 @@ services:
       timeout: 3s
       retries: 5
 
-  backend:
+  edge:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.edge
     restart: unless-stopped
     ports:
       - "${SAFETYLENS_PORT:-8000}:8000"
     environment:
       DATABASE_URL: postgresql://safetylens:${POSTGRES_PASSWORD:-safetylens}@db:5432/safetylens
       SAFETYLENS_CONFIG_STORE: postgres
+      SAFETYLENS_MODEL_SERVER_URL: ${SAFETYLENS_MODEL_SERVER_URL:-http://model-server:8100}
+      SAFETYLENS_MODEL_SERVER_TOKEN: ${SAFETYLENS_MODEL_SERVER_TOKEN:-}
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/api/generate}
     volumes:
       - snapshots:/app/backend/snapshots
@@ -35,6 +37,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  model-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.model-server
+    restart: unless-stopped
+    ports:
+      - "${SAFETYLENS_MODEL_SERVER_PORT:-8100}:8100"
+    environment:
+      SAFETYLENS_MODEL_SERVER_TOKEN: ${SAFETYLENS_MODEL_SERVER_TOKEN:-}
     deploy:
       resources:
         reservations:

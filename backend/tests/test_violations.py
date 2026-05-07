@@ -196,3 +196,26 @@ def test_check_yoloe_violations_uses_safety_rule_ids_when_yoloe_classes_are_stal
     assert len(violations) == 1
     assert violations[0]["rule"] == "Missing helmet"
     assert violations[0]["severity"] == "P2"
+
+
+@mock.patch("detection.get_config")
+def test_check_yoloe_violations_includes_rule_threshold(mock_cfg):
+    rules = list(DEFAULT_SAFETY_RULES)
+    for rule in rules:
+        if rule["id"] == "ppe_helmet":
+            rule["threshold"] = 10
+            break
+    mock_cfg.return_value = {
+        "cameras": {
+            "cam5": {
+                "safety_rule_ids": ["ppe_helmet"],
+                "ppe_rule_ids": [],
+                "yoloe_classes": ["person", "safety vest"],
+            }
+        },
+        "safety_rules": rules,
+    }
+    dets = [{"class": "person", "confidence": 0.91, "bbox": [0, 0, 100, 200]}]
+    violations = check_yoloe_violations(dets, "cam5")
+    assert len(violations) == 1
+    assert violations[0]["threshold"] == 10

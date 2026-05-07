@@ -137,6 +137,7 @@ function SafetyRulesTab() {
   const [formClasses, setFormClasses] = useState<string[]>([])
   const [formClassInput, setFormClassInput] = useState("")
   const [formSeverity, setFormSeverity] = useState<Severity>("P2")
+  const [formThreshold, setFormThreshold] = useState("")
 
   const fetchData = useCallback(async () => {
     try {
@@ -165,6 +166,7 @@ function SafetyRulesTab() {
     setFormClasses([])
     setFormClassInput("")
     setFormSeverity("P2")
+    setFormThreshold("")
     setShowForm(false)
     setEditingId(null)
   }
@@ -177,6 +179,7 @@ function SafetyRulesTab() {
     setFormClasses([...rule.classes])
     setFormClassInput("")
     setFormSeverity(rule.severity)
+    setFormThreshold(rule.threshold ? String(rule.threshold) : "")
     setShowForm(true)
   }
 
@@ -201,6 +204,14 @@ function SafetyRulesTab() {
       toast.error("At least one detection class is required")
       return
     }
+    const hasCustomThreshold = formType === "alert" && formThreshold.trim() !== ""
+    const thresholdValue = hasCustomThreshold
+      ? Number.parseInt(formThreshold.trim(), 10)
+      : undefined
+    if (hasCustomThreshold && (!Number.isInteger(thresholdValue) || (thresholdValue ?? 0) < 1)) {
+      toast.error("Threshold must be a whole number greater than 0")
+      return
+    }
     try {
       if (editingId) {
         const updated = await updateSafetyRule(editingId, {
@@ -209,6 +220,7 @@ function SafetyRulesTab() {
           model: formModel,
           classes: formClasses,
           severity: formSeverity,
+          threshold: formType === "alert" ? (hasCustomThreshold ? thresholdValue : null) : null,
         })
         setRules((prev) => prev.map((r) => (r.id === editingId ? updated : r)))
         toast.success("Rule updated")
@@ -219,6 +231,7 @@ function SafetyRulesTab() {
           model: formModel,
           classes: formClasses,
           severity: formSeverity,
+          threshold: formType === "alert" ? (hasCustomThreshold ? thresholdValue : undefined) : undefined,
         })
         setRules((prev) => [...prev, created])
         toast.success("Rule created")
@@ -422,6 +435,23 @@ function SafetyRulesTab() {
                 ))}
               </select>
             </div>
+            {formType === "alert" && (
+              <div>
+                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Alert Threshold</label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={formThreshold}
+                  onChange={(e) => setFormThreshold(e.target.value)}
+                  placeholder="Default runtime threshold"
+                  className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                />
+                <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+                  Optional. Lower values fire sooner for this rule only.
+                </p>
+              </div>
+            )}
           </div>
           <div className="flex gap-2 pt-1">
             <Button onClick={handleSave}>
@@ -449,6 +479,7 @@ function SafetyRulesTab() {
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Detection Classes</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Model</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Severity</th>
+                <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Threshold</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Cameras</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Enabled</th>
                 <th className="text-right px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Actions</th>
@@ -482,6 +513,9 @@ function SafetyRulesTab() {
                   </td>
                   <td className="px-4 py-3">
                     <SeverityBadge severity={rule.severity} />
+                  </td>
+                  <td className="px-4 py-3 text-[var(--color-text-secondary)]">
+                    {rule.type === "alert" ? (rule.threshold ?? "Default") : "n/a"}
                   </td>
                   <td className="px-4 py-3">
                     <button

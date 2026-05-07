@@ -14,6 +14,8 @@ import numpy as np
 import requests
 
 import alert_store
+import face_analyzer
+import face_store
 import licensing
 import model_manager
 import state
@@ -28,6 +30,7 @@ from detection import (
     check_violations,
     check_yoloe_violations,
     check_zone_intrusions,
+    draw_detection_records,
     draw_detections,
     extract_violation_bboxes,
 )
@@ -47,6 +50,8 @@ _COCO_CLASS_TO_CAPABILITIES = {
     "truck": ["vehicle_presence"],
     "motorcycle": ["vehicle_presence"],
 }
+
+FACE_LOG_COOLDOWN_SECONDS = 10.0
 
 
 def _normalize_text(value: str) -> str:
@@ -207,16 +212,16 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
     visible_detection_count = 0
 
     if execution_plan.get("run_coco_primary"):
-        results = model_manager.predict(
+        records = model_manager.predict_records(
             "coco_primary",
             frame,
             conf=conf,
             device=device,
             imgsz=imgsz,
         )
-        annotated, coco_detections = draw_detections(
+        annotated, coco_detections = draw_detection_records(
             annotated,
-            results,
+            records,
             camera_id,
             show_overlay=False,
         )
@@ -225,7 +230,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
 
     if execution_plan.get("run_ppe_specialist") and execution_plan.get("ppe_prompt_terms"):
         ppe_prompts = execution_plan["ppe_prompt_terms"]
-        results = model_manager.predict(
+        records = model_manager.predict_records(
             "ppe_specialist",
             frame,
             conf=conf,
@@ -233,9 +238,9 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             imgsz=imgsz,
             classes=ppe_prompts,
         )
-        _ppe_annotated, ppe_detections = draw_detections(
+        _ppe_annotated, ppe_detections = draw_detection_records(
             annotated,
-            results,
+            records,
             camera_id,
             class_names=ppe_prompts,
             colors=YOLOE_COLORS,
@@ -245,7 +250,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
 
     if execution_plan.get("run_yoloe_long_tail") and execution_plan.get("yoloe_prompt_terms"):
         long_tail_prompts = execution_plan["yoloe_prompt_terms"]
-        results = model_manager.predict(
+        records = model_manager.predict_records(
             "yoloe_long_tail",
             frame,
             conf=conf,
@@ -253,9 +258,9 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             imgsz=imgsz,
             classes=long_tail_prompts,
         )
-        _long_tail_annotated, long_tail_detections = draw_detections(
+        _long_tail_annotated, long_tail_detections = draw_detection_records(
             annotated,
-            results,
+            records,
             camera_id,
             class_names=long_tail_prompts,
             colors=YOLOE_COLORS,
@@ -268,6 +273,70 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         camera_id=camera_id,
         detection_count=visible_detection_count,
     )
+    return annotated, detections
+
+
+def _run_face_recognition(
+    camera_id: str,
+    frame: np.ndarray,
+    annotated: np.ndarray,
+    camera: dict,
+    last_face_log_by_key: dict[str, float],
+) -> tuple[np.ndarray, list[dict]]:
+    try:
+        events = face_analyzer.analyze_frame(frame)
+    except Exception:
+        logger.exception("Face recognition failed", extra={"camera_id": camera_id})
+        return annotated, []
+
+    _, snapshot_buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    snapshot_jpeg = snapshot_buffer.tobytes()
+    now = time.time()
+    detections: list[dict] = []
+
+    for event in events:
+        bbox = event.get("bbox") or {}
+        x1 = int(bbox.get("x1", 0))
+        y1 = int(bbox.get("y1", 0))
+        x2 = int(bbox.get("x2", 0))
+        y2 = int(bbox.get("y2", 0))
+        event_type = event["eventType"]
+        label = event.get("personName") or (
+            "Unknown person" if event_type == "face_unknown" else "Low-quality face"
+        )
+        color = (16, 185, 129) if event_type == "face_match" else (0, 193, 255) if event_type == "face_low_quality" else (0, 82, 255)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(annotated, label, (x1, max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+        detection = {
+            "class": event_type,
+            "confidence": event.get("confidence"),
+            "bbox": [x1, y1, x2, y2],
+            "model_family": "face_recognition",
+            "capability_keys": ["face_recognition"],
+            "person_id": event.get("matchedFaceId"),
+            "person_name": event.get("personName"),
+            "person_group": event.get("personGroup"),
+            "quality_reason": event.get("qualityReason"),
+        }
+        detections.append(detection)
+
+        dedupe_subject = event.get("matchedFaceId") or event_type
+        dedupe_key = f"{camera_id}:{event_type}:{dedupe_subject}"
+        if now - last_face_log_by_key.get(dedupe_key, 0) < FACE_LOG_COOLDOWN_SECONDS:
+            continue
+        last_face_log_by_key[dedupe_key] = now
+        face_store.log_face_event(
+            camera_id=camera_id,
+            camera_name=camera.get("name", camera_id),
+            event_type=event_type,
+            matched_face_id=event.get("matchedFaceId"),
+            confidence=event.get("confidence"),
+            bbox=bbox,
+            quality_reason=event.get("qualityReason"),
+            snapshot_jpeg=snapshot_jpeg,
+        )
+
     return annotated, detections
 
 
@@ -286,6 +355,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     inference_width = g["inference_width"]
     device = g["device"]
     last_alert_by_rule: dict[str, float] = {}
+    last_face_log_by_key: dict[str, float] = {}
     active_violations: set[str] = set()
     violation_window: dict[str, list[bool]] = {}
     window_size = 15
@@ -338,6 +408,15 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                         device=device,
                         imgsz=inference_width,
                     )
+                    if execution_plan.get("run_face_recognition"):
+                        annotated, face_detections = _run_face_recognition(
+                            camera_id,
+                            frame,
+                            annotated,
+                            current_cam,
+                            last_face_log_by_key,
+                        )
+                        detections.extend(face_detections)
                 except Exception:
                     logger.exception("Detection failed", extra={"camera_id": camera_id})
                     annotated = frame

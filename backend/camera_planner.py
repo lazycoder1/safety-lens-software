@@ -47,14 +47,16 @@ def _ordered_capabilities(capabilities: list[str]) -> list[CapabilityKey]:
 
 
 def infer_capabilities_from_camera(camera: dict, cfg: dict) -> list[CapabilityKey]:
+    explicit = [normalize_capability_key(value) for value in _ensure_list(camera.get("capabilities"))]
+    explicit_caps = [value for value in explicit if value]
     rule_ids = _ensure_list(camera.get("safety_rule_ids"))
-    if not rule_ids:
-        explicit = [normalize_capability_key(value) for value in _ensure_list(camera.get("capabilities"))]
-        explicit_caps = [value for value in explicit if value]
-        if explicit_caps:
-            return _ordered_capabilities(explicit_caps)
+    if explicit_caps and not rule_ids:
+        return _ordered_capabilities(explicit_caps)
 
     capabilities: list[CapabilityKey] = []
+    for capability in explicit_caps:
+        _append_unique(capabilities, capability)
+
     rule_map = {rule["id"]: rule for rule in cfg.get("safety_rules", [])}
 
     for rule_id in rule_ids:
@@ -134,6 +136,7 @@ def _required_model_keys(capabilities: list[CapabilityKey]) -> list[ModelKey]:
     has_ppe = any(CAPABILITY_REGISTRY[key]["model_family"] == "ppe_specialist" for key in capability_set)
     has_coco = any(CAPABILITY_REGISTRY[key]["model_family"] == "coco_primary" for key in capability_set)
     has_long_tail = any(CAPABILITY_REGISTRY[key]["model_family"] == "yoloe_long_tail" for key in capability_set)
+    has_face = any(CAPABILITY_REGISTRY[key]["model_family"] == "face_recognition" for key in capability_set)
 
     if has_coco or has_ppe:
         required.append("coco_primary")
@@ -141,6 +144,8 @@ def _required_model_keys(capabilities: list[CapabilityKey]) -> list[ModelKey]:
         required.append("ppe_specialist")
     if has_long_tail:
         required.append("yoloe_long_tail")
+    if has_face:
+        required.append("face_recognition")
     return required
 
 
@@ -198,6 +203,7 @@ def build_execution_plan(camera: dict, cfg: dict | None = None) -> dict[str, Any
         "run_coco_primary": "coco_primary" in required_model_keys,
         "run_ppe_specialist": "ppe_specialist" in required_model_keys,
         "run_yoloe_long_tail": "yoloe_long_tail" in required_model_keys,
+        "run_face_recognition": "face_recognition" in required_model_keys,
         "tracking_enabled": tracking_enabled,
         "zones_required": zones_required,
         "association_enabled": association_enabled,
@@ -208,7 +214,8 @@ def build_execution_plan(camera: dict, cfg: dict | None = None) -> dict[str, Any
         "model_stack": [
             "COCO Primary" if model_key == "coco_primary" else
             "PPE Specialist" if model_key == "ppe_specialist" else
-            "YOLOE Long-Tail"
+            "YOLOE Long-Tail" if model_key == "yoloe_long_tail" else
+            "Face Recognition"
             for model_key in required_model_keys
         ],
     }

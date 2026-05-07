@@ -331,6 +331,90 @@ export async function deleteCamera(id: string) {
   return request(`/api/cameras/${id}`, { method: "DELETE" })
 }
 
+export interface EnrolledFaceApi {
+  id: string
+  name: string
+  group: "employees" | "visitors" | "contractors" | "watchlist"
+  validUntil: string | null
+  enrolledAt: string
+  consentMethod: string
+  consentConfirmed: boolean
+  photoUrl: string | null
+  active: boolean
+}
+
+export interface FaceLogApi {
+  id: string
+  cameraId: string
+  cameraName: string
+  timestamp: string
+  eventType: "face_match" | "face_unknown" | "face_low_quality"
+  matchedFaceId: string | null
+  personId: string | null
+  personName: string | null
+  personGroup?: string | null
+  confidence: number | null
+  snapshotUrl: string | null
+  qualityReason: string | null
+  isUnknown: boolean
+}
+
+export async function getFaces(): Promise<EnrolledFaceApi[]> {
+  return request("/api/faces")
+}
+
+export async function getFaceLogs(params?: {
+  cameraId?: string
+  eventType?: string
+  limit?: number
+  offset?: number
+}): Promise<FaceLogApi[]> {
+  const searchParams = new URLSearchParams()
+  if (params?.cameraId) searchParams.set("cameraId", params.cameraId)
+  if (params?.eventType) searchParams.set("eventType", params.eventType)
+  if (params?.limit) searchParams.set("limit", String(params.limit))
+  if (params?.offset) searchParams.set("offset", String(params.offset))
+  const qs = searchParams.toString()
+  return request(`/api/faces/logs${qs ? `?${qs}` : ""}`)
+}
+
+export async function enrollFace(payload: {
+  name: string
+  group: string
+  validUntil?: string | null
+  consentMethod: string
+  consentConfirmed: boolean
+  photo: File
+}): Promise<EnrolledFaceApi> {
+  const form = new FormData()
+  form.set("name", payload.name)
+  form.set("group", payload.group)
+  if (payload.validUntil) form.set("validUntil", payload.validUntil)
+  form.set("consentMethod", payload.consentMethod)
+  form.set("consentConfirmed", String(payload.consentConfirmed))
+  form.set("photo", payload.photo)
+  return request("/api/faces/enroll", { method: "POST", body: form })
+}
+
+export async function enrollFaceLive(payload: {
+  cameraId: string
+  name: string
+  group: string
+  validUntil?: string | null
+  consentMethod: string
+  consentConfirmed: boolean
+}): Promise<EnrolledFaceApi> {
+  return request("/api/faces/enroll/live", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteFace(id: string): Promise<EnrolledFaceApi> {
+  return request(`/api/faces/${id}`, { method: "DELETE" })
+}
+
 export async function previewCameraPlan(payload: {
   name?: string
   zone?: string
@@ -465,7 +549,7 @@ export async function getSafetyRules(): Promise<SafetyRule[]> {
   return request("/api/safety-rules")
 }
 
-export async function createSafetyRule(rule: { name: string; type: string; classes: string[]; model: string; severity: string }): Promise<SafetyRule> {
+export async function createSafetyRule(rule: { name: string; type: string; classes: string[]; model: string; severity: string; threshold?: number | null }): Promise<SafetyRule> {
   return request("/api/safety-rules", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -473,7 +557,7 @@ export async function createSafetyRule(rule: { name: string; type: string; class
   })
 }
 
-export async function updateSafetyRule(id: string, updates: Partial<SafetyRule>): Promise<SafetyRule> {
+export async function updateSafetyRule(id: string, updates: Partial<Omit<SafetyRule, "threshold">> & { threshold?: number | null }): Promise<SafetyRule> {
   return request(`/api/safety-rules/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

@@ -21,6 +21,8 @@ runs/
 
 # Runtime data
 backend/snapshots/
+backend/face_photos/
+backend/face_snapshots/
 backend/logs/
 backend/alerts.db
 backend/__pycache__/

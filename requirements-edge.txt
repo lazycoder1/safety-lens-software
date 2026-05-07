@@ -1,4 +1,4 @@
-# SafetyLens backend dependencies
+# SafetyLens edge backend dependencies
 fastapi==0.135.1
 uvicorn==0.41.0
 websockets==15.0.1
@@ -12,10 +12,3 @@ python-multipart==0.0.20
 numpy==2.4.2
 opencv-python==4.13.0.92
 pillow==12.1.1
-ultralytics==8.4.25
-insightface==0.7.3
-onnxruntime==1.23.2
-# PyTorch — CUDA 12.4 wheels
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.10.0
-torchvision==0.25.0

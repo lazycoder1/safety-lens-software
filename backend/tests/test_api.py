@@ -503,6 +503,45 @@ def test_get_cameras_derives_display_rules_from_safety_rule_ids():
     assert camera["rules"] == ["Helmet", "Mobile Phone Usage"]
 
 
+def test_create_safety_rule_with_threshold():
+    resp = api_post("/api/safety-rules", json={
+        "name": "Phone Near Workstation",
+        "type": "alert",
+        "model": "yolo",
+        "classes": ["cell phone"],
+        "severity": "P3",
+        "threshold": 4,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["threshold"] == 4
+
+
+def test_update_safety_rule_threshold():
+    resp = api_put("/api/safety-rules/alert_mobile_phone", json={"threshold": 3})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["threshold"] == 3
+
+    cfg = config_manager.get_config()
+    rule = next(rule for rule in cfg["safety_rules"] if rule["id"] == "alert_mobile_phone")
+    assert rule["threshold"] == 3
+
+
+def test_update_safety_rule_threshold_can_clear():
+    resp = api_put("/api/safety-rules/alert_mobile_phone", json={"threshold": 3})
+    assert resp.status_code == 200
+
+    resp = api_put("/api/safety-rules/alert_mobile_phone", json={"threshold": None})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["threshold"] is None
+
+    cfg = config_manager.get_config()
+    rule = next(rule for rule in cfg["safety_rules"] if rule["id"] == "alert_mobile_phone")
+    assert rule["threshold"] is None
+
+
 def test_update_camera_replaces_stale_legacy_detection_fields():
     cfg = config_manager.get_config()
     cam_id = _first_camera_id()

@@ -23,6 +23,7 @@ from routers.safety_rules import _ensure_safety_rules
 from video_processing import start_camera
 import db
 import alert_store
+import face_store
 import audit_store
 import auth_store
 import diagnostics
@@ -164,6 +165,7 @@ async def startup():
     logger.info("SafetyLens backend starting")
     db.init_pool()
     alert_store.init_db()
+    face_store.init_db()
     audit_store.init_db()
     auth_store.init_auth_db()
     error_store.init_db()

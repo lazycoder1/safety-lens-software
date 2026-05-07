@@ -39,51 +39,85 @@ def draw_detections(
         - None  -> derive overlay label from camera config demo field
         - str   -> use this string directly (e.g. "YOLOE")
     """
-    annotated = frame.copy()
-    detections = []
-
-    # Scale font and line thickness based on frame width for crisp text at any resolution
-    h_img, w_img = annotated.shape[:2]
-    font_scale = max(0.4, w_img / 1600)
-    font_thickness = max(1, int(w_img / 800))
-    box_thickness = max(1, int(w_img / 600))
+    records = []
 
     if results and len(results) > 0:
         boxes = results[0].boxes
         if boxes is not None:
             for box in boxes:
-                cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-                # Resolve class name
-                if class_names is None:
-                    cls_name = COCO_NAMES.get(cls_id, f"class_{cls_id}")
-                elif isinstance(class_names, list):
-                    cls_name = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
-                else:
-                    cls_name = class_names.get(cls_id, f"class_{cls_id}")
-
-                # Resolve color
-                if colors is None:
-                    color = CLASS_COLORS.get(cls_id, (200, 200, 200))
-                elif isinstance(colors, list):
-                    color = colors[cls_id % len(colors)]
-                else:
-                    color = colors.get(cls_id, (200, 200, 200))
-
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness, cv2.LINE_AA)
-
-                label = f"{cls_name} {conf:.0%}"
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
-                cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-                cv2.putText(annotated, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
-
-                detections.append({
-                    "class": cls_name,
-                    "confidence": conf,
-                    "bbox": [x1, y1, x2, y2],
+                records.append({
+                    "class_id": int(box.cls[0]),
+                    "confidence": float(box.conf[0]),
+                    "bbox": list(map(int, box.xyxy[0])),
                 })
+
+    return draw_detection_records(
+        frame,
+        records,
+        camera_id,
+        class_names=class_names,
+        colors=colors,
+        demo_label=demo_label,
+        show_overlay=show_overlay,
+        count_override=count_override,
+    )
+
+
+def draw_detection_records(
+    frame: np.ndarray,
+    records: list[dict],
+    camera_id: str,
+    class_names=None,
+    colors=None,
+    demo_label: str | None = None,
+    show_overlay: bool = True,
+    count_override: int | None = None,
+) -> tuple[np.ndarray, list]:
+    """Draw normalized detection records from local or remote inference."""
+    annotated = frame.copy()
+    detections = []
+
+    # Scale font and line thickness based on frame width for crisp text at any resolution
+    _h_img, w_img = annotated.shape[:2]
+    font_scale = max(0.4, w_img / 1600)
+    font_thickness = max(1, int(w_img / 800))
+    box_thickness = max(1, int(w_img / 600))
+
+    for record in records:
+        cls_id = int(record.get("class_id", record.get("cls", 0)))
+        conf = float(record.get("confidence", record.get("conf", 0.0)))
+        x1, y1, x2, y2 = map(int, record["bbox"])
+
+        # Resolve class name
+        if record.get("class"):
+            cls_name = record["class"]
+        elif class_names is None:
+            cls_name = COCO_NAMES.get(cls_id, f"class_{cls_id}")
+        elif isinstance(class_names, list):
+            cls_name = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
+        else:
+            cls_name = class_names.get(cls_id, f"class_{cls_id}")
+
+        # Resolve color
+        if colors is None:
+            color = CLASS_COLORS.get(cls_id, (200, 200, 200))
+        elif isinstance(colors, list):
+            color = colors[cls_id % len(colors)]
+        else:
+            color = colors.get(cls_id, (200, 200, 200))
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness, cv2.LINE_AA)
+
+        label = f"{cls_name} {conf:.0%}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
+        cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+        cv2.putText(annotated, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
+
+        detections.append({
+            "class": cls_name,
+            "confidence": conf,
+            "bbox": [x1, y1, x2, y2],
+        })
 
     if show_overlay:
         count_color = (168, 85, 247) if colors is not None and isinstance(colors, list) else (34, 197, 94)
@@ -181,6 +215,13 @@ def get_ppe_severity_map() -> dict[str, str]:
     return {r["name"].lower(): r.get("severity", "P2") for r in rules if r.get("type") == "ppe" and r.get("enabled", True)}
 
 
+def get_ppe_threshold_map() -> dict[str, int | None]:
+    """Get per-rule threshold per PPE group from config."""
+    cfg = get_config()
+    rules = cfg.get("safety_rules", [])
+    return {r["name"].lower(): r.get("threshold") for r in rules if r.get("type") == "ppe" and r.get("enabled", True)}
+
+
 def _ppe_center_inside_person(person_bbox: list, ppe_dets: list) -> bool:
     """Check if the center of any PPE detection falls inside the person bbox."""
     px1, py1, px2, py2 = person_bbox
@@ -210,17 +251,20 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
         rule_map = {r["id"]: r for r in all_rules}
         ppe_groups = {}
         severity_map = {}
+        threshold_map = {}
         for rid in safety_rule_ids:
             rule = rule_map.get(rid)
             if rule and rule.get("type") == "ppe" and rule.get("enabled", True):
                 key = rule["name"].lower()
                 ppe_groups[key] = rule["classes"]
                 severity_map[key] = rule.get("severity", "P2")
+                threshold_map[key] = rule.get("threshold")
         checked_groups: set[str] = set(ppe_groups)
     else:
         # Fallback: match yoloe_classes against all known PPE groups
         ppe_groups = get_ppe_groups()
         severity_map = get_ppe_severity_map()
+        threshold_map = get_ppe_threshold_map()
         yoloe_classes = cam.get("yoloe_classes", [])
         checked_groups = set()
         for cls in yoloe_classes:
@@ -244,6 +288,7 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
                 "confidence": max(p["confidence"] for p in violating_persons),
                 "description": f"{len(violating_persons)} worker(s) detected without {group_name}",
                 "source": "PPE Specialist",
+                "threshold": threshold_map.get(group_name),
             })
 
     return candidates

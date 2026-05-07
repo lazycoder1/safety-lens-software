@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import base64
 import shutil
 import tempfile
 import threading
@@ -13,12 +14,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import requests
-from ultralytics import YOLO
 
 from capability_registry import ALL_PPE_PROMPT_TERMS, ModelKey
-from constants import PROJECT_ROOT
+from constants import MODEL_SERVER_TIMEOUT_SECONDS, MODEL_SERVER_TOKEN, MODEL_SERVER_URL, PROJECT_ROOT
 
 logger = logging.getLogger("safetylens.models")
 
@@ -31,12 +32,12 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
     "coco_primary": {
         "model_key": "coco_primary",
         "display_name": "COCO Primary",
-        "filename": "yolo26n.pt",
-        "local_path": MODELS_ROOT / "coco_primary" / "yolo26n.pt",
-        "legacy_paths": [PROJECT_ROOT / "yolo26n.pt"],
-        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt",
+        "filename": "yolo26m.pt",
+        "local_path": MODELS_ROOT / "coco_primary" / "yolo26m.pt",
+        "legacy_paths": [PROJECT_ROOT / "yolo26m.pt", PROJECT_ROOT.parent / "yolo26m.pt"],
+        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m.pt",
         "warmup_behavior": "Full-frame COCO detect warmup",
-        "shared_asset_key": "yolo26n",
+        "shared_asset_key": "yolo26m",
     },
     "ppe_specialist": {
         "model_key": "ppe_specialist",
@@ -57,6 +58,16 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
         "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-11s-seg.pt",
         "warmup_behavior": "Open-vocab warmup with long-tail prompts",
         "shared_asset_key": "yoloe-11s-seg",
+    },
+    "face_recognition": {
+        "model_key": "face_recognition",
+        "display_name": "Face Recognition",
+        "filename": "buffalo_l",
+        "local_path": MODELS_ROOT / "face_recognition" / "buffalo_l",
+        "legacy_paths": [PROJECT_ROOT / "models" / "face_recognition" / "buffalo_l"],
+        "download_url": "",
+        "warmup_behavior": "InsightFace SCRFD + ArcFace lazy load",
+        "shared_asset_key": "insightface-buffalo-l",
     },
 }
 
@@ -83,6 +94,38 @@ _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
 }
 _INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _ACTIVE_JOB_ID: str | None = None
+
+
+def is_remote_inference_enabled() -> bool:
+    return bool(MODEL_SERVER_URL)
+
+
+def _remote_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if MODEL_SERVER_TOKEN:
+        headers["Authorization"] = f"Bearer {MODEL_SERVER_TOKEN}"
+    return headers
+
+
+def _remote_get(path: str) -> dict[str, Any]:
+    response = requests.get(
+        f"{MODEL_SERVER_URL}{path}",
+        headers=_remote_headers(),
+        timeout=MODEL_SERVER_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _remote_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    response = requests.post(
+        f"{MODEL_SERVER_URL}{path}",
+        json=payload,
+        headers=_remote_headers(),
+        timeout=MODEL_SERVER_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def _now() -> float:
@@ -137,11 +180,30 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
 
 
 def list_models() -> list[dict[str, Any]]:
+    if is_remote_inference_enabled():
+        try:
+            return _remote_get("/api/models").get("models", [])
+        except Exception as exc:
+            logger.warning("Remote model list unavailable", extra={"model_server_url": MODEL_SERVER_URL, "error": str(exc)})
+            return [
+                {
+                    **_serialize_model_state(model_key),
+                    "status": "remote_unavailable",
+                    "error": str(exc),
+                    "is_ready": False,
+                }
+                for model_key in MODEL_DEFINITIONS
+            ]
     with _MODEL_LOCK:
         return [_serialize_model_state(model_key) for model_key in MODEL_DEFINITIONS]
 
 
 def get_model(model_key: str) -> dict[str, Any]:
+    if is_remote_inference_enabled():
+        for model in list_models():
+            if model.get("model_key") == model_key:
+                return model
+        raise KeyError(f"Unknown model key: {model_key}")
     with _MODEL_LOCK:
         if model_key not in MODEL_DEFINITIONS:
             raise KeyError(f"Unknown model key: {model_key}")
@@ -149,6 +211,20 @@ def get_model(model_key: str) -> dict[str, Any]:
 
 
 def missing_model_keys(model_keys: list[str]) -> list[ModelKey]:
+    if is_remote_inference_enabled():
+        try:
+            models = {
+                item.get("model_key"): item
+                for item in _remote_get("/api/models").get("models", [])
+            }
+            return [
+                model_key  # type: ignore[misc]
+                for model_key in model_keys
+                if not models.get(model_key, {}).get("is_ready")
+            ]
+        except Exception as exc:
+            logger.warning("Remote model readiness check failed", extra={"model_server_url": MODEL_SERVER_URL, "error": str(exc)})
+            return list(model_keys)  # type: ignore[return-value]
     missing: list[ModelKey] = []
     with _MODEL_LOCK:
         for model_key in model_keys:
@@ -160,6 +236,13 @@ def missing_model_keys(model_keys: list[str]) -> list[ModelKey]:
 
 
 def get_install_job(job_id: str) -> dict[str, Any] | None:
+    if is_remote_inference_enabled():
+        try:
+            return _remote_get(f"/api/models/install/{job_id}")
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
     with _MODEL_LOCK:
         job = _INSTALL_JOBS.get(job_id)
         return deepcopy(job) if job else None
@@ -216,7 +299,16 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     if runtime["handle"] is not None and runtime["loaded_path"] == str(source_path):
         return
 
+    if model_key == "face_recognition":
+        # InsightFace owns its own runtime and lazy-loads in face_recognition.py.
+        # The model manager only tracks whether the expected model directory exists.
+        runtime["handle"] = "insightface"
+        runtime["loaded_path"] = str(source_path)
+        runtime["current_classes"] = []
+        return
+
     from config_manager import get_config
+    from ultralytics import YOLO
 
     device = get_config()["global"]["device"]
     dummy = np.zeros((320, 320, 3), dtype=np.uint8)
@@ -275,6 +367,9 @@ def _asset_keys_for_models(model_keys: list[ModelKey]) -> list[str]:
 
 
 def install_models(model_keys: list[str]) -> dict[str, Any]:
+    if is_remote_inference_enabled():
+        return _remote_post("/api/models/install", {"model_keys": model_keys})
+
     normalized_keys: list[ModelKey] = []
     for raw_key in model_keys:
         if raw_key in MODEL_DEFINITIONS and raw_key not in normalized_keys:
@@ -323,10 +418,14 @@ def retry_install_job(job_id: str) -> dict[str, Any]:
     job = get_install_job(job_id)
     if not job:
         raise KeyError("Install job not found")
+    if is_remote_inference_enabled():
+        return _remote_post(f"/api/models/install/{job_id}/retry", {})
     return install_models(job.get("model_keys", []))
 
 
 def _download_asset(job_id: str, model_key: ModelKey, destination: Path, url: str, asset_index: int, asset_count: int) -> Path:
+    if not url:
+        raise RuntimeError(f"Model {model_key} must be installed manually at {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = destination.with_suffix(destination.suffix + ".part")
     _update_job(
@@ -457,3 +556,47 @@ def predict(
                 handle.to(device)
                 runtime["current_classes"] = requested_classes
         return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=imgsz)
+
+
+def _records_from_results(results) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not results or len(results) == 0:
+        return records
+    boxes = results[0].boxes
+    if boxes is None:
+        return records
+    for box in boxes:
+        records.append({
+            "class_id": int(box.cls[0]),
+            "confidence": float(box.conf[0]),
+            "bbox": list(map(int, box.xyxy[0])),
+        })
+    return records
+
+
+def predict_records(
+    model_key: ModelKey,
+    frame,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if is_remote_inference_enabled():
+        ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError("Could not encode frame for remote inference")
+        payload = {
+            "model_key": model_key,
+            "frame_jpeg_b64": base64.b64encode(buffer.tobytes()).decode("ascii"),
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": classes or [],
+        }
+        return _remote_post("/api/infer", payload).get("detections", [])
+
+    return _records_from_results(
+        predict(model_key, frame, conf=conf, device=device, imgsz=imgsz, classes=classes)
+    )

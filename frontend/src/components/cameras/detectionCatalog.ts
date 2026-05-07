@@ -149,6 +149,15 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     matchTerms: ["fire", "smoke", "flames"],
     profileHints: ["demo_advanced"],
   },
+  {
+    key: "face_recognition",
+    label: "Face Recognition",
+    description: "Recognize enrolled people on access-control cameras.",
+    group: "Advanced",
+    preferredRuleIds: [],
+    matchTerms: ["face recognition", "face"],
+    profileHints: ["demo_advanced"],
+  },
 ]
 
 const LEGACY_ALERT_TO_KEY: Partial<Record<string, CapabilityKey>> = {
@@ -185,6 +194,7 @@ const CLASS_TO_KEY: Partial<Record<string, CapabilityKey>> = {
   fire: "fire_smoke",
   smoke: "fire_smoke",
   flames: "fire_smoke",
+  "face recognition": "face_recognition",
 }
 
 function normalizeText(value: string) {
@@ -217,10 +227,11 @@ export function getDetectionCatalog() {
 export function getDetectionOptions(rules: SafetyRule[]): CameraDetectionOption[] {
   return DETECTION_CATALOG.map((definition) => {
     const rule = findRuleForDetection(definition, rules)
+    const availableWithoutRule = definition.preferredRuleIds.length === 0
     return {
       ...definition,
       ruleId: rule?.id || null,
-      available: Boolean(rule),
+      available: availableWithoutRule || Boolean(rule),
     }
   })
 }
@@ -389,4 +400,3 @@ export function cameraNeedsLegacyNormalization(camera: CameraLike) {
 export function cameraHasDetectionModeMismatch(_camera: CameraLike, _rules: SafetyRule[]) {
   return false
 }
-
