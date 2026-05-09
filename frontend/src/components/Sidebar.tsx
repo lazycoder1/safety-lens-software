@@ -71,6 +71,7 @@ export function Sidebar() {
         label: "Analytics",
         items: [
           { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+          { to: "/reports", icon: FileText, label: "Reports" },
           { to: "/search", icon: Search, label: "AI Search" },
         ],
       },

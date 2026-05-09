@@ -1,9 +1,9 @@
 export const API_BASE =
-  import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`
+  import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' : `http://${window.location.hostname}:8000`)
 
 export const WS_BASE =
-  import.meta.env.VITE_WS_URL ||
-  `ws://${window.location.hostname}:8000`
+  import.meta.env.VITE_WS_URL ??
+  (import.meta.env.DEV ? `ws://${window.location.hostname}:${window.location.port}` : `ws://${window.location.hostname}:8000`)
 
 import { reportError } from "@/lib/errorReporter"
 
@@ -221,6 +221,81 @@ export async function fetchTelegramGroups(bot_token: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bot_token }),
   })
+}
+
+// Email config
+export async function updateEmailConfig(settings: Record<string, any>) {
+  return request("/api/config/email", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function testEmailConfig() {
+  return request("/api/config/email/test", { method: "POST" })
+}
+
+// Webhook config
+export async function updateWebhookConfig(settings: Record<string, any>) {
+  return request("/api/config/webhook", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function testWebhookConfig() {
+  return request("/api/config/webhook/test", { method: "POST" })
+}
+
+// Alert routing config
+export async function updateAlertRouting(settings: Record<string, any>) {
+  return request("/api/config/alert-routing", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function testAlertRouting(config: Record<string, any>) {
+  return request("/api/config/alert-routing/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  })
+}
+
+// Scheduled reports config
+export async function getScheduledReportsConfig() {
+  return request("/api/config/scheduled-reports")
+}
+
+export async function updateScheduledReportsConfig(settings: Record<string, any>) {
+  return request("/api/config/scheduled-reports", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })
+}
+
+// PDF report download
+export function downloadPdfReport(start: string, end: string, severity?: string, cameraId?: string) {
+  const params = new URLSearchParams({ start, end })
+  if (severity) params.set("severity", severity)
+  if (cameraId) params.set("cameraId", cameraId)
+  const token = getToken()
+  return fetch(`${API_BASE}/api/reports/pdf?${params}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+    .then((res) => res.blob())
+    .then((blob) => {
+      const a = document.createElement("a")
+      a.href = URL.createObjectURL(blob)
+      a.download = `safetylens-report-${start}-to-${end}.pdf`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    })
 }
 
 export async function getAlertTimeSeries(hours: number = 24, cameraId?: string) {
@@ -542,6 +617,21 @@ export async function markFalsePositive(id: string) {
   return request(`/api/alerts/${id}/false-positive`, { method: "PUT" })
 }
 
+// False negative reports
+export async function reportFalseNegative(payload: {
+  cameraId: string
+  zone: string
+  missedType: string
+  timestamp: string
+  notes: string
+}) {
+  return request("/api/alerts/false-negative", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
 // Safety Rules
 import type { EngineRule, ModelInstallJob, ModelStatus, SafetyRule } from "@/types"
 
@@ -687,4 +777,64 @@ export async function uploadLicense(file: File): Promise<LicenseStatusResponse> 
 
 export async function uploadHeartbeat(file: File): Promise<LicenseStatusResponse> {
   return uploadLicenseFile("/api/license/heartbeat", file)
+}
+
+// ── Search & Heatmap ────────────────────────────────────────────────────
+
+export async function searchAlerts(params: {
+  q?: string
+  cameraId?: string
+  severity?: string
+  detectionClass?: string
+  timeRange?: string
+  sort?: "relevance" | "recent"
+  limit?: number
+  offset?: number
+}): Promise<{ results: any[]; total: number; limit: number; offset: number }> {
+  const qs = new URLSearchParams()
+  if (params.q) qs.set("q", params.q)
+  if (params.cameraId) qs.set("cameraId", params.cameraId)
+  if (params.severity) qs.set("severity", params.severity)
+  if (params.detectionClass) qs.set("detectionClass", params.detectionClass)
+  if (params.timeRange) qs.set("timeRange", params.timeRange)
+  if (params.sort) qs.set("sort", params.sort)
+  if (params.limit !== undefined) qs.set("limit", String(params.limit))
+  if (params.offset !== undefined) qs.set("offset", String(params.offset))
+  return request(`/api/alerts/search?${qs}`)
+}
+
+export async function findSimilarAlerts(alertId: string, limit: number = 20): Promise<any[]> {
+  return request(`/api/alerts/${alertId}/similar?limit=${limit}`)
+}
+
+export async function getDetectionClasses(): Promise<string[]> {
+  return request("/api/alerts/detection-classes")
+}
+
+export async function getZoneTimeHeatmap(params: {
+  hours?: number
+  cameraId?: string
+  severity?: string
+  bucket?: "hour" | "day"
+}): Promise<{ zones: string[]; buckets: string[]; cells: { zone: string; bucket: string; count: number }[]; maxCount: number }> {
+  const qs = new URLSearchParams()
+  if (params.hours !== undefined) qs.set("hours", String(params.hours))
+  if (params.cameraId) qs.set("cameraId", params.cameraId)
+  if (params.severity) qs.set("severity", params.severity)
+  if (params.bucket) qs.set("bucket", params.bucket)
+  return request(`/api/alerts/heatmap/zone-time?${qs}`)
+}
+
+export async function getSpatialHeatmap(params: {
+  cameraId: string
+  hours?: number
+  severity?: string
+  gridSize?: number
+}): Promise<{ gridSize: number; cells: number[][]; maxCount: number; totalDetections: number }> {
+  const qs = new URLSearchParams()
+  qs.set("cameraId", params.cameraId)
+  if (params.hours !== undefined) qs.set("hours", String(params.hours))
+  if (params.severity) qs.set("severity", params.severity)
+  if (params.gridSize !== undefined) qs.set("gridSize", String(params.gridSize))
+  return request(`/api/alerts/heatmap/spatial?${qs}`)
 }

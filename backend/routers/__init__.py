@@ -18,6 +18,7 @@ from routers.license import router as license_router
 from routers.models import router as models_router
 from routers.misc import router as misc_router
 from routers.errors import router as errors_router
+from routers.reports import router as reports_router
 
 
 def register_routers(app: FastAPI):
@@ -35,3 +36,4 @@ def register_routers(app: FastAPI):
     app.include_router(models_router)
     app.include_router(misc_router)
     app.include_router(errors_router)
+    app.include_router(reports_router)

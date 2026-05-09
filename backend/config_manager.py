@@ -32,6 +32,55 @@ DEFAULT_CONFIG = {
         "chat_id": "",
         "severities": ["P1", "P2"],
     },
+    "email": {
+        "enabled": False,
+        "smtp_host": "",
+        "smtp_port": 587,
+        "smtp_user": "",
+        "smtp_pass": "",
+        "from_address": "",
+        "to_addresses": [],
+        "severities": ["P1", "P2"],
+    },
+    "webhook": {
+        "enabled": False,
+        "url": "",
+        "headers": {},
+        "severities": ["P1", "P2"],
+        "include_snapshot": False,
+    },
+    "alert_routing": {
+        "channel_matrix": {
+            "P1": {"inApp": True, "telegram": True, "email": True, "webhook": True, "whatsapp": False, "sms": False, "plc": False},
+            "P2": {"inApp": True, "telegram": True, "email": True, "webhook": True, "whatsapp": False, "sms": False, "plc": False},
+            "P3": {"inApp": True, "telegram": True, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
+            "P4": {"inApp": True, "telegram": False, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
+        },
+        "timeouts": {
+            "Fire/Smoke": {"dedupWindow": 0, "maxAlertsPerHr": 999, "autoResolve": 300, "toastDuration": 0},
+            "Person Fall": {"dedupWindow": 0, "maxAlertsPerHr": 999, "autoResolve": 300, "toastDuration": 0},
+            "Zone Intrusion": {"dedupWindow": 30, "maxAlertsPerHr": 60, "autoResolve": 600, "toastDuration": 10},
+            "Missing-Helmet": {"dedupWindow": 60, "maxAlertsPerHr": 30, "autoResolve": 900, "toastDuration": 10},
+            "Missing-Vest": {"dedupWindow": 60, "maxAlertsPerHr": 30, "autoResolve": 900, "toastDuration": 10},
+            "Mobile Phone": {"dedupWindow": 60, "maxAlertsPerHr": 20, "autoResolve": 600, "toastDuration": 10},
+        },
+        "escalation_steps": [
+            {"id": 1, "afterMinutes": 3, "role": "Floor Manager", "channel": "telegram"},
+            {"id": 2, "afterMinutes": 10, "role": "Plant Manager", "channel": "email"},
+        ],
+        "templates": {
+            "email_subject": "[SafetyLens {severity}] {violation_type} detected at {zone}",
+            "email_body": "A safety violation has been detected:\n\nViolation: {violation_type}\nSeverity: {severity}\nCamera: {camera}\nZone: {zone}\nTime: {timestamp}\nConfidence: {confidence}\n\nThis is an automated alert from SafetyLens.",
+            "telegram_template": "*{severity} Alert*\n{violation_type} at {zone}\nCamera: {camera}\nTime: {timestamp}",
+        },
+    },
+    "scheduled_reports": {
+        "enabled": False,
+        "schedule": "weekly",
+        "day_of_week": 1,
+        "hour": 6,
+        "recipients": [],
+    },
     "global": {
         "target_fps": 6,
         "yolo_conf": 0.35,
@@ -154,6 +203,15 @@ def get_redacted_config() -> dict:
     telegram = config.get("telegram", {})
     if telegram.get("bot_token"):
         telegram["bot_token"] = "***redacted***"
+
+    email = config.get("email", {})
+    if email.get("smtp_pass"):
+        email["smtp_pass"] = "***redacted***"
+
+    webhook = config.get("webhook", {})
+    for header_key in list(webhook.get("headers", {}).keys()):
+        if "auth" in header_key.lower() or "token" in header_key.lower():
+            webhook["headers"][header_key] = "***redacted***"
 
     auth = config.get("auth", {})
     if auth.get("jwt_secret"):

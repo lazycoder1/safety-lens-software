@@ -26,13 +26,24 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { toast } from "sonner"
-import { getConfig, updateTelegramConfig, testTelegramConfig, fetchTelegramGroups } from "@/lib/api"
+import {
+  getConfig,
+  updateTelegramConfig,
+  testTelegramConfig,
+  fetchTelegramGroups,
+  updateEmailConfig,
+  testEmailConfig,
+  updateWebhookConfig,
+  testWebhookConfig,
+  updateAlertRouting,
+  testAlertRouting,
+} from "@/lib/api"
 
 /* ------------------------------------------------------------------ */
 /*  Types & constants                                                  */
 /* ------------------------------------------------------------------ */
 
-type Tab = "channels" | "timeouts" | "escalation"
+type Tab = "channels" | "timeouts" | "escalation" | "templates"
 
 type Channel = "inApp" | "telegram" | "whatsapp" | "sms" | "plc" | "emailDigest"
 
@@ -123,6 +134,33 @@ export function AlertRouting() {
   const [testResults, setTestResults] = useState<TestResult[] | null>(null)
   const [testRunning, setTestRunning] = useState(false)
 
+  /* Routing config dirty/save state */
+  const [routingDirty, setRoutingDirty] = useState(false)
+  const [routingSaving, setRoutingSaving] = useState(false)
+
+  /* Email config */
+  const [emEnabled, setEmEnabled] = useState(false)
+  const [emHost, setEmHost] = useState("")
+  const [emPort, setEmPort] = useState(587)
+  const [emUser, setEmUser] = useState("")
+  const [emPass, setEmPass] = useState("")
+  const [emFrom, setEmFrom] = useState("")
+  const [emTo, setEmTo] = useState("")
+  const [emSeverities, setEmSeverities] = useState<string[]>(["P1", "P2"])
+  const [emSaving, setEmSaving] = useState(false)
+  const [emTesting, setEmTesting] = useState(false)
+  const [emDirty, setEmDirty] = useState(false)
+
+  /* Webhook config */
+  const [whEnabled, setWhEnabled] = useState(false)
+  const [whUrl, setWhUrl] = useState("")
+  const [whHeaders, setWhHeaders] = useState("")
+  const [whSeverities, setWhSeverities] = useState<string[]>(["P1", "P2"])
+  const [whIncludeSnapshot, setWhIncludeSnapshot] = useState(false)
+  const [whSaving, setWhSaving] = useState(false)
+  const [whTesting, setWhTesting] = useState(false)
+  const [whDirty, setWhDirty] = useState(false)
+
   /* Telegram config */
   const [tgEnabled, setTgEnabled] = useState(false)
   const [tgBotToken, setTgBotToken] = useState("")
@@ -137,7 +175,7 @@ export function AlertRouting() {
   const [tgFetchingGroups, setTgFetchingGroups] = useState(false)
   const [showTgGuide, setShowTgGuide] = useState(false)
 
-  /* Load telegram config from backend */
+  /* Load all routing config from backend */
   useEffect(() => {
     getConfig()
       .then((cfg) => {
@@ -147,6 +185,38 @@ export function AlertRouting() {
         setTgChatId(tg.chat_id ?? "")
         setTgSeverities(tg.severities ?? ["P1", "P2"])
         tgLoaded.current = true
+
+        // Email config
+        const em = cfg.email || {}
+        setEmEnabled(em.enabled ?? false)
+        setEmHost(em.smtp_host ?? "")
+        setEmPort(em.smtp_port ?? 587)
+        setEmUser(em.smtp_user ?? "")
+        setEmPass(em.smtp_pass ?? "")
+        setEmFrom(em.from_address ?? "")
+        setEmTo((em.to_addresses ?? []).join(", "))
+        setEmSeverities(em.severities ?? ["P1", "P2"])
+
+        // Webhook config
+        const wh = cfg.webhook || {}
+        setWhEnabled(wh.enabled ?? false)
+        setWhUrl(wh.url ?? "")
+        setWhHeaders(wh.headers ? JSON.stringify(wh.headers, null, 2) : "")
+        setWhSeverities(wh.severities ?? ["P1", "P2"])
+        setWhIncludeSnapshot(wh.include_snapshot ?? false)
+
+        // Alert routing
+        const ar = cfg.alert_routing || {}
+        if (ar.channel_matrix) setChannelMatrix(ar.channel_matrix)
+        if (ar.timeouts) {
+          // Convert dict-based timeouts to array for the UI
+          const arr = Object.entries(ar.timeouts).map(([category, vals]: [string, any]) => ({
+            category,
+            ...vals,
+          }))
+          if (arr.length > 0) setTimeouts(arr)
+        }
+        if (ar.escalation_steps) setEscalationSteps(ar.escalation_steps)
       })
       .catch(() => {
         /* config endpoint unavailable — keep defaults */
@@ -243,6 +313,7 @@ export function AlertRouting() {
         [channel]: !prev[severity][channel],
       },
     }))
+    setRoutingDirty(true)
   }
 
   /* Timeouts */
@@ -250,6 +321,7 @@ export function AlertRouting() {
     setTimeouts((prev) =>
       prev.map((row, i) => (i === index ? { ...row, [field]: value } : row))
     )
+    setRoutingDirty(true)
   }
 
   /* Escalation */
@@ -265,16 +337,142 @@ export function AlertRouting() {
         channel: "WhatsApp",
       },
     ])
+    setRoutingDirty(true)
   }
 
   function removeEscalationStep(id: number) {
     setEscalationSteps((prev) => prev.filter((s) => s.id !== id))
+    setRoutingDirty(true)
   }
 
   function updateEscalationStep(id: number, field: keyof EscalationStep, value: string | number) {
     setEscalationSteps((prev) =>
       prev.map((s) => (s.id === id ? { ...s, [field]: value } : s))
     )
+    setRoutingDirty(true)
+  }
+
+  /* Save routing config (channel matrix, timeouts, escalation) */
+  async function saveRoutingConfig() {
+    setRoutingSaving(true)
+    try {
+      // Convert timeouts array to dict keyed by category
+      const timeoutsDict: Record<string, any> = {}
+      for (const t of timeouts) {
+        timeoutsDict[t.category] = {
+          dedupWindow: t.dedupWindow,
+          maxAlertsPerHr: t.maxAlertsPerHr,
+          autoResolve: t.autoResolve,
+          toastDuration: t.toastDuration,
+        }
+      }
+      await updateAlertRouting({
+        channel_matrix: channelMatrix,
+        timeouts: timeoutsDict,
+        escalation_steps: escalationSteps,
+      })
+      setRoutingDirty(false)
+      toast.success("Alert routing configuration saved")
+    } catch {
+      toast.error("Failed to save alert routing configuration")
+    } finally {
+      setRoutingSaving(false)
+    }
+  }
+
+  /* Save email config */
+  async function saveEmailConfig() {
+    setEmSaving(true)
+    try {
+      await updateEmailConfig({
+        enabled: emEnabled,
+        smtp_host: emHost,
+        smtp_port: emPort,
+        smtp_user: emUser,
+        smtp_pass: emPass,
+        from_address: emFrom,
+        to_addresses: emTo.split(",").map((s) => s.trim()).filter(Boolean),
+        severities: emSeverities,
+      })
+      setEmDirty(false)
+      toast.success("Email configuration saved")
+    } catch {
+      toast.error("Failed to save email configuration")
+    } finally {
+      setEmSaving(false)
+    }
+  }
+
+  async function handleTestEmail() {
+    if (!emHost || !emFrom || !emTo) {
+      toast.error("Configure SMTP host, from address, and recipients first")
+      return
+    }
+    if (emDirty) await saveEmailConfig()
+    setEmTesting(true)
+    try {
+      const result = await testEmailConfig()
+      if (result.ok) {
+        toast.success("Test email sent — check your inbox")
+      } else {
+        toast.error(`Email test failed: ${result.error}`)
+      }
+    } catch {
+      toast.error("Could not reach the server")
+    } finally {
+      setEmTesting(false)
+    }
+  }
+
+  /* Save webhook config */
+  async function saveWebhookConfig() {
+    setWhSaving(true)
+    try {
+      let headers = {}
+      if (whHeaders.trim()) {
+        try {
+          headers = JSON.parse(whHeaders)
+        } catch {
+          toast.error("Webhook headers must be valid JSON")
+          setWhSaving(false)
+          return
+        }
+      }
+      await updateWebhookConfig({
+        enabled: whEnabled,
+        url: whUrl,
+        headers,
+        severities: whSeverities,
+        include_snapshot: whIncludeSnapshot,
+      })
+      setWhDirty(false)
+      toast.success("Webhook configuration saved")
+    } catch {
+      toast.error("Failed to save webhook configuration")
+    } finally {
+      setWhSaving(false)
+    }
+  }
+
+  async function handleTestWebhook() {
+    if (!whUrl) {
+      toast.error("Configure a webhook URL first")
+      return
+    }
+    if (whDirty) await saveWebhookConfig()
+    setWhTesting(true)
+    try {
+      const result = await testWebhookConfig()
+      if (result.ok) {
+        toast.success("Test payload sent to webhook")
+      } else {
+        toast.error(`Webhook test failed: ${result.error}`)
+      }
+    } catch {
+      toast.error("Could not reach the server")
+    } finally {
+      setWhTesting(false)
+    }
   }
 
   /* Test alert */
@@ -285,7 +483,7 @@ export function AlertRouting() {
     }))
   }
 
-  function fireTestAlert() {
+  async function fireTestAlert() {
     setTestRunning(true)
     setTestResults(null)
 
@@ -293,28 +491,36 @@ export function AlertRouting() {
       .filter(([, v]) => v)
       .map(([k]) => k)
 
-    // Simulate async test
-    setTimeout(() => {
+    try {
+      const result = await testAlertRouting({
+        severity: testConfig.severity,
+        rule: "Test Alert",
+        cameraName: "Test Camera",
+        zone: "Test Zone",
+      })
       const results: TestResult[] = selectedChannels.map((ch) => ({
         channel: channelLabels[ch],
-        success: true, // simulated delivery for demo
+        success: result.ok ?? true,
       }))
       setTestResults(results)
-      setTestRunning(false)
 
-      const allOk = results.every((r) => r.success)
-      if (allOk) {
-        toast.success("Test alert delivered to all channels")
+      if (result.ok) {
+        toast.success("Test alert dispatched to configured channels")
       } else {
-        toast.error("Some channels failed delivery")
+        toast.error("Test alert dispatch failed")
       }
-    }, 1500)
+    } catch {
+      toast.error("Could not reach the server")
+    } finally {
+      setTestRunning(false)
+    }
   }
 
   const tabs: { key: Tab; label: string; icon: React.ElementType }[] = [
     { key: "channels", label: "Channels", icon: Send },
     { key: "timeouts", label: "Timeouts", icon: Clock },
     { key: "escalation", label: "Escalation", icon: ArrowUpRight },
+    { key: "templates", label: "Templates", icon: Settings2 },
   ]
 
   return (
@@ -420,6 +626,25 @@ export function AlertRouting() {
                     })}
                   </tbody>
                 </table>
+              </div>
+              <div className="flex items-center gap-3 px-4 py-3 border-t">
+                <Button
+                  size="sm"
+                  onClick={saveRoutingConfig}
+                  disabled={routingSaving || !routingDirty}
+                >
+                  {routingSaving ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Save Channel Matrix"
+                  )}
+                </Button>
+                {routingDirty && (
+                  <span className="text-xs text-[var(--color-warning)]">Unsaved changes</span>
+                )}
               </div>
             </Card>
 
@@ -628,6 +853,161 @@ export function AlertRouting() {
                 </div>
               </div>
             </Card>
+
+            {/* Email Setup */}
+            <Card>
+              <div className="flex items-center gap-2 mb-4">
+                <Settings2 size={16} className="text-[var(--color-text-secondary)]" />
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                  Email Setup
+                </h3>
+                <span className="text-xs text-[var(--color-text-tertiary)]">
+                  Send alert emails via SMTP
+                </span>
+              </div>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Enabled</label>
+                    <p className="text-xs text-[var(--color-text-tertiary)]">Send alerts via email when triggered</p>
+                  </div>
+                  <button
+                    onClick={() => { setEmEnabled((v) => !v); setEmDirty(true) }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${emEnabled ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${emEnabled ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">SMTP Host</label>
+                    <input type="text" value={emHost} onChange={(e) => { setEmHost(e.target.value); setEmDirty(true) }} placeholder="smtp.gmail.com" className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">SMTP Port</label>
+                    <input type="number" value={emPort} onChange={(e) => { setEmPort(Number(e.target.value)); setEmDirty(true) }} className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">SMTP User</label>
+                    <input type="text" value={emUser} onChange={(e) => { setEmUser(e.target.value); setEmDirty(true) }} placeholder="user@example.com" className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">SMTP Password</label>
+                    <input type="password" value={emPass} onChange={(e) => { setEmPass(e.target.value); setEmDirty(true) }} placeholder="App password" className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">From Address</label>
+                  <input type="email" value={emFrom} onChange={(e) => { setEmFrom(e.target.value); setEmDirty(true) }} placeholder="alerts@yourcompany.com" className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">Recipients</label>
+                  <input type="text" value={emTo} onChange={(e) => { setEmTo(e.target.value); setEmDirty(true) }} placeholder="safety@company.com, manager@company.com" className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                  <p className="text-[11px] text-[var(--color-text-tertiary)]">Comma-separated email addresses</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">Alert Severities</label>
+                  <div className="flex gap-2">
+                    {severities.map((sev) => {
+                      const sevCfg = severityConfig[sev]
+                      const active = emSeverities.includes(sev)
+                      return (
+                        <button key={sev} onClick={() => { setEmSeverities((prev) => prev.includes(sev) ? prev.filter((s) => s !== sev) : [...prev, sev]); setEmDirty(true) }}
+                          className={cn("flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-xs font-medium transition-colors cursor-pointer border", active ? "border-current" : "border-transparent bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]")}
+                          style={active ? { backgroundColor: sevCfg.bg, color: sevCfg.textColor } : undefined}
+                        >
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: sevCfg.color }} />
+                          {sev}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 pt-2 border-t">
+                  <Button size="sm" onClick={saveEmailConfig} disabled={emSaving || !emDirty}>
+                    {emSaving ? (<><Loader2 size={14} className="animate-spin" />Saving...</>) : "Save"}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={handleTestEmail} disabled={emTesting || !emHost || !emFrom}>
+                    {emTesting ? (<><Loader2 size={14} className="animate-spin" />Testing...</>) : (<><Send size={14} />Test Connection</>)}
+                  </Button>
+                </div>
+              </div>
+            </Card>
+
+            {/* Webhook Setup */}
+            <Card>
+              <div className="flex items-center gap-2 mb-4">
+                <Settings2 size={16} className="text-[var(--color-text-secondary)]" />
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                  Webhook Setup
+                </h3>
+                <span className="text-xs text-[var(--color-text-tertiary)]">
+                  POST alert JSON to an external endpoint
+                </span>
+              </div>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Enabled</label>
+                    <p className="text-xs text-[var(--color-text-tertiary)]">Send alert payloads to webhook URL</p>
+                  </div>
+                  <button
+                    onClick={() => { setWhEnabled((v) => !v); setWhDirty(true) }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${whEnabled ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${whEnabled ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">Webhook URL</label>
+                  <input type="url" value={whUrl} onChange={(e) => { setWhUrl(e.target.value); setWhDirty(true) }} placeholder="https://hooks.example.com/safetylens" className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0" />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">Headers (JSON)</label>
+                  <textarea rows={3} value={whHeaders} onChange={(e) => { setWhHeaders(e.target.value); setWhDirty(true) }} placeholder='{"Authorization": "Bearer token"}' className="w-full px-3 py-2 text-sm font-mono rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 resize-y" />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Include Snapshot</label>
+                    <p className="text-xs text-[var(--color-text-tertiary)]">Attach base64-encoded snapshot in payload</p>
+                  </div>
+                  <button
+                    onClick={() => { setWhIncludeSnapshot((v) => !v); setWhDirty(true) }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${whIncludeSnapshot ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${whIncludeSnapshot ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-[var(--color-text-primary)]">Alert Severities</label>
+                  <div className="flex gap-2">
+                    {severities.map((sev) => {
+                      const sevCfg = severityConfig[sev]
+                      const active = whSeverities.includes(sev)
+                      return (
+                        <button key={sev} onClick={() => { setWhSeverities((prev) => prev.includes(sev) ? prev.filter((s) => s !== sev) : [...prev, sev]); setWhDirty(true) }}
+                          className={cn("flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-xs font-medium transition-colors cursor-pointer border", active ? "border-current" : "border-transparent bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]")}
+                          style={active ? { backgroundColor: sevCfg.bg, color: sevCfg.textColor } : undefined}
+                        >
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: sevCfg.color }} />
+                          {sev}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 pt-2 border-t">
+                  <Button size="sm" onClick={saveWebhookConfig} disabled={whSaving || !whDirty}>
+                    {whSaving ? (<><Loader2 size={14} className="animate-spin" />Saving...</>) : "Save"}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={handleTestWebhook} disabled={whTesting || !whUrl}>
+                    {whTesting ? (<><Loader2 size={14} className="animate-spin" />Testing...</>) : (<><Send size={14} />Test Connection</>)}
+                  </Button>
+                </div>
+              </div>
+            </Card>
           </div>
         )}
 
@@ -714,6 +1094,14 @@ export function AlertRouting() {
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div className="flex items-center gap-3 px-4 py-3 border-t">
+              <Button size="sm" onClick={saveRoutingConfig} disabled={routingSaving || !routingDirty}>
+                {routingSaving ? (<><Loader2 size={14} className="animate-spin" />Saving...</>) : "Save Timeouts"}
+              </Button>
+              {routingDirty && (
+                <span className="text-xs text-[var(--color-warning)]">Unsaved changes</span>
+              )}
             </div>
           </Card>
         )}
@@ -807,14 +1195,27 @@ export function AlertRouting() {
                 ))}
               </div>
 
-              <div className="mt-4">
+              <div className="mt-4 flex items-center gap-3">
                 <Button variant="secondary" size="sm" onClick={addEscalationStep}>
                   <Plus size={14} />
                   Add Step
                 </Button>
+                <Button size="sm" onClick={saveRoutingConfig} disabled={routingSaving || !routingDirty}>
+                  {routingSaving ? (<><Loader2 size={14} className="animate-spin" />Saving...</>) : "Save Escalation"}
+                </Button>
+                {routingDirty && (
+                  <span className="text-xs text-[var(--color-warning)]">Unsaved changes</span>
+                )}
               </div>
             </Card>
           </div>
+        )}
+
+        {/* ============================================================ */}
+        {/*  TEMPLATES TAB                                                */}
+        {/* ============================================================ */}
+        {activeTab === "templates" && (
+          <TemplatesTab />
         )}
       </div>
 
@@ -1168,6 +1569,141 @@ export function AlertRouting() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+
+/* ================================================================== */
+/*  Templates Tab                                                      */
+/* ================================================================== */
+
+const TEMPLATE_VARIABLES = [
+  { var: "{violation_type}", desc: "Type of violation (e.g. No Helmet)" },
+  { var: "{severity}", desc: "Alert severity (P1-P4)" },
+  { var: "{camera}", desc: "Camera name" },
+  { var: "{zone}", desc: "Zone name" },
+  { var: "{timestamp}", desc: "Detection timestamp" },
+  { var: "{confidence}", desc: "Detection confidence %" },
+  { var: "{alert_id}", desc: "Unique alert ID" },
+  { var: "{alert_link}", desc: "Link to alert detail page" },
+]
+
+function TemplatesTab() {
+  const [emailSubject, setEmailSubject] = useState(
+    "[SafetyLens {severity}] {violation_type} detected at {zone}"
+  )
+  const [emailBody, setEmailBody] = useState(
+    `A safety violation has been detected:\n\nViolation: {violation_type}\nSeverity: {severity}\nCamera: {camera}\nZone: {zone}\nTime: {timestamp}\nConfidence: {confidence}\n\nView details: {alert_link}\n\nThis is an automated alert from SafetyLens PPE Compliance System.`
+  )
+  const [telegramTemplate, setTelegramTemplate] = useState(
+    `🚨 *{severity} Alert*\n{violation_type} at {zone}\nCamera: {camera}\nTime: {timestamp}\n[View Alert]({alert_link})`
+  )
+  const [saved, setSaved] = useState(false)
+
+  async function handleSave() {
+    try {
+      await updateAlertRouting({
+        templates: {
+          email_subject: emailSubject,
+          email_body: emailBody,
+          telegram_template: telegramTemplate,
+        },
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+      toast.success("Templates saved")
+    } catch {
+      toast.error("Failed to save templates")
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <div className="flex items-center gap-2 mb-4">
+          <Settings2 size={16} className="text-[var(--color-text-secondary)]" />
+          <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
+            Message Templates
+          </h3>
+          <p className="text-xs text-[var(--color-text-tertiary)] ml-auto">
+            Customize alert messages sent via email and Telegram
+          </p>
+        </div>
+
+        {/* Available variables */}
+        <div className="mb-5 p-3 rounded-[var(--radius-md)] bg-[var(--color-bg-secondary)] border">
+          <p className="text-xs font-medium text-[var(--color-text-secondary)] mb-2">
+            Available Variables
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {TEMPLATE_VARIABLES.map((v) => (
+              <span
+                key={v.var}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border text-xs font-mono text-[var(--color-text-primary)]"
+                title={v.desc}
+              >
+                {v.var}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-5">
+          {/* Email subject */}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">
+              Email Subject
+            </label>
+            <input
+              type="text"
+              value={emailSubject}
+              onChange={(e) => setEmailSubject(e.target.value)}
+              className="w-full px-3 py-2 text-sm font-mono rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+            />
+          </div>
+
+          {/* Email body */}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">
+              Email Body
+            </label>
+            <textarea
+              rows={8}
+              value={emailBody}
+              onChange={(e) => setEmailBody(e.target.value)}
+              className="w-full px-3 py-2 text-sm font-mono rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 resize-y"
+            />
+          </div>
+
+          {/* Telegram template */}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">
+              Telegram Message
+            </label>
+            <textarea
+              rows={5}
+              value={telegramTemplate}
+              onChange={(e) => setTelegramTemplate(e.target.value)}
+              className="w-full px-3 py-2 text-sm font-mono rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 resize-y"
+            />
+            <p className="text-[11px] text-[var(--color-text-tertiary)]">
+              Supports Markdown formatting: *bold*, _italic_, [link](url)
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3 pt-2">
+            <Button variant="primary" size="sm" onClick={handleSave}>
+              Save Templates
+            </Button>
+            {saved && (
+              <span className="text-xs text-[var(--color-success)] font-medium animate-pulse">
+                Saved
+              </span>
+            )}
+          </div>
+        </div>
+      </Card>
     </div>
   )
 }

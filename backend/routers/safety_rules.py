@@ -33,6 +33,7 @@ DEFAULT_SAFETY_RULES = [
     {"id": "alert_vehicle", "name": "Vehicle Detected", "type": "alert", "classes": ["truck", "car", "motorcycle"], "model": "yolo", "severity": "P4", "enabled": True},
     {"id": "alert_zone_intrusion", "name": "Zone Intrusion", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P1", "enabled": True, "threshold": 6},
     {"id": "alert_fire_smoke", "name": "Fire / Smoke", "type": "alert", "classes": ["fire", "smoke", "flames"], "model": "yoloe", "severity": "P1", "enabled": True, "threshold": 2},
+    {"id": "alert_fall_detection", "name": "Fall Detected", "type": "alert", "classes": ["person_fall"], "model": "pose", "severity": "P1", "enabled": True, "threshold": 8},
 ]
 
 # Default alert rule IDs (for migration)

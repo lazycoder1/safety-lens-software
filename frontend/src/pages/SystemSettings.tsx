@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Card } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { getConfig, updateGlobalConfig, updateVlmConfig, updateTelegramConfig, testTelegramConfig } from "@/lib/api"
+import { getConfig, updateGlobalConfig, updateVlmConfig, updateTelegramConfig, testTelegramConfig, updateEmailConfig, testEmailConfig } from "@/lib/api"
 
 export function SystemSettings() {
   const [global, setGlobal] = useState({
@@ -30,11 +30,25 @@ export function SystemSettings() {
   })
   const [telegramTest, setTelegramTest] = useState<{ status: string; message?: string } | null>(null)
 
+  const [email, setEmail] = useState({
+    enabled: false,
+    smtp_host: "",
+    smtp_port: 587,
+    smtp_tls: true,
+    smtp_user: "",
+    smtp_pass: "",
+    from_address: "",
+    recipients: "" as string,
+    severities: ["P1", "P2"] as string[],
+  })
+  const [emailTest, setEmailTest] = useState<{ status: string; message?: string } | null>(null)
+
   const [configLoaded, setConfigLoaded] = useState(false)
   const [saved, setSaved] = useState(false)
   const globalTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const vlmTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const telegramTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const emailTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   useEffect(() => {
     getConfig()
@@ -53,6 +67,15 @@ export function SystemSettings() {
         }
         if (cfg.telegram) {
           setTelegram((prev) => ({ ...prev, ...cfg.telegram }))
+        }
+        if (cfg.email) {
+          setEmail((prev) => ({
+            ...prev,
+            ...cfg.email,
+            recipients: Array.isArray(cfg.email.recipients)
+              ? cfg.email.recipients.join(", ")
+              : cfg.email.recipients || "",
+          }))
         }
         setConfigLoaded(true)
       })
@@ -96,6 +119,40 @@ export function SystemSettings() {
     telegramTimer.current = setTimeout(() => {
       updateTelegramConfig(next).then(flash).catch(() => {})
     }, 500)
+  }
+
+  function patchEmail(patch: Partial<typeof email>) {
+    const next = { ...email, ...patch }
+    setEmail(next)
+    clearTimeout(emailTimer.current)
+    emailTimer.current = setTimeout(() => {
+      const payload: any = { ...next }
+      if (typeof payload.recipients === "string") {
+        payload.recipients = payload.recipients
+          .split(",")
+          .map((r: string) => r.trim())
+          .filter(Boolean)
+      }
+      updateEmailConfig(payload).then(flash).catch(() => {})
+    }, 500)
+  }
+
+  function toggleEmailSeverity(sev: string) {
+    const current = email.severities
+    const next = current.includes(sev)
+      ? current.filter((s) => s !== sev)
+      : [...current, sev]
+    patchEmail({ severities: next })
+  }
+
+  async function handleTestEmail() {
+    setEmailTest({ status: "testing" })
+    try {
+      const result = await testEmailConfig()
+      setEmailTest(result.ok ? { status: "ok" } : { status: "error", message: result.error })
+    } catch (e: any) {
+      setEmailTest({ status: "error", message: e.message })
+    }
   }
 
   function toggleSeverity(sev: string) {
@@ -354,6 +411,147 @@ export function SystemSettings() {
             {telegramTest?.status === "error" && (
               <span className="text-xs text-[var(--color-critical)] font-medium">
                 {telegramTest.message || "Failed"}
+              </span>
+            )}
+          </div>
+        </div>
+      </Card>
+      {/* Email Alerts */}
+      <Card>
+        <h2 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">Email Alerts</h2>
+        <div className="space-y-5">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Enabled</label>
+            <button
+              onClick={() => patchEmail({ enabled: !email.enabled })}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                email.enabled ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                  email.enabled ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">SMTP Host</label>
+              <input
+                type="text"
+                value={email.smtp_host}
+                onChange={(e) => patchEmail({ smtp_host: e.target.value })}
+                placeholder="smtp.example.com"
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">SMTP Port</label>
+              <input
+                type="number"
+                value={email.smtp_port}
+                onChange={(e) => patchEmail({ smtp_port: Number(e.target.value) })}
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Use TLS</label>
+            <button
+              onClick={() => patchEmail({ smtp_tls: !email.smtp_tls })}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                email.smtp_tls ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                  email.smtp_tls ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">Username</label>
+              <input
+                type="text"
+                value={email.smtp_user}
+                onChange={(e) => patchEmail({ smtp_user: e.target.value })}
+                placeholder="user@example.com"
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">Password</label>
+              <input
+                type="password"
+                value={email.smtp_pass}
+                onChange={(e) => patchEmail({ smtp_pass: e.target.value })}
+                placeholder="App password"
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">From Address</label>
+            <input
+              type="email"
+              value={email.from_address}
+              onChange={(e) => patchEmail({ from_address: e.target.value })}
+              placeholder="safety-alerts@mrpl.co.in"
+              className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Recipients (comma-separated)</label>
+            <textarea
+              rows={2}
+              value={email.recipients}
+              onChange={(e) => patchEmail({ recipients: e.target.value })}
+              placeholder="safety-officer@mrpl.co.in, plant-manager@mrpl.co.in"
+              className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 resize-y"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Alert Severities</label>
+            <div className="flex gap-2">
+              {["P1", "P2", "P3", "P4"].map((sev) => (
+                <button
+                  key={sev}
+                  onClick={() => toggleEmailSeverity(sev)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-[var(--radius-md)] border cursor-pointer transition-colors ${
+                    email.severities.includes(sev)
+                      ? "bg-[var(--color-text-primary)] text-white border-transparent"
+                      : "bg-white text-[var(--color-text-secondary)] border-[var(--color-border)]"
+                  }`}
+                >
+                  {sev}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleTestEmail}
+              disabled={!email.smtp_host || !email.from_address || !email.recipients}
+              className="px-4 py-2 text-sm font-medium rounded-[var(--radius-md)] bg-[var(--color-info)] text-white disabled:opacity-40 cursor-pointer hover:opacity-90 transition-opacity"
+            >
+              {emailTest?.status === "testing" ? "Sending..." : "Send Test Email"}
+            </button>
+            {emailTest?.status === "ok" && (
+              <span className="text-xs text-[var(--color-success)] font-medium">Email sent</span>
+            )}
+            {emailTest?.status === "error" && (
+              <span className="text-xs text-[var(--color-critical)] font-medium">
+                {emailTest.message || "Failed"}
               </span>
             )}
           </div>

@@ -53,6 +53,7 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_camera ON alerts(camera_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_bboxes_gin ON alerts USING gin(bboxes)")
         conn.commit()
     logger.info("Database initialized")
 
@@ -590,6 +591,283 @@ def _parse_iso_timestamp(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+# ── Search & Heatmap functions ────────────────────────────────────────────
+
+_TIME_RANGE_MAP = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
+
+
+def get_detection_classes() -> list[str]:
+    """Return distinct detected object class names from bboxes JSONB."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT elem->>'class' AS class_name
+                FROM alerts, jsonb_array_elements(bboxes) elem
+                WHERE elem->>'class' IS NOT NULL
+                ORDER BY class_name
+            """)
+            return [row[0] for row in cur.fetchall()]
+
+
+def search_alerts(
+    query: str | None = None,
+    camera_id: str | None = None,
+    severity: str | None = None,
+    detection_class: str | None = None,
+    time_range: str | None = None,
+    sort: str = "relevance",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """Search alerts with text matching and filters. Returns {results, total}."""
+    clauses: list[str] = ["1=1"]
+    params: list = []
+    has_text = bool(query and query.strip())
+
+    if has_text:
+        q = query.strip()
+        clauses.append("""(
+            description ILIKE %s
+            OR rule ILIKE %s
+            OR camera_name ILIKE %s
+            OR zone ILIKE %s
+            OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(bboxes) elem
+                WHERE elem->>'class' ILIKE %s
+            )
+        )""")
+        like = f"%{q}%"
+        params.extend([like, like, like, like, like])
+
+    if camera_id:
+        clauses.append("camera_id = %s")
+        params.append(camera_id)
+    if severity:
+        clauses.append("severity = %s")
+        params.append(severity)
+    if detection_class:
+        clauses.append("""EXISTS (
+            SELECT 1 FROM jsonb_array_elements(bboxes) elem
+            WHERE elem->>'class' ILIKE %s
+        )""")
+        params.append(f"%{detection_class}%")
+    if time_range and time_range in _TIME_RANGE_MAP:
+        since = (datetime.now(timezone.utc) - timedelta(hours=_TIME_RANGE_MAP[time_range])).isoformat()
+        clauses.append("timestamp >= %s")
+        params.append(since)
+
+    where = " AND ".join(clauses)
+
+    # Relevance scoring for text queries
+    if has_text:
+        q = query.strip()
+        like = f"%{q}%"
+        order_clause = """(
+            CASE WHEN description ILIKE %s THEN 3 ELSE 0 END
+            + CASE WHEN rule ILIKE %s THEN 2 ELSE 0 END
+            + CASE WHEN camera_name ILIKE %s THEN 2 ELSE 0 END
+            + CASE WHEN zone ILIKE %s THEN 1 ELSE 0 END
+            + CASE WHEN EXISTS (
+                SELECT 1 FROM jsonb_array_elements(bboxes) elem
+                WHERE elem->>'class' ILIKE %s
+            ) THEN 2 ELSE 0 END
+        ) DESC, timestamp DESC"""
+        order_params = [like, like, like, like, like]
+    else:
+        order_clause = "timestamp DESC"
+        order_params = []
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Count
+            cur.execute(f"SELECT COUNT(*) AS cnt FROM alerts WHERE {where}", params)
+            total = cur.fetchone()["cnt"]
+
+            # Results
+            if sort == "recent" or not has_text:
+                final_order = "timestamp DESC"
+                final_order_params = []
+            else:
+                final_order = order_clause
+                final_order_params = order_params
+
+            cur.execute(
+                f"SELECT * FROM alerts WHERE {where} ORDER BY {final_order} LIMIT %s OFFSET %s",
+                params + final_order_params + [limit, offset],
+            )
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        d = _row_to_dict(row)
+        # Extract detected classes from bboxes
+        classes = list({b.get("class", "") for b in d.get("bboxes", []) if b.get("class")})
+        d["detectedClasses"] = sorted(classes)
+        results.append(d)
+
+    return {"results": results, "total": total, "limit": limit, "offset": offset}
+
+
+def find_similar_alerts(alert_id: str, limit: int = 20) -> list[dict]:
+    """Find alerts similar to the given alert by rule+camera or shared detected classes."""
+    source = get_alert(alert_id)
+    if not source:
+        return []
+
+    rule = source["rule"]
+    camera_id = source["cameraId"]
+    classes = [b.get("class", "") for b in source.get("bboxes", []) if b.get("class")]
+
+    clauses = ["id != %s"]
+    params: list = [alert_id]
+
+    if classes:
+        clauses.append("""(
+            (rule = %s AND camera_id = %s)
+            OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(bboxes) elem
+                WHERE elem->>'class' = ANY(%s)
+            )
+        )""")
+        params.extend([rule, camera_id, classes])
+    else:
+        clauses.append("(rule = %s AND camera_id = %s)")
+        params.extend([rule, camera_id])
+
+    where = " AND ".join(clauses)
+    order = """CASE WHEN rule = %s AND camera_id = %s THEN 0 ELSE 1 END, timestamp DESC"""
+    order_params = [rule, camera_id]
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT * FROM alerts WHERE {where} ORDER BY {order} LIMIT %s",
+                params + order_params + [limit],
+            )
+            rows = cur.fetchall()
+
+    results = []
+    for row in rows:
+        d = _row_to_dict(row)
+        classes_list = list({b.get("class", "") for b in d.get("bboxes", []) if b.get("class")})
+        d["detectedClasses"] = sorted(classes_list)
+        results.append(d)
+    return results
+
+
+def get_zone_time_heatmap(
+    hours: int = 24,
+    camera_id: str | None = None,
+    severity: str | None = None,
+    bucket: str = "hour",
+) -> dict:
+    """Return zone × time-bucket aggregation for heatmap visualization."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    clauses = ["timestamp >= %s"]
+    params: list = [since]
+
+    if camera_id:
+        clauses.append("camera_id = %s")
+        params.append(camera_id)
+    if severity:
+        clauses.append("severity = %s")
+        params.append(severity)
+
+    where = " AND ".join(clauses)
+    trunc = "hour" if bucket == "hour" else "day"
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""SELECT zone, date_trunc(%s, timestamp::timestamp) AS bucket, COUNT(*) AS count
+                    FROM alerts WHERE {where}
+                    GROUP BY zone, bucket ORDER BY zone, bucket""",
+                [trunc] + params,
+            )
+            rows = cur.fetchall()
+
+    # Collect unique zones and buckets
+    zone_set: set[str] = set()
+    bucket_set: set[str] = set()
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        z = row["zone"]
+        b = row["bucket"].isoformat() if row["bucket"] else ""
+        zone_set.add(z)
+        bucket_set.add(b)
+        counts[(z, b)] = row["count"]
+
+    zones = sorted(zone_set)
+    buckets = sorted(bucket_set)
+
+    # Fill all zone×bucket combos including zeros
+    cells = []
+    max_count = 0
+    for z in zones:
+        for b in buckets:
+            c = counts.get((z, b), 0)
+            cells.append({"zone": z, "bucket": b, "count": c})
+            if c > max_count:
+                max_count = c
+
+    return {"zones": zones, "buckets": buckets, "cells": cells, "maxCount": max_count}
+
+
+def get_spatial_heatmap(
+    camera_id: str,
+    hours: int = 24,
+    severity: str | None = None,
+    grid_size: int = 10,
+) -> dict:
+    """Return detection density grid for a camera using bbox centers."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    clauses = ["camera_id = %s", "timestamp >= %s", "bboxes != '[]'::jsonb"]
+    params: list = [camera_id, since]
+
+    if severity:
+        clauses.append("severity = %s")
+        params.append(severity)
+
+    where = " AND ".join(clauses)
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"SELECT bboxes FROM alerts WHERE {where}", params)
+            rows = cur.fetchall()
+
+    # Build grid
+    grid = [[0] * grid_size for _ in range(grid_size)]
+    total_detections = 0
+
+    for row in rows:
+        raw = row["bboxes"]
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if not isinstance(raw, list):
+            continue
+        for det in raw:
+            bbox = det.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            # Clamp to 0-1 range (bboxes are normalized)
+            cx = max(0.0, min(cx, 0.999))
+            cy = max(0.0, min(cy, 0.999))
+            col = int(cx * grid_size)
+            row_idx = int(cy * grid_size)
+            grid[row_idx][col] += 1
+            total_detections += 1
+
+    max_count = max((max(r) for r in grid), default=0)
+    return {
+        "gridSize": grid_size,
+        "cells": grid,
+        "maxCount": max_count,
+        "totalDetections": total_detections,
+    }
 
 
 # ── Auto-resolve stale alerts ─────────────────────────────────────────────

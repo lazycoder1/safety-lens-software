@@ -14,9 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
-import requests
 
 from capability_registry import ALL_PPE_PROMPT_TERMS, ModelKey
 from constants import MODEL_SERVER_TIMEOUT_SECONDS, MODEL_SERVER_TOKEN, MODEL_SERVER_URL, PROJECT_ROOT
@@ -69,6 +67,16 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
         "warmup_behavior": "InsightFace SCRFD + ArcFace lazy load",
         "shared_asset_key": "insightface-buffalo-l",
     },
+    "pose_specialist": {
+        "model_key": "pose_specialist",
+        "display_name": "Pose Specialist",
+        "filename": "yolo11n-pose.pt",
+        "local_path": MODELS_ROOT / "pose_specialist" / "yolo11n-pose.pt",
+        "legacy_paths": [PROJECT_ROOT / "yolo11n-pose.pt"],
+        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-pose.pt",
+        "warmup_behavior": "Pose estimation warmup",
+        "shared_asset_key": "yolo11n-pose",
+    },
 }
 
 _DEFAULT_LONG_TAIL_PROMPTS = ["fire", "smoke", "flames"]
@@ -108,6 +116,7 @@ def _remote_headers() -> dict[str, str]:
 
 
 def _remote_get(path: str) -> dict[str, Any]:
+    import requests
     response = requests.get(
         f"{MODEL_SERVER_URL}{path}",
         headers=_remote_headers(),
@@ -118,6 +127,7 @@ def _remote_get(path: str) -> dict[str, Any]:
 
 
 def _remote_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    import requests
     response = requests.post(
         f"{MODEL_SERVER_URL}{path}",
         json=payload,
@@ -237,6 +247,7 @@ def missing_model_keys(model_keys: list[str]) -> list[ModelKey]:
 
 def get_install_job(job_id: str) -> dict[str, Any] | None:
     if is_remote_inference_enabled():
+        import requests
         try:
             return _remote_get(f"/api/models/install/{job_id}")
         except requests.HTTPError as exc:
@@ -311,14 +322,13 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     from ultralytics import YOLO
 
     device = get_config()["global"]["device"]
-    dummy = np.zeros((320, 320, 3), dtype=np.uint8)
 
-    if model_key == "coco_primary":
+    if model_key in ("coco_primary", "pose_specialist"):
         handle = YOLO(str(source_path))
-        handle.predict(dummy, verbose=False)
         runtime["handle"] = handle
         runtime["loaded_path"] = str(source_path)
         runtime["current_classes"] = []
+        runtime["warmed"] = False
         return
 
     local_model = _copy_to_local_fs(model_key, source_path)
@@ -330,10 +340,10 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
 
     _set_open_vocab_classes(handle, initial_classes)
     handle.to(device)
-    handle.predict(dummy, verbose=False, device=device)
     runtime["handle"] = handle
     runtime["loaded_path"] = str(source_path)
     runtime["current_classes"] = initial_classes
+    runtime["warmed"] = False
 
 
 def initialize() -> None:
@@ -346,6 +356,8 @@ def initialize() -> None:
         existing_path = _resolve_existing_path(model_key)
         if existing_path is None:
             continue
+        with _MODEL_LOCK:
+            _set_model_state(model_key, status="loading", error=None, active_path=existing_path, job_id=None)
         try:
             _load_runtime(model_key, existing_path)
             with _MODEL_LOCK:
@@ -424,6 +436,7 @@ def retry_install_job(job_id: str) -> dict[str, Any]:
 
 
 def _download_asset(job_id: str, model_key: ModelKey, destination: Path, url: str, asset_index: int, asset_count: int) -> Path:
+    import requests
     if not url:
         raise RuntimeError(f"Model {model_key} must be installed manually at {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -549,6 +562,10 @@ def predict(
         raise RuntimeError(f"Model {model_key} is not loaded")
 
     with runtime["lock"]:
+        if not runtime.get("warmed"):
+            dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+            handle.predict(dummy, verbose=False, device=device, imgsz=imgsz)
+            runtime["warmed"] = True
         if model_key != "coco_primary" and classes is not None:
             requested_classes = [value for value in classes if isinstance(value, str) and value]
             if runtime["current_classes"] != requested_classes:
@@ -584,6 +601,7 @@ def predict_records(
     classes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if is_remote_inference_enabled():
+        import cv2
         ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             raise RuntimeError("Could not encode frame for remote inference")

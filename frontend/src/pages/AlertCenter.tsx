@@ -16,6 +16,7 @@ import type { Severity, AlertStatus, Alert } from "@/types"
 import { useAlertStore } from "@/stores/alertStore"
 import { useAuthStore } from "@/stores/authStore"
 import { cn, timeAgo, formatTime } from "@/lib/utils"
+import { getCameras, reportFalseNegative } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { SeverityBadge } from "@/components/ui/SeverityBadge"
 import { StatusBadge } from "@/components/ui/StatusBadge"
@@ -47,10 +48,15 @@ export function AlertCenter() {
   const [sortField, setSortField] = useState<SortField>("timestamp")
   const [sortDir, setSortDir] = useState<SortDir>("desc")
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null)
+  const [showFnModal, setShowFnModal] = useState(false)
+  const [cameras, setCameras] = useState<{ id: string; name: string; zone: string }[]>([])
 
-  // Fetch alerts on mount
+  // Fetch alerts and cameras on mount
   useEffect(() => {
     fetchAlerts()
+    getCameras()
+      .then((cams: any[]) => setCameras(cams.map((c) => ({ id: c.id, name: c.name || c.id, zone: c.zone || "" }))))
+      .catch(() => {})
   }, [fetchAlerts])
 
   const toggleSev = useCallback((s: Severity) => {
@@ -215,6 +221,17 @@ export function AlertCenter() {
         <div className="px-6 pt-6 pb-4">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Alert Center</h1>
+            {canAct && (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="text-xs gap-1.5"
+                onClick={() => setShowFnModal(true)}
+              >
+                <AlertTriangle size={12} />
+                Report Missed Detection
+              </Button>
+            )}
           </div>
 
           {/* Filter bar */}
@@ -433,6 +450,18 @@ export function AlertCenter() {
           </div>
         </div>
       </div>
+
+      {/* False Negative Report Modal */}
+      {showFnModal && (
+        <FalseNegativeModal
+          cameras={cameras}
+          onClose={() => setShowFnModal(false)}
+          onSubmitted={() => {
+            setShowFnModal(false)
+            toast.success("Missed detection reported")
+          }}
+        />
+      )}
 
       {/* Detail slide-over panel */}
       {liveSelectedAlert && (
@@ -693,6 +722,124 @@ export function AlertCenter() {
           </div>}
         </div>
       )}
+    </div>
+  )
+}
+
+const PPE_TYPES = [
+  "Helmet",
+  "Safety Vest",
+  "Safety Goggles",
+  "Safety Boots",
+  "Face Mask",
+  "Gloves",
+  "Safety Harness",
+  "Hairnet",
+  "Apron",
+  "Other",
+]
+
+function FalseNegativeModal({
+  cameras,
+  onClose,
+  onSubmitted,
+}: {
+  cameras: { id: string; name: string; zone: string }[]
+  onClose: () => void
+  onSubmitted: () => void
+}) {
+  const [cameraId, setCameraId] = useState(cameras[0]?.id || "")
+  const [missedType, setMissedType] = useState(PPE_TYPES[0])
+  const [notes, setNotes] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  const selectedCam = cameras.find((c) => c.id === cameraId)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setSubmitting(true)
+    try {
+      await reportFalseNegative({
+        cameraId,
+        zone: selectedCam?.zone || "Unknown",
+        missedType,
+        timestamp: new Date().toISOString(),
+        notes,
+      })
+      onSubmitted()
+    } catch {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div className="bg-white rounded-[var(--radius-lg)] shadow-xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between px-5 py-4 border-b">
+          <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Report Missed Detection</h2>
+          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] cursor-pointer">
+            <X size={16} />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            Report a violation that the system failed to detect (false negative). This feedback helps improve detection accuracy.
+          </p>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Camera</label>
+            <select
+              value={cameraId}
+              onChange={(e) => setCameraId(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white cursor-pointer focus:outline-2 focus:outline-[var(--color-info)]"
+              required
+            >
+              {cameras.map((cam) => (
+                <option key={cam.id} value={cam.id}>
+                  {cam.name} ({cam.zone})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Missed PPE / Violation Type</label>
+            <select
+              value={missedType}
+              onChange={(e) => setMissedType(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white cursor-pointer focus:outline-2 focus:outline-[var(--color-info)]"
+              required
+            >
+              {PPE_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">Notes (optional)</label>
+            <textarea
+              rows={3}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Describe the missed detection..."
+              className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] resize-y"
+            />
+          </div>
+
+          <div className="flex gap-2 pt-2">
+            <Button type="button" variant="ghost" size="sm" className="flex-1" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" size="sm" className="flex-1" disabled={submitting}>
+              {submitting ? <Loader2 size={14} className="animate-spin" /> : null}
+              Submit Report
+            </Button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }

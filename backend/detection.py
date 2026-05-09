@@ -199,6 +199,188 @@ def apply_camera_overlay(
     return annotated
 
 
+# ── Fall / Man-Down detection (YOLO-pose) ──────────────────────────────────
+
+# COCO keypoint indices (17-point format)
+_KP_NOSE = 0
+_KP_LEFT_SHOULDER = 5
+_KP_RIGHT_SHOULDER = 6
+_KP_LEFT_HIP = 11
+_KP_RIGHT_HIP = 12
+_KP_LEFT_KNEE = 13
+_KP_RIGHT_KNEE = 14
+
+# Skeleton connections for visualization
+_SKELETON_PAIRS = [
+    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),  # arms
+    (5, 11), (6, 12), (11, 12),                  # torso
+    (11, 13), (13, 15), (12, 14), (14, 16),      # legs
+    (0, 1), (0, 2), (1, 3), (2, 4),              # head
+]
+_SKELETON_COLOR = (0, 255, 255)  # cyan
+_FALL_COLOR = (0, 0, 255)  # red
+
+
+def _midpoint(kp_a, kp_b):
+    """Average two keypoint (x, y) tuples."""
+    return ((kp_a[0] + kp_b[0]) / 2.0, (kp_a[1] + kp_b[1]) / 2.0)
+
+
+def _is_fall(keypoints, bbox, conf_threshold: float = 0.3) -> bool:
+    """Determine if a person is in a fallen state using keypoint heuristics.
+
+    Checks:
+    1. Bounding box aspect ratio (wider than tall → lying down)
+    2. Torso angle (shoulder-hip line deviates from vertical)
+    3. Hip near or below shoulder level (inverted / horizontal posture)
+    """
+    x1, y1, x2, y2 = bbox
+    bbox_w = x2 - x1
+    bbox_h = y2 - y1
+
+    # Heuristic 1: Aspect ratio — lying persons have wide, short boxes
+    if bbox_h > 0 and bbox_w / bbox_h > 1.4:
+        return True
+
+    # Extract key body points (x, y, confidence)
+    left_shoulder = keypoints[_KP_LEFT_SHOULDER]
+    right_shoulder = keypoints[_KP_RIGHT_SHOULDER]
+    left_hip = keypoints[_KP_LEFT_HIP]
+    right_hip = keypoints[_KP_RIGHT_HIP]
+
+    # Need sufficient confidence on at least shoulders and hips
+    shoulder_conf = min(left_shoulder[2], right_shoulder[2])
+    hip_conf = min(left_hip[2], right_hip[2])
+    if shoulder_conf < conf_threshold or hip_conf < conf_threshold:
+        return False
+
+    shoulder_mid = _midpoint(left_shoulder, right_shoulder)
+    hip_mid = _midpoint(left_hip, right_hip)
+
+    # Heuristic 2: Torso angle — angle of shoulder→hip line vs vertical
+    dx = abs(hip_mid[0] - shoulder_mid[0])
+    dy = abs(hip_mid[1] - shoulder_mid[1])
+    if dy < 1:
+        # Nearly horizontal torso
+        return True
+    import math
+    torso_angle_deg = math.degrees(math.atan2(dx, dy))
+    if torso_angle_deg > 50:
+        return True
+
+    # Heuristic 3: Hip at same level or above shoulders (person lying flat)
+    if hip_mid[1] <= shoulder_mid[1] + 10:
+        # In image coords, lower Y = higher position. If hip Y ≤ shoulder Y,
+        # person may be lying with feet up or fully horizontal.
+        # Only flag if bbox is also somewhat wide
+        if bbox_h > 0 and bbox_w / bbox_h > 0.9:
+            return True
+
+    return False
+
+
+def check_fall_detections(results, camera_id: str, frame: np.ndarray) -> list:
+    """Analyze YOLO-pose results to detect fallen persons.
+    Returns candidate violation dicts."""
+    candidates = []
+    if not results or len(results) == 0:
+        return candidates
+
+    result = results[0]
+    if result.keypoints is None or result.boxes is None:
+        return candidates
+
+    keypoints_data = result.keypoints.data  # (N, 17, 3) — x, y, conf
+    boxes = result.boxes
+
+    fallen_count = 0
+    max_conf = 0.0
+
+    for i in range(len(boxes)):
+        conf = float(boxes.conf[i])
+        bbox = list(map(int, boxes.xyxy[i]))
+        kps = keypoints_data[i].cpu().numpy()  # (17, 3)
+
+        if _is_fall(kps, bbox):
+            fallen_count += 1
+            max_conf = max(max_conf, conf)
+
+    if fallen_count > 0:
+        candidates.append({
+            "camera_id": camera_id,
+            "rule": "Fall Detected",
+            "severity": "P1",
+            "confidence": max_conf,
+            "description": f"{fallen_count} person(s) detected in fallen/man-down position",
+            "source": "Pose Specialist",
+            "threshold": 8,
+        })
+
+    return candidates
+
+
+def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False) -> tuple[np.ndarray, list]:
+    """Draw skeleton keypoints on frame. Returns annotated frame and fall detections list."""
+    annotated = frame.copy()
+    fall_detections = []
+
+    if not results or len(results) == 0:
+        return annotated, fall_detections
+
+    result = results[0]
+    if result.keypoints is None or result.boxes is None:
+        return annotated, fall_detections
+
+    h_img, w_img = annotated.shape[:2]
+    font_scale = max(0.4, w_img / 1600)
+    font_thickness = max(1, int(w_img / 800))
+    kp_radius = max(3, int(w_img / 400))
+
+    keypoints_data = result.keypoints.data
+    boxes = result.boxes
+
+    for i in range(len(boxes)):
+        conf = float(boxes.conf[i])
+        bbox = list(map(int, boxes.xyxy[i]))
+        kps = keypoints_data[i].cpu().numpy()
+
+        is_fallen = _is_fall(kps, bbox)
+
+        if fall_only and not is_fallen:
+            continue
+
+        color = _FALL_COLOR if is_fallen else _SKELETON_COLOR
+        box_thickness = max(2, int(w_img / 400))
+
+        # Draw bounding box
+        if is_fallen:
+            cv2.rectangle(annotated, (bbox[0], bbox[1]), (bbox[2], bbox[3]), _FALL_COLOR, box_thickness, cv2.LINE_AA)
+            label = f"FALL {conf:.0%}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
+            cv2.rectangle(annotated, (bbox[0], bbox[1] - th - 8), (bbox[0] + tw + 4, bbox[1]), _FALL_COLOR, -1)
+            cv2.putText(annotated, label, (bbox[0] + 2, bbox[1] - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
+
+            fall_detections.append({
+                "class": "person_fall",
+                "confidence": conf,
+                "bbox": bbox,
+            })
+
+        # Draw skeleton
+        for (a, b) in _SKELETON_PAIRS:
+            if kps[a][2] > 0.3 and kps[b][2] > 0.3:
+                pt1 = (int(kps[a][0]), int(kps[a][1]))
+                pt2 = (int(kps[b][0]), int(kps[b][1]))
+                cv2.line(annotated, pt1, pt2, color, max(1, kp_radius // 2), cv2.LINE_AA)
+
+        # Draw keypoints
+        for kp in kps:
+            if kp[2] > 0.3:
+                cv2.circle(annotated, (int(kp[0]), int(kp[1])), kp_radius, color, -1, cv2.LINE_AA)
+
+    return annotated, fall_detections
+
+
 # ── PPE detection ───────────────────────────────────────────────────────────
 
 def get_ppe_groups() -> dict[str, list[str]]:
@@ -437,6 +619,12 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
     def normalize(bbox):
         return [round(bbox[0] / frame_w, 4), round(bbox[1] / frame_h, 4),
                 round(bbox[2] / frame_w, 4), round(bbox[3] / frame_h, 4)]
+
+    if rule == "Fall Detected":
+        for d in detections:
+            if d["class"] == "person_fall":
+                results.append({"label": "Fall / Man Down", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
+        return results
 
     if rule.startswith("Missing "):
         ppe_item = rule.replace("Missing ", "")

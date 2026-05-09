@@ -29,6 +29,8 @@ import auth_store
 import diagnostics
 import error_store
 import licensing
+import notification_dispatcher
+import report_generator
 import state
 
 logger = logging.getLogger("safetylens")
@@ -163,13 +165,14 @@ async def startup():
 
     setup_logging()
     logger.info("SafetyLens backend starting")
+
+    # Phase 1: fast init — server becomes responsive for /api/health and /api/auth/login
     db.init_pool()
     alert_store.init_db()
     face_store.init_db()
     audit_store.init_db()
     auth_store.init_auth_db()
     error_store.init_db()
-    state.load_model()
     load_config()
 
     # License gate. Inference workers always start, but they self-pause
@@ -194,11 +197,25 @@ async def startup():
     asyncio.create_task(licensing.heartbeat_refresh_loop())
     asyncio.create_task(diagnostics.retention_cleanup_loop())
     asyncio.create_task(alert_store.auto_resolve_loop())
+    asyncio.create_task(notification_dispatcher.escalation_check_loop())
+    asyncio.create_task(report_generator.scheduled_report_loop())
 
+    # Phase 2: model loading + camera startup in background so the server
+    # can serve login and health requests immediately.
+    asyncio.create_task(_deferred_model_startup())
+
+
+async def _deferred_model_startup():
+    import asyncio
+
+    logger.info("Loading models (background)...")
+    await asyncio.to_thread(state.load_model)
+    logger.info("Models loaded, starting cameras")
     cfg = get_config()
     _ensure_safety_rules(cfg)
     for cam_id in cfg["cameras"]:
         start_camera(cam_id)
+    logger.info("All cameras started")
 
 
 # ── Serve frontend (production build) ──────────────────────────────────────

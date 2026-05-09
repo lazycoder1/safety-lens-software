@@ -2,6 +2,8 @@
 SafetyLens miscellaneous endpoints — health, videos, alert rules available.
 """
 
+import asyncio
+
 from fastapi import APIRouter
 
 import alert_store
@@ -13,13 +15,22 @@ from routers.safety_rules import _ensure_safety_rules
 router = APIRouter(prefix="/api", tags=["misc"])
 
 
-@router.get("/health")
-async def health():
+def _build_health():
     snapshot = diagnostics.build_health_snapshot()
     cfg = get_config()
     snapshot["cameraIds"] = list(cfg["cameras"].keys())
     snapshot["alerts_count"] = alert_store.get_stats()["total"]
     return snapshot
+
+
+@router.get("/ping")
+async def ping():
+    return {"ok": True}
+
+
+@router.get("/health")
+async def health():
+    return await asyncio.to_thread(_build_health)
 
 
 @router.get("/alert-rules-available")

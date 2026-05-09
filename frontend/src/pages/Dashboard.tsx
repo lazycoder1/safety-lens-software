@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, ShieldAlert, TrendingUp, TrendingDown, Min
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useAlertStore } from "@/stores/alertStore"
-import { getAlertStats, getCameras, getAlertTimeSeries, getComplianceMetrics } from "@/lib/api"
+import { getAlertStats, getCameras, getAlertTimeSeries, getComplianceMetrics, getAlerts, getZoneTimeHeatmap, getSpatialHeatmap } from "@/lib/api"
 import {
   AreaChart,
   Area,
@@ -117,6 +117,9 @@ export function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [timeRange, setTimeRange] = useState<TimeRange>(24)
   const [selectedCamera, setSelectedCamera] = useState<string>("")
+  const [accuracy, setAccuracy] = useState<{ total: number; fp: number; rate: number } | null>(null)
+  const [heatmapData, setHeatmapData] = useState<{ zones: string[]; buckets: string[]; cells: { zone: string; bucket: string; count: number }[]; maxCount: number } | null>(null)
+  const [spatialData, setSpatialData] = useState<{ gridSize: number; cells: number[][]; maxCount: number; totalDetections: number } | null>(null)
 
   const loadData = async (hours: TimeRange = timeRange, camId: string = selectedCamera) => {
     try {
@@ -140,6 +143,39 @@ export function Dashboard() {
       const online = camList.filter((c: any) => c.status === "online").length
       setCameraCount({ total: camList.length, online })
       setCameras(camList.map((c: any) => ({ id: c.id, name: c.name || c.id })))
+
+      // Compute detection accuracy from false positive data
+      try {
+        const allAlerts = await getAlerts({ limit: 1000 })
+        const total = allAlerts.length
+        const fp = allAlerts.filter((a: any) => a.falsePositive).length
+        const rate = total > 0 ? Math.round(((total - fp) / total) * 1000) / 10 : 100
+        setAccuracy({ total, fp, rate })
+      } catch {
+        // alerts endpoint may not be available
+      }
+
+      // Heatmap data
+      try {
+        const bucketSize = hours <= 24 ? "hour" : "day"
+        const hm = await getZoneTimeHeatmap({ hours, cameraId: cameraFilter, bucket: bucketSize as any })
+        setHeatmapData(hm)
+      } catch {
+        setHeatmapData(null)
+      }
+
+      // Spatial heatmap (only when a specific camera is selected)
+      if (cameraFilter) {
+        try {
+          const sp = await getSpatialHeatmap({ cameraId: cameraFilter, hours })
+          setSpatialData(sp)
+        } catch {
+          setSpatialData(null)
+        }
+      } else {
+        setSpatialData(null)
+      }
+
       setLastUpdated(new Date())
     } catch {
       // stats may not be available yet
@@ -470,6 +506,45 @@ export function Dashboard() {
         </CardContent>
       </Card>
 
+      {/* Detection Accuracy */}
+      {accuracy && accuracy.total > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Detection Accuracy</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="text-center p-3 rounded-[var(--radius-md)] bg-[var(--color-bg-secondary)]">
+                <p className={`text-3xl font-bold ${
+                  accuracy.rate >= 90
+                    ? "text-[var(--color-success)]"
+                    : accuracy.rate >= 80
+                      ? "text-[var(--color-warning)]"
+                      : "text-[var(--color-critical)]"
+                }`}>
+                  {accuracy.rate}%
+                </p>
+                <p className="text-xs text-[var(--color-text-secondary)] mt-1">Overall Accuracy</p>
+                <p className="text-[10px] text-[var(--color-text-tertiary)] mt-0.5">
+                  Target: {">"}90% ideal, {">"}80% min
+                </p>
+              </div>
+              <div className="text-center p-3 rounded-[var(--radius-md)] bg-[var(--color-bg-secondary)]">
+                <p className="text-3xl font-bold text-[var(--color-text-primary)]">{accuracy.total}</p>
+                <p className="text-xs text-[var(--color-text-secondary)] mt-1">Total Detections</p>
+              </div>
+              <div className="text-center p-3 rounded-[var(--radius-md)] bg-[var(--color-bg-secondary)]">
+                <p className="text-3xl font-bold text-[var(--color-warning)]">{accuracy.fp}</p>
+                <p className="text-xs text-[var(--color-text-secondary)] mt-1">False Positives</p>
+                <p className="text-[10px] text-[var(--color-text-tertiary)] mt-0.5">
+                  FP Rate: {accuracy.total > 0 ? ((accuracy.fp / accuracy.total) * 100).toFixed(1) : 0}%
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Alerts by hour */}
       {severityTrend.length > 0 && (
         <Card>
@@ -508,6 +583,129 @@ export function Dashboard() {
                   <Area type="monotone" dataKey="P4" stackId="1" stroke="#2563eb" fill="#2563eb" fillOpacity={0.3} />
                 </AreaChart>
               </ResponsiveContainer>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Zone × Time Heatmap */}
+      {heatmapData && heatmapData.zones.length > 0 && heatmapData.buckets.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Compliance Heatmap</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <div
+                className="grid gap-px"
+                style={{
+                  gridTemplateColumns: `120px repeat(${heatmapData.buckets.length}, minmax(28px, 1fr))`,
+                }}
+              >
+                {/* Header row */}
+                <div />
+                {heatmapData.buckets.map((b) => {
+                  const d = new Date(b)
+                  const label = timeRange <= 24
+                    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                    : d.toLocaleDateString([], { month: "short", day: "numeric" })
+                  return (
+                    <div key={b} className="text-[9px] text-[var(--color-text-tertiary)] text-center truncate px-0.5" title={b}>
+                      {label}
+                    </div>
+                  )
+                })}
+
+                {/* Data rows */}
+                {heatmapData.zones.map((zone) => (
+                  <>
+                    <div key={`label-${zone}`} className="text-xs font-medium text-[var(--color-text-secondary)] truncate pr-2 flex items-center" title={zone}>
+                      {zone}
+                    </div>
+                    {heatmapData.buckets.map((bucket) => {
+                      const cell = heatmapData.cells.find((c) => c.zone === zone && c.bucket === bucket)
+                      const count = cell?.count || 0
+                      const max = heatmapData.maxCount || 1
+                      const ratio = count / max
+                      let bg = "var(--color-bg-tertiary)"
+                      if (count > 0) {
+                        if (ratio < 0.25) bg = "#dcfce7"
+                        else if (ratio < 0.5) bg = "#fef9c3"
+                        else if (ratio < 0.75) bg = "#fed7aa"
+                        else bg = "#fecaca"
+                      }
+                      const d = new Date(bucket)
+                      const timeLabel = timeRange <= 24
+                        ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                        : d.toLocaleDateString([], { month: "short", day: "numeric" })
+                      return (
+                        <div
+                          key={`${zone}-${bucket}`}
+                          className="h-7 rounded-[2px] transition-colors cursor-default"
+                          style={{ backgroundColor: bg }}
+                          title={`${zone} · ${timeLabel} · ${count} violation${count !== 1 ? "s" : ""}`}
+                        />
+                      )
+                    })}
+                  </>
+                ))}
+              </div>
+
+              {/* Legend */}
+              <div className="flex items-center gap-3 mt-3 text-[10px] text-[var(--color-text-tertiary)]">
+                <span>Less</span>
+                {["var(--color-bg-tertiary)", "#dcfce7", "#fef9c3", "#fed7aa", "#fecaca"].map((c, i) => (
+                  <div key={i} className="w-4 h-4 rounded-[2px]" style={{ backgroundColor: c }} />
+                ))}
+                <span>More</span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Spatial Detection Density (only when camera selected) */}
+      {spatialData && spatialData.totalDetections > 0 && selectedCamera && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>Detection Density Map</CardTitle>
+              <span className="text-xs text-[var(--color-text-tertiary)]">
+                {spatialData.totalDetections} detections
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="max-w-md mx-auto">
+              <div
+                className="grid gap-px aspect-square"
+                style={{
+                  gridTemplateColumns: `repeat(${spatialData.gridSize}, 1fr)`,
+                  gridTemplateRows: `repeat(${spatialData.gridSize}, 1fr)`,
+                }}
+              >
+                {spatialData.cells.flatMap((row, rowIdx) =>
+                  row.map((count, colIdx) => {
+                    const max = spatialData.maxCount || 1
+                    const ratio = count / max
+                    let bg = "var(--color-bg-tertiary)"
+                    if (count > 0) {
+                      if (ratio < 0.25) bg = "#dcfce7"
+                      else if (ratio < 0.5) bg = "#fef9c3"
+                      else if (ratio < 0.75) bg = "#fed7aa"
+                      else bg = "#fecaca"
+                    }
+                    return (
+                      <div
+                        key={`${rowIdx}-${colIdx}`}
+                        className="rounded-[2px] transition-colors"
+                        style={{ backgroundColor: bg }}
+                        title={`Row ${rowIdx + 1}, Col ${colIdx + 1}: ${count} detection${count !== 1 ? "s" : ""}`}
+                      />
+                    )
+                  })
+                )}
+              </div>
             </div>
           </CardContent>
         </Card>

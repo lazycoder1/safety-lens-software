@@ -15,6 +15,54 @@ from video_processing import broadcast_alert
 router = APIRouter(prefix="/api", tags=["alerts"])
 
 
+@router.get("/alerts/detection-classes")
+async def get_detection_classes():
+    return alert_store.get_detection_classes()
+
+
+@router.get("/alerts/search")
+async def search_alerts(
+    q: Optional[str] = Query(None),
+    camera_id: Optional[str] = Query(None, alias="cameraId"),
+    severity: Optional[str] = Query(None),
+    detection_class: Optional[str] = Query(None, alias="detectionClass"),
+    time_range: Optional[str] = Query(None, alias="timeRange"),
+    sort: str = Query("relevance"),
+    limit: int = Query(100, le=500),
+    offset: int = Query(0),
+):
+    return alert_store.search_alerts(
+        query=q, camera_id=camera_id, severity=severity,
+        detection_class=detection_class, time_range=time_range,
+        sort=sort, limit=limit, offset=offset,
+    )
+
+
+@router.get("/alerts/heatmap/zone-time")
+async def get_zone_time_heatmap(
+    hours: int = Query(24),
+    camera_id: Optional[str] = Query(None, alias="cameraId"),
+    severity: Optional[str] = Query(None),
+    bucket: str = Query("hour"),
+):
+    return alert_store.get_zone_time_heatmap(hours=hours, camera_id=camera_id, severity=severity, bucket=bucket)
+
+
+@router.get("/alerts/heatmap/spatial")
+async def get_spatial_heatmap(
+    camera_id: str = Query(..., alias="cameraId"),
+    hours: int = Query(24),
+    severity: Optional[str] = Query(None),
+    grid_size: int = Query(10, alias="gridSize"),
+):
+    return alert_store.get_spatial_heatmap(camera_id=camera_id, hours=hours, severity=severity, grid_size=grid_size)
+
+
+@router.get("/alerts/{alert_id}/similar")
+async def get_similar_alerts(alert_id: str, limit: int = Query(20, le=50)):
+    return alert_store.find_similar_alerts(alert_id, limit=limit)
+
+
 @router.get("/alerts")
 async def get_alerts(
     severity: Optional[str] = Query(None),

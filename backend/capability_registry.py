@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-ModelKey = Literal["coco_primary", "ppe_specialist", "yoloe_long_tail", "face_recognition"]
+ModelKey = Literal["coco_primary", "ppe_specialist", "yoloe_long_tail", "face_recognition", "pose_specialist"]
 CameraProfile = Literal["general_safety", "work_zone_ppe", "demo_advanced"]
 CapabilityKey = Literal[
     "person_presence",
@@ -22,6 +22,7 @@ CapabilityKey = Literal[
     "goggles_required",
     "fire_smoke",
     "face_recognition",
+    "fall_detection",
     "custom_long_tail",
 ]
 InputScope = Literal["full_frame", "object_crop"]
@@ -221,6 +222,18 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "prompt_terms": ["face recognition", "face"],
         "safety_rule_ids": [],
     },
+    "fall_detection": {
+        "key": "fall_detection",
+        "label": "Fall / Man Down",
+        "group": "Safety Events",
+        "model_family": "pose_specialist",
+        "input_scope": "full_frame",
+        "requires_tracking": False,
+        "requires_zones": False,
+        "requires_association": False,
+        "prompt_terms": ["person_fall"],
+        "safety_rule_ids": ["alert_fall_detection"],
+    },
     "custom_long_tail": {
         "key": "custom_long_tail",
         "label": "Custom Long-Tail",
@@ -238,7 +251,7 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
 PROFILE_DEFAULT_CAPABILITIES: dict[CameraProfile, list[CapabilityKey]] = {
     "general_safety": ["person_presence", "mobile_phone"],
     "work_zone_ppe": ["helmet_required", "vest_required", "zone_intrusion"],
-    "demo_advanced": ["fire_smoke"],
+    "demo_advanced": ["fire_smoke", "fall_detection"],
 }
 
 RULE_ID_TO_CAPABILITY: dict[str, CapabilityKey] = {}

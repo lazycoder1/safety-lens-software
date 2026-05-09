@@ -27,69 +27,89 @@ logger = logging.getLogger("safetylens.diagnostics")
 DIAGNOSTICS_DIR = Path(__file__).parent / "diagnostics"
 APP_START_TIME = time.time()
 
+_health_cache: dict | None = None
+_health_cache_time: float = 0.0
+_HEALTH_CACHE_TTL = 5.0
+_health_cache_lock = __import__("threading").Lock()
+
 
 def build_health_snapshot() -> dict:
-    cfg = get_config()
-    retention = cfg.get("retention", {})
-    license_status = licensing.get_status()
-    db_ok = db.check_connection()
-    storage = {
-        "logs": _path_usage(LOGS_DIR),
-        "snapshots": alert_store.get_snapshot_usage(),
-        "diagnostics": _path_usage(DIAGNOSTICS_DIR),
-    }
-    free_bytes = shutil.disk_usage(Path(__file__).parent).free
+    global _health_cache, _health_cache_time
+    now = time.time()
+    if _health_cache is not None and (now - _health_cache_time) < _HEALTH_CACHE_TTL:
+        return _health_cache.copy()
 
-    cameras = []
-    enabled_cameras = 0
-    running_cameras = 0
-    for cam_id, cam in cfg.get("cameras", {}).items():
-        enabled = bool(cam.get("enabled", True))
-        worker_running = cam_id in state.camera_threads
-        frame_available = state.camera_frames.get(cam_id) is not None
-        if enabled:
-            enabled_cameras += 1
-        if enabled and worker_running:
-            running_cameras += 1
-        cameras.append(
-            {
-                "id": cam_id,
-                "name": cam.get("name", cam_id),
-                "enabled": enabled,
-                "workerRunning": worker_running,
-                "frameAvailable": frame_available,
-                "runtimeStatus": state.camera_runtime_status.get(cam_id, "offline"),
-                "detectionsCount": len(state.camera_detections.get(cam_id, [])),
-            }
-        )
+    # Serialize rebuilds so concurrent health polls don't all do expensive work.
+    with _health_cache_lock:
+        # Re-check after acquiring lock — another thread may have refreshed.
+        now = time.time()
+        if _health_cache is not None and (now - _health_cache_time) < _HEALTH_CACHE_TTL:
+            return _health_cache.copy()
 
-    status = "ok"
-    reasons: list[str] = []
-    if not db_ok:
-        status = "error"
-        reasons.append("database unavailable")
-    if license_status.state == licensing.LicenseState.SUSPENDED and status != "error":
-        status = "degraded"
-        reasons.append("license suspended")
-    if enabled_cameras and running_cameras < enabled_cameras and status == "ok":
-        status = "degraded"
-        reasons.append("one or more enabled cameras are not running")
+        cfg = get_config()
+        retention = cfg.get("retention", {})
+        license_status = licensing.get_status()
+        db_ok = db.check_connection()
+        storage = {
+            "logs": _path_usage(LOGS_DIR),
+            "snapshots": alert_store.get_snapshot_usage(),
+            "diagnostics": _path_usage(DIAGNOSTICS_DIR),
+        }
+        free_bytes = shutil.disk_usage(Path(__file__).parent).free
 
-    return {
-        "status": status,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "uptimeSeconds": int(max(0, time.time() - APP_START_TIME)),
-        "reasons": reasons,
-        "database": {"ok": db_ok},
-        "license": license_status.to_public_dict(),
-        "models": model_manager.list_models(),
-        "cameras": cameras,
-        "storage": {
-            **storage,
-            "freeBytes": free_bytes,
-        },
-        "retention": retention,
-    }
+        cameras = []
+        enabled_cameras = 0
+        running_cameras = 0
+        for cam_id, cam in cfg.get("cameras", {}).items():
+            enabled = bool(cam.get("enabled", True))
+            worker_running = cam_id in state.camera_threads
+            frame_available = state.camera_frames.get(cam_id) is not None
+            if enabled:
+                enabled_cameras += 1
+            if enabled and worker_running:
+                running_cameras += 1
+            cameras.append(
+                {
+                    "id": cam_id,
+                    "name": cam.get("name", cam_id),
+                    "enabled": enabled,
+                    "workerRunning": worker_running,
+                    "frameAvailable": frame_available,
+                    "runtimeStatus": state.camera_runtime_status.get(cam_id, "offline"),
+                    "detectionsCount": len(state.camera_detections.get(cam_id, [])),
+                }
+            )
+
+        status = "ok"
+        reasons: list[str] = []
+        if not db_ok:
+            status = "error"
+            reasons.append("database unavailable")
+        if license_status.state == licensing.LicenseState.SUSPENDED and status != "error":
+            status = "degraded"
+            reasons.append("license suspended")
+        if enabled_cameras and running_cameras < enabled_cameras and status == "ok":
+            status = "degraded"
+            reasons.append("one or more enabled cameras are not running")
+
+        result = {
+            "status": status,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "uptimeSeconds": int(max(0, time.time() - APP_START_TIME)),
+            "reasons": reasons,
+            "database": {"ok": db_ok},
+            "license": license_status.to_public_dict(),
+            "models": model_manager.list_models(),
+            "cameras": cameras,
+            "storage": {
+                **storage,
+                "freeBytes": free_bytes,
+            },
+            "retention": retention,
+        }
+        _health_cache = result
+        _health_cache_time = time.time()
+        return result
 
 
 def create_diagnostics_bundle() -> Path:

@@ -19,7 +19,7 @@ import face_store
 import licensing
 import model_manager
 import state
-import telegram_notifier
+import notification_dispatcher
 from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan
 from capability_registry import CLASS_TERM_TO_CAPABILITY
@@ -27,15 +27,18 @@ from config_manager import get_config
 from constants import OLLAMA_URL, VIDEO_DIR, VIOLATION_THRESHOLD, YOLOE_COLORS
 from detection import (
     apply_camera_overlay,
+    check_fall_detections,
     check_violations,
     check_yoloe_violations,
     check_zone_intrusions,
     draw_detection_records,
     draw_detections,
+    draw_pose_detections,
     extract_violation_bboxes,
 )
 
 LICENSE_PAUSE_INTERVAL = 1.0
+_last_pose_results: dict[str, any] = {}  # camera_id -> last YOLO-pose results for fall checking
 
 logger = logging.getLogger("safetylens")
 
@@ -107,7 +110,7 @@ def create_alert(
     try:
         snap_url = alert.get("snapshotUrl")
         snap_full = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1]) if snap_url else None
-        telegram_notifier.send_alert(alert, snap_full)
+        notification_dispatcher.notify(alert, snap_full)
     except Exception:
         logger.exception("Telegram send failed")
     return alert
@@ -267,6 +270,19 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             show_overlay=False,
         )
         detections.extend(_normalize_detection_batch(long_tail_detections, "yoloe_long_tail"))
+
+    if execution_plan.get("run_pose_specialist"):
+        pose_results = model_manager.predict(
+            "pose_specialist",
+            frame,
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+        )
+        annotated, fall_dets = draw_pose_detections(annotated, pose_results, fall_only=False)
+        detections.extend(_normalize_detection_batch(fall_dets, "pose_specialist"))
+        # Store pose results on frame state for fall checking in violation loop
+        _last_pose_results[camera_id] = pose_results
 
     annotated = apply_camera_overlay(
         annotated,
@@ -430,14 +446,25 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 state.camera_detections[camera_id] = []
 
             detections = state.camera_detections.get(camera_id, [])
-            if detections:
-                candidates = []
-                if execution_plan.get("run_ppe_specialist"):
-                    candidates.extend(check_yoloe_violations(detections, camera_id))
-                candidates.extend(check_violations(detections, camera_id))
 
-                frame_h, frame_w = frame.shape[:2]
-                candidates.extend(check_zone_intrusions(detections, camera_id, frame_w, frame_h))
+            # Fall detection runs independently — pose model doesn't need COCO detections
+            has_fall_candidates = False
+            fall_candidates = []
+            if execution_plan.get("run_pose_specialist") and camera_id in _last_pose_results:
+                fall_candidates = check_fall_detections(_last_pose_results[camera_id], camera_id, frame)
+                has_fall_candidates = len(fall_candidates) > 0
+
+            if detections or has_fall_candidates:
+                candidates = []
+                if detections:
+                    if execution_plan.get("run_ppe_specialist"):
+                        candidates.extend(check_yoloe_violations(detections, camera_id))
+                    candidates.extend(check_violations(detections, camera_id))
+
+                    frame_h, frame_w = frame.shape[:2]
+                    candidates.extend(check_zone_intrusions(detections, camera_id, frame_w, frame_h))
+
+                candidates.extend(fall_candidates)
                 current_violation_rules = {candidate["rule"]: candidate for candidate in candidates}
 
                 all_tracked = set(violation_window) | set(current_violation_rules)

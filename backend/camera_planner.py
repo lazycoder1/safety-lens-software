@@ -137,6 +137,7 @@ def _required_model_keys(capabilities: list[CapabilityKey]) -> list[ModelKey]:
     has_coco = any(CAPABILITY_REGISTRY[key]["model_family"] == "coco_primary" for key in capability_set)
     has_long_tail = any(CAPABILITY_REGISTRY[key]["model_family"] == "yoloe_long_tail" for key in capability_set)
     has_face = any(CAPABILITY_REGISTRY[key]["model_family"] == "face_recognition" for key in capability_set)
+    has_pose = any(CAPABILITY_REGISTRY[key]["model_family"] == "pose_specialist" for key in capability_set)
 
     if has_coco or has_ppe:
         required.append("coco_primary")
@@ -146,6 +147,8 @@ def _required_model_keys(capabilities: list[CapabilityKey]) -> list[ModelKey]:
         required.append("yoloe_long_tail")
     if has_face:
         required.append("face_recognition")
+    if has_pose:
+        required.append("pose_specialist")
     return required
 
 
@@ -196,6 +199,14 @@ def build_execution_plan(camera: dict, cfg: dict | None = None) -> dict[str, Any
     elif any(model_key in required_model_keys for model_key in ("ppe_specialist", "yoloe_long_tail")):
         derived_demo = "yolo+yoloe"
 
+    _MODEL_KEY_LABELS = {
+        "coco_primary": "COCO Primary",
+        "ppe_specialist": "PPE Specialist",
+        "yoloe_long_tail": "YOLOE Long-Tail",
+        "face_recognition": "Face Recognition",
+        "pose_specialist": "Pose Specialist",
+    }
+
     execution_plan = {
         "profile": profile,
         "capabilities": capabilities,
@@ -204,6 +215,7 @@ def build_execution_plan(camera: dict, cfg: dict | None = None) -> dict[str, Any
         "run_ppe_specialist": "ppe_specialist" in required_model_keys,
         "run_yoloe_long_tail": "yoloe_long_tail" in required_model_keys,
         "run_face_recognition": "face_recognition" in required_model_keys,
+        "run_pose_specialist": "pose_specialist" in required_model_keys,
         "tracking_enabled": tracking_enabled,
         "zones_required": zones_required,
         "association_enabled": association_enabled,
@@ -212,10 +224,7 @@ def build_execution_plan(camera: dict, cfg: dict | None = None) -> dict[str, Any
         "yoloe_prompt_terms": yoloe_prompt_terms,
         "derived_demo": derived_demo,
         "model_stack": [
-            "COCO Primary" if model_key == "coco_primary" else
-            "PPE Specialist" if model_key == "ppe_specialist" else
-            "YOLOE Long-Tail" if model_key == "yoloe_long_tail" else
-            "Face Recognition"
+            _MODEL_KEY_LABELS.get(model_key, model_key)
             for model_key in required_model_keys
         ],
     }

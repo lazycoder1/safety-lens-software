@@ -1,13 +1,36 @@
-import { useState, type FormEvent } from "react"
+import { useState, useEffect, type FormEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { Eye, EyeOff, ShieldCheck, Loader2 } from "lucide-react"
 import { useAuthStore } from "@/stores/authStore"
+import { API_BASE } from "@/lib/api"
 import { PasswordInput } from "@/components/ui/PasswordInput"
 import { isPasswordValid } from "@/lib/passwordValidation"
+
+type BackendStatus = "connecting" | "connected"
+
+function useBackendStatus(): BackendStatus {
+  const [status, setStatus] = useState<BackendStatus>("connecting")
+  useEffect(() => {
+    let mounted = true
+    const check = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/ping`, { signal: AbortSignal.timeout(5000) })
+        if (mounted) setStatus(res.ok ? "connected" : "connecting")
+      } catch {
+        if (mounted) setStatus("connecting")
+      }
+    }
+    check()
+    const id = setInterval(check, 3000)
+    return () => { mounted = false; clearInterval(id) }
+  }, [])
+  return status
+}
 
 export function Login() {
   const navigate = useNavigate()
   const { login, register, clearError } = useAuthStore()
+  const backendStatus = useBackendStatus()
 
   const [mode, setMode] = useState<"login" | "register">("login")
   const [username, setUsername] = useState("")
@@ -110,6 +133,19 @@ export function Login() {
             </div>
             <h1 className="text-2xl font-bold text-neutral-900">SafetyLens</h1>
             <p className="text-sm text-neutral-500 mt-1">Industrial Safety Monitoring</p>
+            <div className="mt-2 flex items-center justify-center gap-1.5 text-xs">
+              {backendStatus === "connected" ? (
+                <>
+                  <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
+                  <span className="text-green-600">Server ready</span>
+                </>
+              ) : (
+                <>
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  <span className="text-amber-600">Connecting to server...</span>
+                </>
+              )}
+            </div>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -201,7 +237,7 @@ export function Login() {
             {/* Submit */}
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || backendStatus !== "connected"}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
