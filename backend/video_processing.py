@@ -21,6 +21,12 @@ import licensing
 import model_manager
 import state
 import notification_dispatcher
+from camera_capture import (
+    CAMERA_STOP_TIMEOUT_SECONDS,
+    open_video_capture,
+    reconnect_delay_seconds,
+    redact_video_source,
+)
 from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan
 from capability_registry import CLASS_TERM_TO_CAPABILITY
@@ -216,6 +222,14 @@ def _publish_stream_frame(
     clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
     state.camera_frames[camera_id] = annotated_jpeg
     state.camera_clean_frames[camera_id] = clean_jpeg
+
+
+def _clear_camera_observation(camera_id: str) -> None:
+    """Discard current-frame state that is invalid once a source disconnects."""
+    state.camera_frames[camera_id] = None
+    state.camera_clean_frames[camera_id] = None
+    state.camera_detections[camera_id] = []
+    _last_pose_results.pop(camera_id, None)
 
 
 def _normalize_text(value: str) -> str:
@@ -552,6 +566,17 @@ def _run_face_recognition(
 
 
 def video_processor(camera_id: str, stop_event: threading.Event):
+    """Run one camera worker and never publish observations after it exits."""
+    try:
+        _video_processor_loop(camera_id, stop_event)
+    except Exception:
+        logger.exception("Camera worker exited unexpectedly", extra={"camera_id": camera_id})
+        raise
+    finally:
+        _clear_camera_observation(camera_id)
+
+
+def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     cfg = get_config()
     cam = cfg["cameras"][camera_id]
     stream_type = cam.get("stream_type", "file")
@@ -581,28 +606,46 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     violation_window: dict[str, list[bool]] = {}
     window_size = 15
     last_annotated = None
+    reconnect_failures = 0
+    ever_received_frame = False
+    safe_video_source = redact_video_source(video_source)
 
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
     if missing_model_keys:
         state.camera_runtime_status[camera_id] = "awaiting_model_install"
-        state.camera_frames[camera_id] = None
-        state.camera_detections[camera_id] = []
+        _clear_camera_observation(camera_id)
         logger.warning("Camera waiting on missing models", extra={"camera_id": camera_id, "missing_models": missing_model_keys})
         return
 
     while not stop_event.is_set():
-        cap = cv2.VideoCapture(video_source)
-        if stream_type == "rtsp":
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        state.camera_runtime_status[camera_id] = (
+            "starting" if not ever_received_frame and reconnect_failures == 0 else "reconnecting"
+        )
+        cap = open_video_capture(video_source, stream_type=stream_type)
         if not cap.isOpened():
-            logger.error("Cannot open video source", extra={"camera_id": camera_id, "source": video_source})
-            for _ in range(50):
-                if stop_event.is_set():
-                    return
-                time.sleep(0.1)
+            cap.release()
+            _clear_camera_observation(camera_id)
+            active_violations.clear()
+            violation_window.clear()
+            last_annotated = None
+            delay = reconnect_delay_seconds(reconnect_failures, camera_id) if stream_type == "rtsp" else 5.0
+            reconnect_failures += 1
+            state.camera_runtime_status[camera_id] = "reconnecting"
+            logger.warning(
+                "Video source unavailable; retry scheduled",
+                extra={
+                    "camera_id": camera_id,
+                    "source": safe_video_source,
+                    "retry_seconds": round(delay, 2),
+                    "failure_count": reconnect_failures,
+                },
+            )
+            if stop_event.wait(delay):
+                return
             continue
 
         last_stream_published_at = 0.0
+        received_frame = False
         while cap.isOpened() and not stop_event.is_set():
             if not licensing.is_inference_allowed():
                 time.sleep(LICENSE_PAUSE_INTERVAL)
@@ -611,7 +654,15 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             started = time.time()
             ok, frame = cap.read()
             if not ok:
+                _clear_camera_observation(camera_id)
+                active_violations.clear()
+                violation_window.clear()
+                last_annotated = None
                 break
+            if not received_frame:
+                received_frame = True
+                ever_received_frame = True
+                reconnect_failures = 0
 
             current_cfg = get_config()
             current_g = current_cfg.get("global", g)
@@ -778,15 +829,29 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+        _clear_camera_observation(camera_id)
+        active_violations.clear()
+        violation_window.clear()
+        last_annotated = None
         cap.release()
         if stop_event.is_set():
             return
         if stream_type == "rtsp":
-            logger.warning("RTSP stream dropped, reconnecting in 5s", extra={"camera_id": camera_id})
-            for _ in range(50):
-                if stop_event.is_set():
-                    return
-                time.sleep(0.1)
+            delay = reconnect_delay_seconds(reconnect_failures, camera_id)
+            reconnect_failures += 1
+            state.camera_runtime_status[camera_id] = "reconnecting"
+            logger.warning(
+                "RTSP stream interrupted; retry scheduled",
+                extra={
+                    "camera_id": camera_id,
+                    "source": safe_video_source,
+                    "retry_seconds": round(delay, 2),
+                    "failure_count": reconnect_failures,
+                    "received_frame": received_frame,
+                },
+            )
+            if stop_event.wait(delay):
+                return
         else:
             logger.debug("Video loop restarting", extra={"camera_id": camera_id})
 
@@ -799,8 +864,7 @@ def start_camera(cam_id: str):
 
     execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
-    state.camera_frames[cam_id] = None
-    state.camera_detections[cam_id] = []
+    _clear_camera_observation(cam_id)
     if missing_model_keys:
         state.camera_runtime_status[cam_id] = "awaiting_model_install"
         logger.warning("Skipping camera start until models are ready", extra={"camera_id": cam_id, "missing_models": missing_model_keys})
@@ -825,33 +889,54 @@ def start_vlm_for_camera(cam_id: str):
     logger.info("Started VLM worker", extra={"camera_id": cam_id})
 
 
-def stop_camera(cam_id: str):
+def stop_camera(cam_id: str) -> bool:
+    camera_stopped = True
     if cam_id in state.camera_threads:
         thread, stop_evt = state.camera_threads[cam_id]
         stop_evt.set()
-        thread.join(timeout=5)
-        del state.camera_threads[cam_id]
+        state.camera_runtime_status[cam_id] = "stopping"
+        thread.join(timeout=CAMERA_STOP_TIMEOUT_SECONDS)
+        if thread.is_alive():
+            camera_stopped = False
+            logger.warning(
+                "Camera worker still stopping; retaining worker reference",
+                extra={"camera_id": cam_id, "timeout_seconds": CAMERA_STOP_TIMEOUT_SECONDS},
+            )
+        else:
+            del state.camera_threads[cam_id]
     if cam_id in state.vlm_threads:
         thread, stop_evt = state.vlm_threads[cam_id]
         stop_evt.set()
         thread.join(timeout=5)
-        del state.vlm_threads[cam_id]
+        if not thread.is_alive():
+            del state.vlm_threads[cam_id]
+    if not camera_stopped:
+        return False
     state.camera_frames.pop(cam_id, None)
+    state.camera_clean_frames.pop(cam_id, None)
     state.camera_detections.pop(cam_id, None)
+    _last_pose_results.pop(cam_id, None)
     state.camera_runtime_status[cam_id] = "offline"
+    return True
 
 
-def restart_camera(cam_id: str):
-    stop_camera(cam_id)
+def restart_camera(cam_id: str) -> bool:
+    if not stop_camera(cam_id):
+        logger.warning("Camera restart deferred until existing worker exits", extra={"camera_id": cam_id})
+        return False
     start_camera(cam_id)
+    return True
 
 
 def restart_all_cameras():
     cfg = get_config()
+    still_stopping = set()
     for cam_id in list(state.camera_threads):
-        stop_camera(cam_id)
+        if not stop_camera(cam_id):
+            still_stopping.add(cam_id)
     for cam_id in cfg["cameras"]:
-        start_camera(cam_id)
+        if cam_id not in still_stopping:
+            start_camera(cam_id)
 
 
 def mjpeg_generator(camera_id: str):

@@ -69,6 +69,10 @@ class JSONFormatter(logging.Formatter):
             "target_id",
             "outcome",
             "free_bytes",
+            "retry_seconds",
+            "failure_count",
+            "received_frame",
+            "timeout_seconds",
         ):
             val = getattr(record, key, None)
             if val is not None:
@@ -108,6 +112,10 @@ class ColorConsoleFormatter(logging.Formatter):
             "duration_ms",
             "route",
             "action",
+            "retry_seconds",
+            "failure_count",
+            "received_frame",
+            "timeout_seconds",
         ):
             val = getattr(record, key, None)
             if val is not None:
