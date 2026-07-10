@@ -13,7 +13,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 import model_manager
@@ -47,6 +47,42 @@ def _require_model_server_token(authorization: str | None):
     expected = f"Bearer {MODEL_SERVER_TOKEN}"
     if authorization != expected:
         raise HTTPException(status_code=401, detail="Invalid model server token")
+
+
+def _run_inference(
+    *,
+    model_key: str,
+    frame_bytes: bytes,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str],
+) -> dict[str, Any]:
+    if model_key not in model_manager.MODEL_DEFINITIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown model key: {model_key}")
+
+    try:
+        arr = np.frombuffer(frame_bytes, np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Could not decode frame")
+
+    try:
+        detections = model_manager.predict_records(
+            model_key,  # type: ignore[arg-type]
+            frame,
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+            classes=classes or None,
+        )
+    except Exception as exc:
+        logger.exception("Inference failed", extra={"model_key": model_key})
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"detections": detections}
 
 
 @app.on_event("startup")
@@ -108,29 +144,36 @@ async def retry_install_job(job_id: str, authorization: str | None = Header(defa
 @app.post("/api/infer")
 async def infer(body: InferenceRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _require_model_server_token(authorization)
-    if body.model_key not in model_manager.MODEL_DEFINITIONS:
-        raise HTTPException(status_code=404, detail=f"Unknown model key: {body.model_key}")
-
     try:
         frame_bytes = base64.b64decode(body.frame_jpeg_b64)
-        arr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid frame_jpeg_b64") from exc
-    if frame is None:
-        raise HTTPException(status_code=400, detail="Could not decode frame")
+    return _run_inference(
+        model_key=body.model_key,
+        frame_bytes=frame_bytes,
+        conf=body.conf,
+        device=body.device,
+        imgsz=body.imgsz,
+        classes=body.classes,
+    )
 
-    try:
-        detections = model_manager.predict_records(
-            body.model_key,  # type: ignore[arg-type]
-            frame,
-            conf=body.conf,
-            device=body.device,
-            imgsz=body.imgsz,
-            classes=body.classes or None,
-        )
-    except Exception as exc:
-        logger.exception("Inference failed", extra={"model_key": body.model_key})
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"detections": detections}
+@app.post("/api/infer/jpeg")
+def infer_jpeg(
+    frame_jpeg: bytes = Body(..., media_type="image/jpeg"),
+    model_key: str = Query(...),
+    conf: float = Query(0.35),
+    device: str = Query("cuda"),
+    imgsz: int = Query(960, gt=0),
+    classes: list[str] = Query(default=[]),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _run_inference(
+        model_key=model_key,
+        frame_bytes=frame_jpeg,
+        conf=conf,
+        device=device,
+        imgsz=imgsz,
+        classes=classes,
+    )

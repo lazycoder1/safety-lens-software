@@ -138,6 +138,34 @@ def _remote_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     return response.json()
 
 
+def _remote_post_jpeg(
+    path: str,
+    frame_jpeg: bytes,
+    *,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Post JPEG bytes directly, returning None when the server lacks the route."""
+    import requests
+
+    headers = _remote_headers()
+    headers["Content-Type"] = "image/jpeg"
+    response = requests.post(
+        f"{MODEL_SERVER_URL}{path}",
+        params=params,
+        data=frame_jpeg,
+        headers=headers,
+        timeout=MODEL_SERVER_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 404:
+        try:
+            if response.json().get("detail") == "Not Found":
+                return None
+        except (AttributeError, TypeError, ValueError):
+            pass
+    response.raise_for_status()
+    return response.json()
+
+
 def _now() -> float:
     return time.time()
 
@@ -605,9 +633,23 @@ def predict_records(
         ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             raise RuntimeError("Could not encode frame for remote inference")
+        frame_jpeg = buffer.tobytes()
+        metadata = {
+            "model_key": model_key,
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": classes or [],
+        }
+        response = _remote_post_jpeg("/api/infer/jpeg", frame_jpeg, params=metadata)
+        if response is not None:
+            return response.get("detections", [])
+
+        # Keep rolling upgrades safe when the edge process reaches an older
+        # model server that does not expose the binary transport yet.
         payload = {
             "model_key": model_key,
-            "frame_jpeg_b64": base64.b64encode(buffer.tobytes()).decode("ascii"),
+            "frame_jpeg_b64": base64.b64encode(frame_jpeg).decode("ascii"),
             "conf": conf,
             "device": device,
             "imgsz": imgsz,
