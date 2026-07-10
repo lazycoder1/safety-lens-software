@@ -33,7 +33,7 @@ from camera_capture import (
     reconnect_delay_seconds,
     redact_video_source,
 )
-from alert_pipeline import AlertPipeline
+from alert_pipeline import AlertPipeline, DeliveryOutcome
 from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan, required_model_keys_for_capabilities
 from capability_registry import CAPABILITY_REGISTRY, CLASS_TERM_TO_CAPABILITY, RULE_ID_TO_CAPABILITY
@@ -284,10 +284,44 @@ _alert_pipeline_lock = threading.Lock()
 _alert_event_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _alert_delivery(alert: dict, _output_ids: list[str] | None = None) -> None:
+def _alert_delivery(alert: dict, output_ids: list[str] | None = None) -> DeliveryOutcome:
     snap_url = alert.get("snapshotUrl")
     snap_full = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1]) if snap_url else None
-    notification_dispatcher.notify(alert, snap_full, output_ids=_output_ids)
+    results = notification_dispatcher.notify(alert, snap_full, output_ids=output_ids)
+    delivered: list[str] = []
+    retry: list[str] = []
+    terminal: list[str] = []
+    handled: list[str] = []
+    classified: set[str] = set()
+    for result in results:
+        target_id = str(result.get("outputId") or "unknown").strip().lower()
+        classified.add(target_id)
+        if result.get("type") == "in_app":
+            # Persistence/WebSocket handling is tracked separately from the
+            # external delivery worker and must not create a false "partial".
+            handled.append(target_id)
+            continue
+        if result.get("status") in {
+            notification_dispatcher.DELIVERED,
+            notification_dispatcher.SIMULATED,
+        }:
+            delivered.append(target_id)
+        elif result.get("status") == notification_dispatcher.FAILED:
+            retry.append(target_id)
+        else:
+            terminal.append(target_id)
+    if output_ids is not None:
+        terminal.extend(
+            output_id
+            for output_id in output_ids
+            if output_id.strip().lower() not in classified
+        )
+    return DeliveryOutcome(
+        delivered_output_ids=tuple(delivered),
+        retry_output_ids=tuple(retry),
+        terminal_output_ids=tuple(terminal),
+        handled_output_ids=tuple(handled),
+    )
 
 
 def _broadcast_persisted_alert(alert: dict) -> None:
@@ -298,7 +332,17 @@ def _broadcast_persisted_alert(alert: dict) -> None:
         broadcast_alert({"type": "alert", "data": alert}),
         _alert_event_loop,
     )
-    broadcast.result(timeout=5.0)
+
+    def log_broadcast_failure(completed) -> None:
+        try:
+            completed.result()
+        except Exception:
+            logger.exception(
+                "Persisted alert websocket broadcast failed",
+                extra={"alert_id": alert.get("id")},
+            )
+
+    broadcast.add_done_callback(log_broadcast_failure)
 
 
 def _get_alert_pipeline() -> AlertPipeline:
@@ -313,6 +357,13 @@ def _get_alert_pipeline() -> AlertPipeline:
                     persist_queue_size=int(os.getenv("ALERT_PERSIST_QUEUE_SIZE", "256")),
                     delivery_queue_size=int(os.getenv("ALERT_DELIVERY_QUEUE_SIZE", "256")),
                     delivery_workers=int(os.getenv("ALERT_DELIVERY_WORKERS", "4")),
+                    delivery_attempts=int(os.getenv("ALERT_DELIVERY_ATTEMPTS", "3")),
+                    delivery_retry_delay=float(
+                        os.getenv("ALERT_DELIVERY_RETRY_DELAY_SECONDS", "1.0")
+                    ),
+                    delivery_retry_queue_size=int(
+                        os.getenv("ALERT_DELIVERY_RETRY_QUEUE_SIZE", "256")
+                    ),
                 )
     return _alert_pipeline
 
@@ -338,7 +389,31 @@ def stop_alert_pipeline(timeout: float = 10.0) -> bool:
 
 def get_alert_pipeline_stats() -> dict:
     if _alert_pipeline is None:
-        return {"running": False, "persist_queue_depth": 0, "delivery_queue_depth": 0}
+        return {
+            "submitted": 0,
+            "persisted": 0,
+            "persistence_failures": 0,
+            "callback_failures": 0,
+            "delivered": 0,
+            "delivery_failures": 0,
+            "partially_delivered": 0,
+            "delivery_attempts": 0,
+            "delivery_retries": 0,
+            "delivery_terminal_failures": 0,
+            "delivery_retry_exhausted": 0,
+            "delivery_retry_queue_full": 0,
+            "backpressure_events": 0,
+            "running": False,
+            "accepting": False,
+            "active_submitters": 0,
+            "persist_queue_depth": 0,
+            "delivery_queue_depth": 0,
+            "delivery_retry_queue_depth": 0,
+            "delivery_retry_queue_capacity": 0,
+            "persist_worker_alive": False,
+            "retry_worker_alive": False,
+            "delivery_workers_alive": 0,
+        }
     return _alert_pipeline.stats()
 
 

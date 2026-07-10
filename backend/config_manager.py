@@ -249,9 +249,9 @@ DEFAULT_CONFIG = {
     "alert_outputs": DEFAULT_ALERT_OUTPUTS,
     "alert_routing": {
         "channel_matrix": {
-            "P1": {"inApp": True, "telegram": True, "email": True, "webhook": True, "whatsapp": False, "sms": False, "plc": False},
-            "P2": {"inApp": True, "telegram": True, "email": True, "webhook": True, "whatsapp": False, "sms": False, "plc": False},
-            "P3": {"inApp": True, "telegram": True, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
+            "P1": {"inApp": True, "telegram": False, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
+            "P2": {"inApp": True, "telegram": False, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
+            "P3": {"inApp": True, "telegram": False, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
             "P4": {"inApp": True, "telegram": False, "email": False, "webhook": False, "whatsapp": False, "sms": False, "plc": False},
         },
         "timeouts": {

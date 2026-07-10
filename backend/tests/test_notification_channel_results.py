@@ -102,6 +102,39 @@ def test_email_remains_delivered_when_smtp_quit_fails_after_acceptance(monkeypat
     assert smtp.quit_calls == 1
 
 
+def test_email_reports_partial_recipient_refusal_as_failure(monkeypatch):
+    class PartiallyRefused:
+        def sendmail(self, *_args):
+            return {"missed@example.com": (550, b"mailbox unavailable")}
+
+        def quit(self):
+            return None
+
+    monkeypatch.setattr(
+        email_notifier.smtplib,
+        "SMTP_SSL",
+        lambda *_args, **_kwargs: PartiallyRefused(),
+    )
+    monkeypatch.setattr(
+        email_notifier,
+        "get_config",
+        lambda: {
+            "email": {
+                "enabled": True,
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 465,
+                "smtp_user": "",
+                "smtp_pass": "",
+                "from_address": "alerts@example.com",
+                "to_addresses": ["accepted@example.com", "missed@example.com"],
+                "severities": ["P1"],
+            },
+        },
+    )
+
+    assert email_notifier.send_alert(_alert()) is False
+
+
 def test_webhook_reports_http_acceptance_and_rejection(monkeypatch):
     monkeypatch.setattr(
         webhook_notifier,

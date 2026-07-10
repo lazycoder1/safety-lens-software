@@ -48,6 +48,35 @@ def _normalize_channel(channel: str) -> str:
     return str(channel or "").strip().lower()
 
 
+def _terminal_channel_reason(
+    cfg: dict,
+    channel: str,
+    alert: dict,
+) -> tuple[str, str] | None:
+    """Return why a legacy channel cannot succeed without an operator change."""
+    channel_cfg = cfg.get(channel, {})
+    if not isinstance(channel_cfg, dict) or not channel_cfg.get("enabled", False):
+        return ("inactive", "Channel is disabled")
+    if channel == "telegram":
+        configured = bool(channel_cfg.get("bot_token") and channel_cfg.get("chat_id"))
+    elif channel == "email":
+        configured = bool(
+            channel_cfg.get("smtp_host")
+            and channel_cfg.get("from_address")
+            and channel_cfg.get("to_addresses")
+        )
+    elif channel == "webhook":
+        configured = bool(channel_cfg.get("url"))
+    else:
+        configured = True
+    if not configured:
+        return ("invalid", "Channel configuration is incomplete")
+    severities = channel_cfg.get("severities", ["P1", "P2"])
+    if not isinstance(severities, (list, tuple, set)) or alert.get("severity") not in severities:
+        return ("inactive", f"Severity {alert.get('severity', 'unknown')} is filtered")
+    return None
+
+
 def notify(alert: dict, snapshot_path: str | None = None, output_ids: list[str] | None = None) -> list[dict]:
     """Route alert to all enabled alert outputs. Never raises."""
     try:
@@ -92,10 +121,12 @@ def notify_with_results(
     snapshot_path: str | None = None,
     *,
     channels: list[str] | None = None,
+    test_request: bool = False,
 ) -> list[dict]:
     """Compatibility route for legacy channel-matrix clients with truthful outcomes."""
     cfg = get_config()
-    if channels is None:
+    implicit_routing = channels is None
+    if implicit_routing:
         severity_matrix = cfg.get("alert_routing", {}).get("channel_matrix", {}).get(
             alert.get("severity", "P4"),
             {},
@@ -113,11 +144,16 @@ def notify_with_results(
     for channel in requested:
         result_channel = "inApp" if channel == "inapp" else channel
         if channel == "inapp":
+            success = not test_request
             results.append({
                 "channel": result_channel,
-                "success": False,
-                "status": SKIPPED,
-                "message": "In-app delivery is handled by the persisted-alert WebSocket path",
+                "success": success,
+                "status": "handled" if success else SKIPPED,
+                "message": (
+                    "Handled by the persisted alert and WebSocket path"
+                    if success
+                    else "In-app delivery cannot be verified by this external-output test"
+                ),
             })
             continue
         if channel in _NOT_IMPLEMENTED:
@@ -162,6 +198,18 @@ def notify_with_results(
                 "success": False,
                 "status": SKIPPED,
                 "message": "No channel handler is configured",
+            })
+            continue
+        terminal = _terminal_channel_reason(cfg, channel, alert)
+        if terminal is not None:
+            reason_code, terminal_reason = terminal
+            if implicit_routing and reason_code == "inactive":
+                continue
+            results.append({
+                "channel": result_channel,
+                "success": False,
+                "status": SKIPPED,
+                "message": terminal_reason,
             })
             continue
         try:
@@ -683,6 +731,19 @@ def _send_escalation(alert: dict, step: dict) -> str:
         handler = _CHANNEL_HANDLERS.get(channel)
         if handler is None:
             logger.warning("Escalation channel %s not available", channel)
+            return ESCALATION_TERMINAL
+        terminal = _terminal_channel_reason(get_config(), channel, escalated)
+        if terminal is not None:
+            _reason_code, reason = terminal
+            logger.warning(
+                "Escalation channel is not deliverable",
+                extra={
+                    "alert_id": alert.get("id"),
+                    "role": role,
+                    "channel": channel,
+                    "reason": reason,
+                },
+            )
             return ESCALATION_TERMINAL
         if not handler.send_alert(escalated, snap_path):
             return ESCALATION_RETRY

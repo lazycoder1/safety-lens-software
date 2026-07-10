@@ -643,6 +643,7 @@ async def api_test_alert_routing(body: TestAlertRequest):
             test_alert,
             None,
             channels=channels,
+            test_request=True,
         )
         ok = bool(results) and all(result.get("success", False) for result in results)
     else:

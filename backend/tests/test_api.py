@@ -663,6 +663,7 @@ def test_alert_routing_test_returns_honest_channel_results(mock_notify):
     assert alert["severity"] == "P1"
     assert snapshot_path is None
     assert mock_notify.call_args.kwargs["channels"] == ["Telegram", "email"]
+    assert mock_notify.call_args.kwargs["test_request"] is True
 
 
 @mock.patch("notification_dispatcher.notify_with_results")
@@ -673,7 +674,8 @@ def test_alert_routing_test_expands_default_matrix_as_explicit_test_channels(moc
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is False
-    assert mock_notify.call_args.kwargs["channels"] == ["inApp", "telegram", "email", "webhook"]
+    assert mock_notify.call_args.kwargs["channels"] == ["inApp"]
+    assert mock_notify.call_args.kwargs["test_request"] is True
 
 
 # ── GET /api/alert-rules-available ───────────────────────────────────────────

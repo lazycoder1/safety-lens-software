@@ -39,7 +39,15 @@ def _configure_escalation(monkeypatch, steps, send_alert, alerts=None):
     monkeypatch.setattr(
         notification_dispatcher,
         "get_config",
-        lambda: {"alert_routing": {"escalation_steps": steps}},
+        lambda: {
+            "telegram": {
+                "enabled": True,
+                "bot_token": "token",
+                "chat_id": "chat",
+                "severities": ["P1"],
+            },
+            "alert_routing": {"escalation_steps": steps},
+        },
     )
     monkeypatch.setattr(
         notification_dispatcher,
@@ -103,6 +111,18 @@ def test_escalation_normalizes_channel_casing(monkeypatch):
         "_CHANNEL_HANDLERS",
         {"telegram": SimpleNamespace(send_alert=lambda alert, snapshot: sent.append((alert, snapshot)) or True)},
     )
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "get_config",
+        lambda: {
+            "telegram": {
+                "enabled": True,
+                "bot_token": "token",
+                "chat_id": "chat",
+                "severities": ["P1"],
+            },
+        },
+    )
 
     outcome = notification_dispatcher._send_escalation(
         _active_alert(),
@@ -111,6 +131,28 @@ def test_escalation_normalizes_channel_casing(monkeypatch):
 
     assert outcome == notification_dispatcher.ESCALATION_DELIVERED
     assert len(sent) == 1
+
+
+def test_disabled_escalation_channel_is_terminal_without_send(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "_CHANNEL_HANDLERS",
+        {"telegram": SimpleNamespace(send_alert=lambda *_args: sent.append(True) or True)},
+    )
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "get_config",
+        lambda: {"telegram": {"enabled": False}},
+    )
+
+    outcome = notification_dispatcher._send_escalation(
+        _active_alert(),
+        {"id": 1, "afterMinutes": 1, "role": "Manager", "channel": "telegram"},
+    )
+
+    assert outcome == notification_dispatcher.ESCALATION_TERMINAL
+    assert sent == []
 
 
 def test_terminal_unsupported_step_does_not_block_later_step(monkeypatch):
@@ -235,7 +277,25 @@ def test_escalation_paginates_all_active_alerts(monkeypatch):
 
 def test_notify_with_results_normalizes_requested_channel_casing(monkeypatch):
     calls = []
-    monkeypatch.setattr(notification_dispatcher, "get_config", lambda: {})
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "get_config",
+        lambda: {
+            "telegram": {
+                "enabled": True,
+                "bot_token": "token",
+                "chat_id": "chat",
+                "severities": ["P1"],
+            },
+            "email": {
+                "enabled": True,
+                "smtp_host": "smtp.example.com",
+                "from_address": "alerts@example.com",
+                "to_addresses": ["manager@example.com"],
+                "severities": ["P1"],
+            },
+        },
+    )
     monkeypatch.setattr(
         notification_dispatcher,
         "_CHANNEL_HANDLERS",
@@ -248,6 +308,7 @@ def test_notify_with_results_normalizes_requested_channel_casing(monkeypatch):
     results = notification_dispatcher.notify_with_results(
         {"severity": "P1"},
         channels=["Telegram", "telegram", "EMAIL", "SMS", "inApp"],
+        test_request=True,
     )
 
     assert calls == ["telegram", "email"]
@@ -259,7 +320,115 @@ def test_notify_with_results_normalizes_requested_channel_casing(monkeypatch):
     ]
 
 
-def test_notify_reports_actual_external_delivery(monkeypatch):
+def test_explicit_channels_are_real_delivery_targets_unless_marked_as_test(monkeypatch):
+    monkeypatch.setattr(notification_dispatcher, "get_config", lambda: {})
+
+    results = notification_dispatcher.notify_with_results(
+        {"severity": "P1"},
+        channels=["inApp"],
+    )
+
+    assert results == [
+        {
+            "channel": "inApp",
+            "success": True,
+            "status": "handled",
+            "message": "Handled by the persisted alert and WebSocket path",
+        }
+    ]
+
+
+def test_disabled_incomplete_and_filtered_channels_are_terminal_without_send(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "_CHANNEL_HANDLERS",
+        {
+            channel: SimpleNamespace(
+                send_alert=lambda *_args, channel=channel: calls.append(channel) or True
+            )
+            for channel in ("telegram", "email", "webhook")
+        },
+    )
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "get_config",
+        lambda: {
+            "telegram": {"enabled": False},
+            "email": {
+                "enabled": True,
+                "smtp_host": "",
+                "from_address": "alerts@example.com",
+                "to_addresses": ["manager@example.com"],
+                "severities": ["P1"],
+            },
+            "webhook": {
+                "enabled": True,
+                "url": "https://hooks.example.com/alerts",
+                "severities": ["P2"],
+            },
+        },
+    )
+
+    results = notification_dispatcher.notify_with_results(
+        {"severity": "P1"},
+        channels=["telegram", "email", "webhook"],
+    )
+
+    assert calls == []
+    assert [(result["channel"], result["status"], result["message"]) for result in results] == [
+        ("telegram", "skipped", "Channel is disabled"),
+        ("email", "skipped", "Channel configuration is incomplete"),
+        ("webhook", "skipped", "Severity P1 is filtered"),
+    ]
+
+
+def test_implicit_routing_treats_globally_disabled_matrix_channels_as_inactive(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "_CHANNEL_HANDLERS",
+        {
+            channel: SimpleNamespace(
+                send_alert=lambda *_args, channel=channel: calls.append(channel) or True
+            )
+            for channel in ("telegram", "email", "webhook")
+        },
+    )
+    monkeypatch.setattr(
+        notification_dispatcher,
+        "get_config",
+        lambda: {
+            "telegram": {"enabled": False},
+            "email": {"enabled": False},
+            "webhook": {"enabled": False},
+            "alert_routing": {
+                "channel_matrix": {
+                    "P1": {
+                        "inApp": True,
+                        "telegram": True,
+                        "email": True,
+                        "webhook": True,
+                    },
+                },
+            },
+        },
+    )
+
+    results = notification_dispatcher.notify_with_results({"severity": "P1"})
+
+    assert calls == []
+    assert results == [
+        {
+            "channel": "inApp",
+            "success": True,
+            "status": "handled",
+            "message": "Handled by the persisted alert and WebSocket path",
+        }
+    ]
+
+
+def test_notify_requires_every_requested_external_delivery(monkeypatch):
     outcomes = {
         "telegram": SimpleNamespace(send_alert=lambda *_args: False),
         "email": SimpleNamespace(send_alert=lambda *_args: True),
@@ -269,9 +438,22 @@ def test_notify_reports_actual_external_delivery(monkeypatch):
         notification_dispatcher,
         "get_config",
         lambda: {
+            "telegram": {
+                "enabled": True,
+                "bot_token": "token",
+                "chat_id": "chat",
+                "severities": ["P1"],
+            },
+            "email": {
+                "enabled": True,
+                "smtp_host": "smtp.example.com",
+                "from_address": "alerts@example.com",
+                "to_addresses": ["manager@example.com"],
+                "severities": ["P1"],
+            },
             "alert_routing": {
                 "channel_matrix": {
-                    "P1": {"telegram": True, "email": True},
+                    "P1": {"inApp": True, "telegram": True, "email": True},
                 },
             },
         },
