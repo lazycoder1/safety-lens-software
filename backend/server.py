@@ -20,7 +20,13 @@ from constants import PUBLIC_PATHS, PUBLIC_PREFIXES, FRONTEND_DIR
 from logging_config import setup_logging
 from routers import register_routers
 from routers.safety_rules import _ensure_safety_rules
-from video_processing import camera_frame_watchdog_loop, camera_start_retry_loop, start_camera
+from video_processing import (
+    camera_frame_watchdog_loop,
+    camera_start_retry_loop,
+    start_alert_pipeline,
+    start_camera,
+    stop_alert_pipeline,
+)
 import db
 import alert_store
 import face_store
@@ -178,6 +184,7 @@ async def startup():
     auth_store.init_auth_db()
     error_store.init_db()
     load_config()
+    start_alert_pipeline()
 
     # License gate. Inference workers always start, but they self-pause
     # whenever the license state is SUSPENDED. The admin UI stays reachable
@@ -209,6 +216,15 @@ async def startup():
     # Phase 2: model loading + camera startup in background so the server
     # can serve login and health requests immediately.
     asyncio.create_task(_deferred_model_startup())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    import asyncio
+
+    drained = await asyncio.to_thread(stop_alert_pipeline, 10.0)
+    if not drained:
+        logger.warning("Alert pipeline did not drain before shutdown timeout")
 
 
 async def _deferred_model_startup():

@@ -451,6 +451,7 @@ def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
     video_processing._process_detection_observation(
         "cam_candidate",
         np.zeros((40, 60, 3), dtype=np.uint8),
+        None,
         [{"class": "person", "confidence": 0.9, "bbox": [1, 1, 20, 35], "model_family": "ppe_closed_set_candidate"}],
         None,
         {

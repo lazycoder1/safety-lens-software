@@ -16,10 +16,13 @@ router = APIRouter(prefix="/api", tags=["misc"])
 
 
 def _build_health():
+    from video_processing import get_alert_pipeline_stats
+
     snapshot = diagnostics.build_health_snapshot()
     cfg = get_config()
     snapshot["cameraIds"] = list(cfg["cameras"].keys())
     snapshot["alerts_count"] = alert_store.get_stats()["total"]
+    snapshot["alertPipeline"] = get_alert_pipeline_stats()
     return snapshot
 
 
