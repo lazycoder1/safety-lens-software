@@ -19,6 +19,7 @@ import alert_store
 import face_analyzer
 import face_store
 import plate_store
+import inference_scheduler
 import licensing
 import model_manager
 import object_lifecycle_analytics
@@ -97,6 +98,14 @@ CLOSED_SET_PPE_COLORS = {
     3: (255, 90, 120),
 }
 DETECTION_HISTORY_LIMIT = 120
+
+
+def _positive_fps(value, fallback: float) -> float:
+    try:
+        fps = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return fps if fps > 0 else fallback
 
 
 def _normalize_text(value: str) -> str:
@@ -1288,6 +1297,16 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     g = cfg["global"]
     target_fps = cam.get("fps", g["target_fps"])
     frame_interval = 1.0 / target_fps
+    inference_fps = _positive_fps(
+        cam.get("inference_fps", g.get("inference_fps", max(1.0, target_fps / 3))),
+        max(1.0, target_fps / 3),
+    )
+    inference_interval = 1.0 / inference_fps
+    next_inference_at = inference_scheduler.next_inference_slot(
+        camera_id,
+        cfg,
+        inference_interval,
+    )
     alert_cooldown = g["alert_cooldown"]
     yolo_conf = g["yolo_conf"]
     jpeg_quality = g["jpeg_quality"]
@@ -1331,7 +1350,11 @@ def video_processor(camera_id: str, stop_event: threading.Event):
 
         inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{camera_id}-inference")
         pending_inference = None
-        last_inference_started = 0.0
+        next_inference_at = inference_scheduler.next_inference_slot(
+            camera_id,
+            get_config(),
+            inference_interval,
+        )
         try:
             while cap.isOpened() and not stop_event.is_set():
                 if not licensing.is_inference_allowed():
@@ -1354,11 +1377,19 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
                 target_fps = _coerce_fps(current_cam.get("fps", current_g.get("target_fps", target_fps)), target_fps)
                 frame_interval = 1.0 / target_fps
-                inference_fps = _coerce_fps(
+                current_inference_fps = _coerce_fps(
                     current_cam.get("inference_fps", current_g.get("inference_fps", max(1.0, target_fps / 3))),
                     max(1.0, target_fps / 3),
                 )
-                inference_interval = 1.0 / inference_fps
+                current_inference_interval = 1.0 / current_inference_fps
+                if current_inference_interval != inference_interval:
+                    inference_fps = current_inference_fps
+                    inference_interval = current_inference_interval
+                    next_inference_at = inference_scheduler.next_inference_slot(
+                        camera_id,
+                        current_cfg,
+                        inference_interval,
+                    )
                 yolo_conf = current_g.get("yolo_conf", yolo_conf)
                 jpeg_quality = int(current_g.get("jpeg_quality", jpeg_quality))
                 inference_width = int(current_g.get("inference_width", inference_width))
@@ -1406,9 +1437,15 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                         alert_cooldown=alert_cooldown,
                         window_size=window_size,
                     )
-
-                now = time.time()
-                if pending_inference is None and now - last_inference_started >= inference_interval:
+                now = time.monotonic()
+                if pending_inference is None and now - next_inference_at > inference_interval / 2:
+                    next_inference_at = inference_scheduler.next_inference_slot(
+                        camera_id,
+                        current_cfg,
+                        inference_interval,
+                        now=now,
+                    )
+                if pending_inference is None and now >= next_inference_at:
                     try:
                         pending_inference = inference_executor.submit(
                             _run_detection_job,
@@ -1432,7 +1469,12 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                         _clear_live_frame(camera_id)
                         logger.debug("Stopping video processor during executor shutdown", extra={"camera_id": camera_id})
                         return
-                    last_inference_started = now
+                    next_inference_at = inference_scheduler.next_inference_slot(
+                        camera_id,
+                        current_cfg,
+                        inference_interval,
+                        now=now + 1e-9,
+                    )
 
                 elapsed = time.time() - started
                 sleep_time = frame_interval - elapsed
