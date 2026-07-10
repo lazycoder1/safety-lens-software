@@ -30,8 +30,22 @@ HOSTNAME = socket.gethostname()
 
 DEFAULT_LOGS_DIR = Path(__file__).parent / "logs"
 LOGS_DIR = Path(os.environ.get("SAFETYLENS_LOG_DIR", str(DEFAULT_LOGS_DIR)))
-DEFAULT_LOG_MAX_BYTES = 25 * 1024 * 1024
-DEFAULT_LOG_BACKUP_COUNT = 8
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 4
+
+
+def _bounded_env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
 
 
 class JSONFormatter(logging.Formatter):
@@ -86,6 +100,10 @@ class JSONFormatter(logging.Formatter):
             "failed_output_ids",
             "retry_exhausted",
             "failure_count",
+            "total_failure_count",
+            "suppressed_failure_count",
+            "outage_duration_seconds",
+            "stable_window_seconds",
             "delivery_count",
             "received_frame",
             "timeout_seconds",
@@ -141,6 +159,10 @@ class ColorConsoleFormatter(logging.Formatter):
             "max_attempts",
             "retry_exhausted",
             "failure_count",
+            "total_failure_count",
+            "suppressed_failure_count",
+            "outage_duration_seconds",
+            "stable_window_seconds",
             "delivery_count",
             "received_frame",
             "timeout_seconds",
@@ -164,11 +186,21 @@ def setup_logging() -> None:
 
     root_logger = logging.getLogger("rakshak_lens")
     root_logger.setLevel(logging.DEBUG)
-    root_logger.handlers.clear()
+    # Tests and application reloads can initialize logging more than once.
+    # Close old file descriptors instead of merely dropping handler objects.
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        handler.close()
+
+    configured_level = (
+        getattr(logging, level_override)
+        if level_override and hasattr(logging, level_override)
+        else None
+    )
 
     # ── Console handler ──────────────────────────────────────────────
     console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
+    console.setLevel(configured_level or logging.INFO)
     if is_prod:
         console.setFormatter(JSONFormatter())
     else:
@@ -177,8 +209,18 @@ def setup_logging() -> None:
 
     # ── File handlers ──────────────────────────────────────────────────
     LOGS_DIR.mkdir(exist_ok=True)
-    max_bytes = int(os.environ.get("SAFETYLENS_LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES)))
-    backup_count = int(os.environ.get("SAFETYLENS_LOG_BACKUP_COUNT", str(DEFAULT_LOG_BACKUP_COUNT)))
+    max_bytes = _bounded_env_int(
+        "SAFETYLENS_LOG_MAX_BYTES",
+        DEFAULT_LOG_MAX_BYTES,
+        minimum=1024 * 1024,
+        maximum=1024 * 1024 * 1024,
+    )
+    backup_count = _bounded_env_int(
+        "SAFETYLENS_LOG_BACKUP_COUNT",
+        DEFAULT_LOG_BACKUP_COUNT,
+        minimum=1,
+        maximum=20,
+    )
 
     # Main log — INFO and above (requests, state changes, startup)
     file_handler = RotatingFileHandler(
@@ -187,7 +229,7 @@ def setup_logging() -> None:
         backupCount=backup_count,
         encoding="utf-8",
     )
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(configured_level or logging.INFO)
     file_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(file_handler)
 
@@ -198,14 +240,11 @@ def setup_logging() -> None:
         backupCount=backup_count,
         encoding="utf-8",
     )
-    error_file_handler.setLevel(logging.WARNING)
+    error_file_handler.setLevel(max(logging.WARNING, configured_level or logging.WARNING))
     error_file_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(error_file_handler)
 
     # ── Optional level override ──────────────────────────────────────
-    if level_override and hasattr(logging, level_override):
-        console.setLevel(getattr(logging, level_override))
-
     # Quiet noisy third-party loggers
     logging.getLogger("ultralytics").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

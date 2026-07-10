@@ -11,9 +11,9 @@ Quick reference for debugging production issues. Every error source, where it's 
 | `error_log` table | Frontend crashes, API 500s, WebSocket errors, unhandled exceptions | 30 days | `GET /api/errors?source=frontend&limit=50` |
 | `audit_log` table | Admin actions (user approve, alert ack, license upload, config changes) | Unlimited | `GET /api/audit` |
 | `alerts` table | Detection alerts, violations, false positives | Active 24h, then auto-resolved | `GET /api/alerts?status=active` |
-| `backend/logs/rakshak-lens.log` | INFO+ backend activity — requests, state changes, startup | 25MB x 8 files (200MB total) | `cat logs/rakshak-lens.log \| jq .` |
-| `backend/logs/errors.log` | WARNING+ only — errors and warnings. Small, always actionable | 25MB x 8 files | `cat logs/errors.log \| jq .` |
-| Console (stdout) | Same as main log; colorized in dev, JSON in prod | Docker default (json-file) | `docker logs rakshak-lens-backend` |
+| `backend/logs/rakshak-lens.log` | INFO+ backend activity — requests, state changes, startup | 10MB current + 4 backups (50MB maximum) | `cat logs/rakshak-lens.log \| jq .` |
+| `backend/logs/errors.log` | WARNING+ only — errors and warnings. Small, always actionable | 10MB current + 4 backups (50MB maximum) | `cat logs/errors.log \| jq .` |
+| Console (stdout) | Same as main log; colorized in dev, JSON in prod | 10MB x 3 Docker `json-file` segments per container | `docker logs rakshak-lens-backend` |
 
 ---
 
@@ -122,11 +122,13 @@ Parse with: `cat logs/errors.log | jq .` (start here — small file, only action
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SAFETYLENS_ENV` | `dev` | `dev` = colorized console, `prod` = JSON console |
-| `SAFETYLENS_LOG_LEVEL` | `INFO` | Console log level (DEBUG, INFO, WARNING, ERROR) |
+| `SAFETYLENS_ENV` | `dev` in Python; Compose supplies `prod` | `dev` = colorized console, `prod` = JSON console |
+| `SAFETYLENS_LOG_LEVEL` | `INFO` | Console and main-file level (DEBUG, INFO, WARNING, ERROR) |
 | `SAFETYLENS_LOG_DIR` | `backend/logs` | Log file directory |
-| `SAFETYLENS_LOG_MAX_BYTES` | `26214400` (25MB) | Max size before rotation |
-| `SAFETYLENS_LOG_BACKUP_COUNT` | `8` | Number of rotated log files kept |
+| `SAFETYLENS_LOG_MAX_BYTES` | `10485760` (10MB) | Bytes per application log segment; clamped to 1MB–1GB |
+| `SAFETYLENS_LOG_BACKUP_COUNT` | `4` | Rotated application segments kept; clamped to 1–20 |
+| `SAFETYLENS_DOCKER_LOG_MAX_SIZE` | `10m` | Size of each Docker `json-file` segment |
+| `SAFETYLENS_DOCKER_LOG_MAX_FILES` | `3` | Docker `json-file` segments retained per service |
 
 ---
 
@@ -149,12 +151,49 @@ cat logs/rakshak-lens.log | jq 'select(.request_id == "a1b2c3d4")'
 
 ```yaml
 # docker-compose.yml
+logging:
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: 3
 volumes:
   - ./logs:/app/backend/logs      # Survives container restarts
   - snapshots:/app/backend/snapshots
 ```
 
-Without the `./logs` mount, log files are lost on container restart.
+The checked-in Compose files apply the bounded `json-file` policy to every
+service, including PostgreSQL. Without the `./logs` mount, application log
+files are lost on container replacement. Docker logs are a separate copy and
+must remain bounded even when application files are mounted.
+
+With the defaults, the edge/backend application log families consume at most
+about 100MB combined, and each service's Docker log consumes at most about
+30MB. Files can be slightly larger at a rotation boundary.
+
+## RTSP Outage Logging
+
+An unavailable camera is represented as one outage, not one warning per
+reconnect attempt:
+
+- the first failed open or interrupted stream emits a warning;
+- retries continue with exponential backoff and deterministic jitter, reaching
+  a 51–60 second per-camera cadence by default;
+- continuing failures are counted but suppressed from the log;
+- one aggregate warning is emitted every
+  `SAFETYLENS_RTSP_OUTAGE_SUMMARY_SECONDS` (300 seconds by default);
+- a single successful frame does not erase retry debt; recovery is emitted
+  only after `SAFETYLENS_RTSP_RECOVERY_STABLE_SECONDS` (30 seconds by default)
+  of stable frames.
+
+Camera health exposes the active outage, its age, failure totals, suppressed
+warning count, and last transition age. This keeps prolonged camera failures
+observable without writing the same warning to stdout, `safetylens.log`, and
+`errors.log` on every probe.
+
+`SAFETYLENS_RTSP_RECONNECT_MAX_SECONDS` controls the reconnect ceiling (60
+seconds by default, accepted range 1–300). Lowering it discovers recovery
+sooner but spends more network, decoder, CPU, and log resources on a camera
+that remains unavailable.
 
 ---
 
@@ -189,7 +228,7 @@ curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/audit?actor=admin"
 | ERROR | Operations that failed | `errors.log` + `rakshak-lens.log` | HTTP 500, DB down, model load failure, unhandled exception |
 | WARNING | Recoverable issues | `errors.log` + `rakshak-lens.log` | HTTP 4xx, license expiring, heartbeat refresh failed, slow query |
 | INFO | State changes only | `rakshak-lens.log` only | Startup, login, config change, POST/PUT/DELETE requests, slow GET (>2s) |
-| DEBUG | Routine operations | Console only (not in any file) | Every GET request, alert creation, frame processing, health checks |
+| DEBUG | Routine operations | Console + main file when `RAKSHAK_LOG_LEVEL=DEBUG` | Every GET request, alert creation, frame processing, health checks |
 
 **Rule of thumb:** If it happens more than once per minute during normal operation, it's DEBUG. If it's a state change or something a human would care about, it's INFO.
 
@@ -203,9 +242,10 @@ Based on Datadog, 12-Factor App, Better Stack, and SigNoz guidelines:
 - **Standard fields on every line** — `timestamp`, `level`, `service`, `environment`, `host`
 - **request_id correlation** — trace frontend error → backend log → audit event
 - **Two log files** — `errors.log` (check first) + `rakshak-lens.log` (full operational log)
-- **DEBUG disabled in files** — never written to disk, only console during development
+- **DEBUG opt-in** — omitted by default; written to console and the bounded main file only when explicitly selected
 - **No sensitive data** — no passwords, tokens, PII in logs
-- **Rotating files** — 25MB x 8 backups, auto-rotated
+- **Bounded duplicate sinks** — 10MB x 5 application segments per log family and 10MB x 3 Docker segments per service by default
+- **Outage aggregation** — camera failures log transitions and periodic summaries instead of every reconnect attempt
 - **Routine GETs at DEBUG** — polling/reads don't fill the log
 - **State changes at INFO** — logins, config changes, POST/PUT/DELETE always logged
 - **`logger.exception()` for errors** — full stack trace captured, not just message

@@ -35,6 +35,8 @@ import notification_dispatcher
 import policy_engine
 from camera_capture import (
     CAMERA_STOP_TIMEOUT_SECONDS,
+    CameraConnectionEvent,
+    CameraConnectionTracker,
     open_video_capture,
     reconnect_delay_seconds,
     redact_video_source,
@@ -1522,6 +1524,82 @@ def _run_face_recognition(
     return annotated, detections
 
 
+def _publish_camera_connection_health(
+    camera_id: str,
+    tracker: CameraConnectionTracker,
+) -> None:
+    state.update_camera_connection_health(
+        camera_id,
+        outage_active=tracker.outage_active,
+        outage_started_monotonic=tracker.outage_started_monotonic,
+        outage_failure_count=tracker.outage_failure_count,
+        total_failure_count=tracker.total_failure_count,
+        suppressed_failure_count=tracker.suppressed_failure_count,
+        last_transition=tracker.last_transition,
+        last_transition_monotonic=tracker.last_transition_monotonic,
+    )
+
+
+def _connection_event_fields(event: CameraConnectionEvent) -> dict:
+    return {
+        "failure_count": event.failure_count,
+        "total_failure_count": event.total_failure_count,
+        "suppressed_failure_count": event.suppressed_failure_count,
+        "outage_duration_seconds": event.outage_duration_seconds,
+    }
+
+
+def _record_rtsp_connection_failure(
+    camera_id: str,
+    tracker: CameraConnectionTracker,
+    *,
+    safe_source: str,
+    retry_seconds: float,
+    received_frame: bool,
+    now: float,
+) -> None:
+    """Log only an outage transition or periodic aggregate, never every retry."""
+    event = tracker.record_failure(now=now)
+    _publish_camera_connection_health(camera_id, tracker)
+    if event is None:
+        return
+    fields = {
+        "camera_id": camera_id,
+        "source": safe_source,
+        "retry_seconds": round(retry_seconds, 2),
+        "received_frame": received_frame,
+        **_connection_event_fields(event),
+    }
+    if event.kind == "outage":
+        logger.warning("Camera connection outage detected; retry scheduled", extra=fields)
+    elif event.kind == "summary":
+        logger.warning("Camera connection outage persists", extra=fields)
+
+
+def _record_rtsp_connection_frame(
+    camera_id: str,
+    tracker: CameraConnectionTracker,
+    *,
+    now: float,
+) -> bool:
+    """Return true only when a stable window has forgiven reconnect debt."""
+    event = tracker.record_frame(now=now)
+    if event is None:
+        return False
+    _publish_camera_connection_health(camera_id, tracker)
+    if event.kind != "recovered":
+        return False
+    logger.info(
+        "Camera connection recovered after stable frame window",
+        extra={
+            "camera_id": camera_id,
+            "stable_window_seconds": tracker.stable_window_seconds,
+            **_connection_event_fields(event),
+        },
+    )
+    return True
+
+
 def _run_plate_recognition(
     camera_id: str,
     frame: np.ndarray,
@@ -1721,6 +1799,8 @@ def _open_video_capture(video_source: str, stream_type: str) -> cv2.VideoCapture
 def _read_live_frame(cap: cv2.VideoCapture, stream_type: str) -> tuple[bool, np.ndarray | None]:
     ok, frame = cap.read()
     if not ok or frame is None or stream_type != "rtsp":
+        return ok, frame
+    if not callable(getattr(cap, "grab", None)):
         return ok, frame
 
     grabbed_any = False
@@ -2093,6 +2173,14 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     missing_model_keys = model_manager.missing_model_keys(initial_execution_plan["required_model_keys"])
     reconnect_failures = 0
     safe_video_source = redact_video_source(video_source)
+    state.clear_camera_connection_health(camera_id)
+    connection_tracker = (
+        CameraConnectionTracker(now=time.monotonic())
+        if stream_type == "rtsp"
+        else None
+    )
+    if connection_tracker is not None:
+        _publish_camera_connection_health(camera_id, connection_tracker)
     if missing_model_keys:
         state.camera_runtime_status[camera_id] = "awaiting_model_install"
         _clear_camera_observation(camera_id)
@@ -2112,6 +2200,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         cap = _open_video_capture(video_source, stream_type)
         if not cap.isOpened():
             cap.release()
+            if stop_event.is_set():
+                return
             _clear_camera_observation(camera_id)
             active_violations.clear()
             violation_window.clear()
@@ -2120,15 +2210,25 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             reconnect_failures += 1
             state.camera_runtime_status[camera_id] = "reconnecting"
             _clear_live_frame(camera_id)
-            logger.warning(
-                "Video source unavailable; retry scheduled",
-                extra={
-                    "camera_id": camera_id,
-                    "source": safe_video_source,
-                    "retry_seconds": round(delay, 2),
-                    "failure_count": reconnect_failures,
-                },
-            )
+            if connection_tracker is not None:
+                _record_rtsp_connection_failure(
+                    camera_id,
+                    connection_tracker,
+                    safe_source=safe_video_source,
+                    retry_seconds=delay,
+                    received_frame=False,
+                    now=time.monotonic(),
+                )
+            else:
+                logger.warning(
+                    "Video source unavailable; retry scheduled",
+                    extra={
+                        "camera_id": camera_id,
+                        "source": safe_video_source,
+                        "retry_seconds": round(delay, 2),
+                        "failure_count": reconnect_failures,
+                    },
+                )
             if stop_event.wait(delay):
                 return
             continue
@@ -2160,6 +2260,11 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     break
                 if not received_frame:
                     received_frame = True
+                if connection_tracker is not None and _record_rtsp_connection_frame(
+                    camera_id,
+                    connection_tracker,
+                    now=time.monotonic(),
+                ):
                     reconnect_failures = 0
 
                 frame_counter += 1
@@ -2311,15 +2416,13 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             delay = reconnect_delay_seconds(reconnect_failures, camera_id)
             reconnect_failures += 1
             state.camera_runtime_status[camera_id] = "reconnecting"
-            logger.warning(
-                "RTSP stream interrupted; retry scheduled",
-                extra={
-                    "camera_id": camera_id,
-                    "source": safe_video_source,
-                    "retry_seconds": round(delay, 2),
-                    "failure_count": reconnect_failures,
-                    "received_frame": received_frame,
-                },
+            _record_rtsp_connection_failure(
+                camera_id,
+                connection_tracker,
+                safe_source=safe_video_source,
+                retry_seconds=delay,
+                received_frame=received_frame,
+                now=time.monotonic(),
             )
             if stop_event.wait(delay):
                 return
@@ -2391,6 +2494,7 @@ def _finalize_camera_worker_exit(cam_id: str, stop_event: threading.Event) -> No
                 return
             del state.camera_threads[cam_id]
         _clear_camera_observation(cam_id)
+        state.clear_camera_connection_health(cam_id)
         state.camera_runtime_status[cam_id] = "offline" if stop_event.is_set() else "error"
 
 
@@ -2603,6 +2707,7 @@ def stop_camera(cam_id: str) -> bool:
         state.camera_detection_history.pop(cam_id, None)
         state.camera_schedule_telemetry.pop(cam_id, None)
         _last_pose_results.pop(cam_id, None)
+        state.clear_camera_connection_health(cam_id)
         state.camera_runtime_status[cam_id] = "offline"
         return True
 

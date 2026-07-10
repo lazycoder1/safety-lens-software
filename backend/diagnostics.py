@@ -96,6 +96,7 @@ def build_health_snapshot() -> dict:
         running_cameras = 0
         now = time.time()
         missing_vlm_companions = 0
+        active_camera_outages = 0
         for cam_id, cam in cfg.get("cameras", {}).items():
             enabled = bool(cam.get("enabled", True))
             worker_running = _registered_worker_is_alive(state.camera_threads, cam_id)
@@ -112,12 +113,15 @@ def build_health_snapshot() -> dict:
             if worker_running and not frame_available and runtime_status == "running":
                 runtime_status = "stale"
             stream_stats = stream_fanout.stats(cam_id)
+            connection_health = state.get_camera_connection_health(cam_id)
             if enabled:
                 enabled_cameras += 1
             if enabled and worker_running:
                 running_cameras += 1
             if enabled and vlm_expected and not vlm_worker_running:
                 missing_vlm_companions += 1
+            if enabled and connection_health["outageActive"]:
+                active_camera_outages += 1
             cameras.append(
                 {
                     "id": cam_id,
@@ -130,6 +134,7 @@ def build_health_snapshot() -> dict:
                     "frameFresh": frame_available,
                     "lastFrameAgeSeconds": None if last_frame_age is None else round(last_frame_age, 1),
                     "runtimeStatus": runtime_status,
+                    "connection": connection_health,
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
                     "stream": {
                         "sequence": stream_stats["sequence"],
@@ -165,6 +170,10 @@ def build_health_snapshot() -> dict:
             if status == "ok":
                 status = "degraded"
             reasons.append("one or more enabled VLM camera companions are not running")
+        if active_camera_outages:
+            if status == "ok":
+                status = "degraded"
+            reasons.append("one or more cameras have an active connection outage")
 
         result = {
             "status": status,
