@@ -16,6 +16,7 @@ import requests
 import alert_store
 import face_analyzer
 import face_store
+import inference_scheduler
 import licensing
 import model_manager
 import state
@@ -55,6 +56,14 @@ _COCO_CLASS_TO_CAPABILITIES = {
 }
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
+
+
+def _positive_fps(value, fallback: float) -> float:
+    try:
+        fps = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return fps if fps > 0 else fallback
 
 
 def _normalize_text(value: str) -> str:
@@ -373,6 +382,16 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     g = cfg["global"]
     target_fps = cam.get("fps", g["target_fps"])
     frame_interval = 1.0 / target_fps
+    inference_fps = _positive_fps(
+        cam.get("inference_fps", g.get("inference_fps", max(1.0, target_fps / 3))),
+        max(1.0, target_fps / 3),
+    )
+    inference_interval = 1.0 / inference_fps
+    next_inference_at = inference_scheduler.next_inference_slot(
+        camera_id,
+        cfg,
+        inference_interval,
+    )
     alert_cooldown = g["alert_cooldown"]
     yolo_conf = g["yolo_conf"]
     jpeg_quality = g["jpeg_quality"]
@@ -383,7 +402,6 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     active_violations: set[str] = set()
     violation_window: dict[str, list[bool]] = {}
     window_size = 15
-    frame_counter = 0
     last_annotated = None
 
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
@@ -416,13 +434,29 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             if not ok:
                 break
 
-            frame_counter += 1
             current_cfg = get_config()
+            current_g = current_cfg.get("global", g)
             current_cam = current_cfg["cameras"].get(camera_id, {})
             execution_plan = current_cam.get("execution_plan") or build_execution_plan(current_cam, current_cfg)
             state.camera_runtime_status[camera_id] = "running"
+            current_inference_fps = _positive_fps(
+                current_cam.get(
+                    "inference_fps",
+                    current_g.get("inference_fps", max(1.0, target_fps / 3)),
+                ),
+                inference_fps,
+            )
+            current_inference_interval = 1.0 / current_inference_fps
+            if current_inference_interval != inference_interval:
+                inference_fps = current_inference_fps
+                inference_interval = current_inference_interval
+                next_inference_at = inference_scheduler.next_inference_slot(
+                    camera_id,
+                    current_cfg,
+                    inference_interval,
+                )
 
-            if frame_counter % 3 == 1:
+            if time.monotonic() >= next_inference_at:
                 try:
                     annotated, detections = _run_grouped_inference(
                         camera_id,
@@ -447,6 +481,12 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                     detections = []
                 last_annotated = annotated
                 state.camera_detections[camera_id] = detections
+                next_inference_at = inference_scheduler.next_inference_slot(
+                    camera_id,
+                    current_cfg,
+                    inference_interval,
+                    now=time.monotonic() + 1e-9,
+                )
             elif last_annotated is not None:
                 annotated = last_annotated
             else:
