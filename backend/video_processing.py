@@ -16,6 +16,7 @@ import requests
 import alert_store
 import face_analyzer
 import face_store
+import inference_scheduler
 import licensing
 import model_manager
 import state
@@ -24,7 +25,7 @@ from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan
 from capability_registry import CLASS_TERM_TO_CAPABILITY
 from config_manager import get_config
-from constants import OLLAMA_URL, VIDEO_DIR, VIOLATION_THRESHOLD, YOLOE_COLORS
+from constants import COCO_NAMES, OLLAMA_URL, VIDEO_DIR, VIOLATION_THRESHOLD
 from detection import (
     apply_camera_overlay,
     check_fall_detections,
@@ -55,6 +56,166 @@ _COCO_CLASS_TO_CAPABILITIES = {
 }
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
+STREAM_MAX_WIDTH = 854
+
+
+def _positive_fps(value, fallback: float) -> float:
+    try:
+        fps = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return fps if fps > 0 else fallback
+
+
+def _configured_stream_fps(camera: dict, global_config: dict, target_fps: float) -> float:
+    target = _positive_fps(target_fps, 1.0)
+    default = min(target, 4.0)
+    configured = camera.get("stream_fps", global_config.get("stream_fps", default))
+    return min(target, _positive_fps(configured, default))
+
+
+def _stream_publish_due(last_published_at: float, now: float, stream_fps: float) -> bool:
+    return last_published_at <= 0.0 or now - last_published_at >= 1.0 / stream_fps
+
+
+def _resize_for_stream(frame: np.ndarray, max_width: int = STREAM_MAX_WIDTH) -> np.ndarray:
+    height, width = frame.shape[:2]
+    if width <= max_width:
+        return frame
+    scale = max_width / width
+    return cv2.resize(frame, (max_width, int(height * scale)))
+
+
+def _scale_stream_detection_records(
+    detections: list[dict],
+    source_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+) -> list[dict]:
+    """Copy valid detections into stream coordinates without mutating inference state."""
+    source_height, source_width = source_shape[:2]
+    output_height, output_width = output_shape[:2]
+    scale_x = output_width / source_width
+    scale_y = output_height / source_height
+    scaled: list[dict] = []
+    for detection in detections:
+        bbox = detection.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        x1, y1, x2, y2 = bbox
+        scaled_bbox = [
+            min(output_width - 1, max(0, int(round(float(x1) * scale_x)))),
+            min(output_height - 1, max(0, int(round(float(y1) * scale_y)))),
+            min(output_width - 1, max(0, int(round(float(x2) * scale_x)))),
+            min(output_height - 1, max(0, int(round(float(y2) * scale_y)))),
+        ]
+        scaled.append({**detection, "bbox": scaled_bbox})
+    return scaled
+
+
+def _stream_visible_detection_records(detections: list[dict]) -> list[dict]:
+    """Preserve the existing COCO-only live overlay while retaining all analytics records."""
+    return [
+        detection
+        for detection in detections
+        if detection.get("model_family") in {None, "coco_primary"}
+        and isinstance(detection.get("bbox"), (list, tuple))
+        and len(detection["bbox"]) == 4
+    ]
+
+
+def _draw_stream_detection_records(
+    frame: np.ndarray,
+    detections: list[dict],
+    camera_id: str,
+    *,
+    show_overlay: bool = True,
+) -> np.ndarray:
+    visible_detections = _stream_visible_detection_records(detections)
+    annotated, _ = draw_detection_records(
+        frame,
+        visible_detections,
+        camera_id,
+        show_overlay=False,
+    )
+    if show_overlay:
+        annotated = apply_camera_overlay(
+            annotated,
+            camera_id=camera_id,
+            detection_count=len(visible_detections),
+        )
+    return annotated
+
+
+def _render_stream_views(
+    camera_id: str,
+    frame: np.ndarray,
+    detections: list[dict],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resize once, then draw stream-only annotations at the output resolution."""
+    clean_view = _resize_for_stream(frame)
+    visible_detections = _stream_visible_detection_records(detections)
+    if clean_view is frame:
+        stream_detections = visible_detections
+    else:
+        stream_detections = _scale_stream_detection_records(
+            visible_detections,
+            frame.shape,
+            clean_view.shape,
+        )
+    annotated_view = _draw_stream_detection_records(
+        clean_view,
+        stream_detections,
+        camera_id,
+    )
+    return annotated_view, clean_view
+
+
+def _encode_stream_jpeg(frame: np.ndarray, jpeg_quality: int) -> bytes:
+    ok, buffer = cv2.imencode(
+        ".jpg",
+        frame,
+        [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
+    )
+    if not ok:
+        raise RuntimeError("Failed to encode stream frame")
+    return buffer.tobytes()
+
+
+def _preserved_source_annotation(
+    frame: np.ndarray,
+    last_annotated: np.ndarray | None,
+    execution_plan: dict,
+) -> np.ndarray | None:
+    if last_annotated is None or last_annotated.shape[:2] != frame.shape[:2]:
+        return None
+    if frame.shape[1] <= STREAM_MAX_WIDTH:
+        return last_annotated
+    if execution_plan.get("run_face_recognition") or execution_plan.get("run_pose_specialist"):
+        return last_annotated
+    return None
+
+
+def _publish_stream_frame(
+    camera_id: str,
+    frame: np.ndarray,
+    detections: list[dict],
+    *,
+    jpeg_quality: int,
+    source_annotated: np.ndarray | None = None,
+) -> None:
+    if source_annotated is None:
+        annotated_view, clean_view = _render_stream_views(camera_id, frame, detections)
+    else:
+        clean_view = _resize_for_stream(frame)
+        clean_height, clean_width = clean_view.shape[:2]
+        if source_annotated.shape[:2] == clean_view.shape[:2]:
+            annotated_view = source_annotated
+        else:
+            annotated_view = cv2.resize(source_annotated, (clean_width, clean_height))
+    annotated_jpeg = _encode_stream_jpeg(annotated_view, jpeg_quality)
+    clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+    state.camera_frames[camera_id] = annotated_jpeg
+    state.camera_clean_frames[camera_id] = clean_jpeg
 
 
 def _normalize_text(value: str) -> str:
@@ -76,6 +237,33 @@ def _normalize_detection_batch(detections: list[dict], model_family: str) -> lis
             "capability_keys": capability_keys,
         })
     return normalized
+
+
+def _detection_batch_from_records(
+    records: list[dict],
+    model_family: str,
+    *,
+    class_names: dict[int, str] | list[str] | None = None,
+) -> list[dict]:
+    """Normalize model records without rendering a full-resolution frame."""
+    detections: list[dict] = []
+    for record in records:
+        class_id = int(record.get("class_id", record.get("cls", 0)))
+        if record.get("class"):
+            class_name = str(record["class"])
+        elif class_names is None:
+            class_name = COCO_NAMES.get(class_id, f"class_{class_id}")
+        elif isinstance(class_names, list):
+            class_name = class_names[class_id] if class_id < len(class_names) else f"class_{class_id}"
+        else:
+            class_name = class_names.get(class_id, f"class_{class_id}")
+        detections.append({
+            "class_id": class_id,
+            "class": class_name,
+            "confidence": float(record.get("confidence", record.get("conf", 0.0))),
+            "bbox": list(map(int, record["bbox"])),
+        })
+    return _normalize_detection_batch(detections, model_family)
 
 
 def create_alert(
@@ -210,68 +398,74 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
 
 
 def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: dict, *, conf: float, device: str, imgsz: int):
-    annotated = frame.copy()
+    annotated = None
     detections: list[dict] = []
     visible_detection_count = 0
+    ppe_prompts = execution_plan.get("ppe_prompt_terms") or []
+    long_tail_prompts = execution_plan.get("yoloe_prompt_terms") or []
+    batch_requests = []
+    if execution_plan.get("run_coco_primary"):
+        batch_requests.append({
+            "request_id": "coco_primary",
+            "model_key": "coco_primary",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+        })
+    if execution_plan.get("run_ppe_specialist") and ppe_prompts:
+        batch_requests.append({
+            "request_id": "ppe_specialist",
+            "model_key": "ppe_specialist",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": ppe_prompts,
+        })
+    if execution_plan.get("run_yoloe_long_tail") and long_tail_prompts:
+        batch_requests.append({
+            "request_id": "yoloe_long_tail",
+            "model_key": "yoloe_long_tail",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": long_tail_prompts,
+        })
+    record_batches = model_manager.predict_record_batches(frame, batch_requests)
 
     if execution_plan.get("run_coco_primary"):
-        records = model_manager.predict_records(
-            "coco_primary",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-        )
-        annotated, coco_detections = draw_detection_records(
-            annotated,
+        records = record_batches["coco_primary"]
+        coco_detections = _detection_batch_from_records(
             records,
-            camera_id,
-            show_overlay=False,
+            "coco_primary",
         )
-        detections.extend(_normalize_detection_batch(coco_detections, "coco_primary"))
+        detections.extend(coco_detections)
         visible_detection_count += len(coco_detections)
 
-    if execution_plan.get("run_ppe_specialist") and execution_plan.get("ppe_prompt_terms"):
-        ppe_prompts = execution_plan["ppe_prompt_terms"]
-        records = model_manager.predict_records(
+    if execution_plan.get("run_ppe_specialist") and ppe_prompts:
+        records = record_batches["ppe_specialist"]
+        ppe_detections = _detection_batch_from_records(
+            records,
             "ppe_specialist",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-            classes=ppe_prompts,
-        )
-        _ppe_annotated, ppe_detections = draw_detection_records(
-            annotated,
-            records,
-            camera_id,
             class_names=ppe_prompts,
-            colors=YOLOE_COLORS,
-            show_overlay=False,
         )
-        detections.extend(_normalize_detection_batch(ppe_detections, "ppe_specialist"))
+        detections.extend(ppe_detections)
 
-    if execution_plan.get("run_yoloe_long_tail") and execution_plan.get("yoloe_prompt_terms"):
-        long_tail_prompts = execution_plan["yoloe_prompt_terms"]
-        records = model_manager.predict_records(
-            "yoloe_long_tail",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-            classes=long_tail_prompts,
-        )
-        _long_tail_annotated, long_tail_detections = draw_detection_records(
-            annotated,
+    if execution_plan.get("run_yoloe_long_tail") and long_tail_prompts:
+        records = record_batches["yoloe_long_tail"]
+        long_tail_detections = _detection_batch_from_records(
             records,
-            camera_id,
+            "yoloe_long_tail",
             class_names=long_tail_prompts,
-            colors=YOLOE_COLORS,
-            show_overlay=False,
         )
-        detections.extend(_normalize_detection_batch(long_tail_detections, "yoloe_long_tail"))
+        detections.extend(long_tail_detections)
 
     if execution_plan.get("run_pose_specialist"):
+        annotated = _draw_stream_detection_records(
+            frame,
+            detections,
+            camera_id,
+            show_overlay=False,
+        )
         pose_results = model_manager.predict(
             "pose_specialist",
             frame,
@@ -284,11 +478,12 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         # Store pose results on frame state for fall checking in violation loop
         _last_pose_results[camera_id] = pose_results
 
-    annotated = apply_camera_overlay(
-        annotated,
-        camera_id=camera_id,
-        detection_count=visible_detection_count,
-    )
+    if annotated is not None:
+        annotated = apply_camera_overlay(
+            annotated,
+            camera_id=camera_id,
+            detection_count=visible_detection_count,
+        )
     return annotated, detections
 
 
@@ -365,6 +560,16 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     g = cfg["global"]
     target_fps = cam.get("fps", g["target_fps"])
     frame_interval = 1.0 / target_fps
+    inference_fps = _positive_fps(
+        cam.get("inference_fps", g.get("inference_fps", max(1.0, target_fps / 3))),
+        max(1.0, target_fps / 3),
+    )
+    inference_interval = 1.0 / inference_fps
+    next_inference_at = inference_scheduler.next_inference_slot(
+        camera_id,
+        cfg,
+        inference_interval,
+    )
     alert_cooldown = g["alert_cooldown"]
     yolo_conf = g["yolo_conf"]
     jpeg_quality = g["jpeg_quality"]
@@ -375,7 +580,6 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     active_violations: set[str] = set()
     violation_window: dict[str, list[bool]] = {}
     window_size = 15
-    frame_counter = 0
     last_annotated = None
 
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
@@ -398,6 +602,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 time.sleep(0.1)
             continue
 
+        last_stream_published_at = 0.0
         while cap.isOpened() and not stop_event.is_set():
             if not licensing.is_inference_allowed():
                 time.sleep(LICENSE_PAUSE_INTERVAL)
@@ -408,13 +613,29 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             if not ok:
                 break
 
-            frame_counter += 1
             current_cfg = get_config()
+            current_g = current_cfg.get("global", g)
             current_cam = current_cfg["cameras"].get(camera_id, {})
             execution_plan = current_cam.get("execution_plan") or build_execution_plan(current_cam, current_cfg)
             state.camera_runtime_status[camera_id] = "running"
+            current_inference_fps = _positive_fps(
+                current_cam.get(
+                    "inference_fps",
+                    current_g.get("inference_fps", max(1.0, target_fps / 3)),
+                ),
+                inference_fps,
+            )
+            current_inference_interval = 1.0 / current_inference_fps
+            if current_inference_interval != inference_interval:
+                inference_fps = current_inference_fps
+                inference_interval = current_inference_interval
+                next_inference_at = inference_scheduler.next_inference_slot(
+                    camera_id,
+                    current_cfg,
+                    inference_interval,
+                )
 
-            if frame_counter % 3 == 1:
+            if time.monotonic() >= next_inference_at:
                 try:
                     annotated, detections = _run_grouped_inference(
                         camera_id,
@@ -425,6 +646,12 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                         imgsz=inference_width,
                     )
                     if execution_plan.get("run_face_recognition"):
+                        if annotated is None:
+                            annotated = _draw_stream_detection_records(
+                                frame,
+                                detections,
+                                camera_id,
+                            )
                         annotated, face_detections = _run_face_recognition(
                             camera_id,
                             frame,
@@ -433,18 +660,24 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                             last_face_log_by_key,
                         )
                         detections.extend(face_detections)
+                    if annotated is None and frame.shape[1] <= STREAM_MAX_WIDTH:
+                        annotated = _draw_stream_detection_records(
+                            frame,
+                            detections,
+                            camera_id,
+                        )
                 except Exception:
                     logger.exception("Detection failed", extra={"camera_id": camera_id})
                     annotated = frame
                     detections = []
                 last_annotated = annotated
                 state.camera_detections[camera_id] = detections
-            elif last_annotated is not None:
-                annotated = last_annotated
-            else:
-                annotated = frame
-                state.camera_detections[camera_id] = []
-
+                next_inference_at = inference_scheduler.next_inference_slot(
+                    camera_id,
+                    current_cfg,
+                    inference_interval,
+                    now=time.monotonic() + 1e-9,
+                )
             detections = state.camera_detections.get(camera_id, [])
 
             # Fall detection runs independently — pose model doesn't need COCO detections
@@ -521,21 +754,24 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                         violation_window.pop(rule_key, None)
                         active_violations.discard(rule_key)
 
-            height, width = annotated.shape[:2]
-            if width > 854:
-                scale = 854.0 / width
-                new_width = 854
-                new_height = int(height * scale)
-                clean_resized = cv2.resize(frame, (new_width, new_height))
-                annotated = cv2.resize(annotated, (new_width, new_height))
-            else:
-                clean_resized = frame
-
-            _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-            state.camera_frames[camera_id] = buffer.tobytes()
-
-            _, clean_buffer = cv2.imencode(".jpg", clean_resized, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-            state.camera_clean_frames[camera_id] = clean_buffer.tobytes()
+            stream_fps = _configured_stream_fps(current_cam, current_g, target_fps)
+            stream_now = time.monotonic()
+            if _stream_publish_due(last_stream_published_at, stream_now, stream_fps):
+                try:
+                    _publish_stream_frame(
+                        camera_id,
+                        frame,
+                        detections,
+                        jpeg_quality=jpeg_quality,
+                        source_annotated=_preserved_source_annotation(
+                            frame,
+                            last_annotated,
+                            execution_plan,
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Stream frame publication failed", extra={"camera_id": camera_id})
+                last_stream_published_at = stream_now
 
             elapsed = time.time() - started
             sleep_time = frame_interval - elapsed
@@ -624,5 +860,8 @@ def mjpeg_generator(camera_id: str):
         if frame_bytes is not None:
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
         cfg = get_config()
-        fps = cfg["global"]["target_fps"]
+        global_config = cfg["global"]
+        camera = cfg["cameras"].get(camera_id, {})
+        target_fps = camera.get("fps", global_config["target_fps"])
+        fps = _configured_stream_fps(camera, global_config, target_fps)
         time.sleep(1.0 / fps)
