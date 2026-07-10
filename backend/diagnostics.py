@@ -21,6 +21,7 @@ import model_manager
 import state
 from config_manager import get_config, get_redacted_config
 from logging_config import LOGS_DIR
+from mjpeg_fanout import stream_fanout
 
 logger = logging.getLogger("rakshak_lens.diagnostics")
 
@@ -74,6 +75,7 @@ def build_health_snapshot() -> dict:
             runtime_status = state.camera_runtime_status.get(cam_id, "offline")
             if worker_running and not frame_available and runtime_status == "running":
                 runtime_status = "stale"
+            stream_stats = stream_fanout.stats(cam_id)
             if enabled:
                 enabled_cameras += 1
             if enabled and worker_running:
@@ -89,6 +91,16 @@ def build_health_snapshot() -> dict:
                     "lastFrameAgeSeconds": None if last_frame_age is None else round(last_frame_age, 1),
                     "runtimeStatus": runtime_status,
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
+                    "stream": {
+                        "sequence": stream_stats["sequence"],
+                        "subscribers": stream_stats["subscribers"],
+                        "frameAvailable": stream_stats["has_frame"],
+                        "frameAgeSeconds": (
+                            round(stream_stats["frame_age_seconds"], 3)
+                            if stream_stats["frame_age_seconds"] is not None
+                            else None
+                        ),
+                    },
                 }
             )
 
@@ -118,6 +130,7 @@ def build_health_snapshot() -> dict:
             "license": license_status.to_public_dict(),
             "models": models,
             "cameras": cameras,
+            "streamFanout": stream_fanout.operational_stats(),
             "storage": {
                 **storage,
                 "freeBytes": free_bytes,

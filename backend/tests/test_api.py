@@ -154,6 +154,18 @@ def test_health():
     data = resp.json()
     assert data["status"] in {"ok", "degraded"}
     assert "cameras" in data
+    assert all(
+        {"sequence", "subscribers", "frameAvailable", "frameAgeSeconds"}
+        <= set(camera["stream"])
+        for camera in data["cameras"]
+    )
+    assert {
+        "subscribers",
+        "subscriberLimitPerCamera",
+        "subscriberLimitTotal",
+        "rejectedSubscribers",
+        "rejectedByCamera",
+    } <= set(data["streamFanout"])
 
 
 def test_error_reporting_is_public_but_error_query_requires_auth():
@@ -996,16 +1008,32 @@ def test_update_camera_not_found():
     assert resp.status_code == 404
 
 
-@mock.patch("routers.cameras.stop_camera")
-def test_delete_camera(mock_stop):
+@mock.patch("routers.cameras.stream_fanout.retire")
+@mock.patch("routers.cameras.stop_camera", return_value=True)
+def test_delete_camera(mock_stop, mock_retire):
     cam_id = _first_camera_id()
     resp = api_delete(f"/api/cameras/{cam_id}")
     assert resp.status_code == 200
     assert resp.json()["deleted"] == cam_id
     mock_stop.assert_called_once_with(cam_id)
+    mock_retire.assert_called_once_with(cam_id)
 
     cfg = config_manager.get_config()
     assert cam_id not in cfg["cameras"]
+
+
+@mock.patch("routers.cameras.stream_fanout.retire")
+@mock.patch("routers.cameras.stop_camera", return_value=False)
+def test_delete_camera_waits_for_stuck_worker(mock_stop, mock_retire):
+    cam_id = _first_camera_id()
+
+    resp = api_delete(f"/api/cameras/{cam_id}")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Camera worker is still stopping; retry deletion"
+    mock_stop.assert_called_once_with(cam_id)
+    mock_retire.assert_not_called()
+    assert cam_id in config_manager.get_config()["cameras"]
 
 
 def test_delete_camera_not_found():

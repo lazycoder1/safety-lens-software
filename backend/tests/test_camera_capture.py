@@ -9,6 +9,7 @@ import camera_runtime
 from logging_config import JSONFormatter
 import state
 import video_processing
+from mjpeg_fanout import MjpegFanout
 
 
 def test_redact_video_source_removes_credentials_and_query_values():
@@ -86,15 +87,19 @@ def test_reconnect_backoff_grows_and_caps():
 
 
 def test_clear_camera_observation_discards_stale_frame_and_detection_state(monkeypatch):
+    fanout = MjpegFanout()
+    fanout.publish("cam1", b"annotated")
     monkeypatch.setattr(state, "camera_frames", {"cam1": b"annotated"})
     monkeypatch.setattr(state, "camera_clean_frames", {"cam1": b"clean"})
     monkeypatch.setattr(state, "camera_detections", {"cam1": [{"class": "person"}]})
+    monkeypatch.setattr(video_processing, "stream_fanout", fanout)
 
     video_processing._clear_camera_observation("cam1")
 
     assert state.camera_frames["cam1"] is None
     assert state.camera_clean_frames["cam1"] is None
     assert state.camera_detections["cam1"] == []
+    assert fanout.stats("cam1")["has_frame"] is False
 
 
 def test_read_failure_discards_observations_at_worker_boundary(monkeypatch):

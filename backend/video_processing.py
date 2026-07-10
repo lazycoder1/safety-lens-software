@@ -49,6 +49,7 @@ from detection import (
     draw_pose_detections,
     extract_violation_bboxes,
 )
+from mjpeg_fanout import stream_fanout
 
 LICENSE_PAUSE_INTERVAL = 1.0
 CAMERA_START_RETRY_INTERVAL_SECONDS = 10.0
@@ -267,6 +268,7 @@ def _publish_stream_frame(
     state.camera_frames[camera_id] = annotated_jpeg
     state.camera_clean_frames[camera_id] = clean_jpeg
     state.camera_frame_updated_at[camera_id] = time.time()
+    stream_fanout.publish(camera_id, annotated_jpeg)
 
 
 def _clear_camera_observation(camera_id: str) -> None:
@@ -274,6 +276,8 @@ def _clear_camera_observation(camera_id: str) -> None:
     state.camera_frames[camera_id] = None
     state.camera_clean_frames[camera_id] = None
     state.camera_detections[camera_id] = []
+    state.camera_frame_updated_at.pop(camera_id, None)
+    stream_fanout.clear(camera_id)
 
 _alert_pipeline: AlertPipeline | None = None
 _alert_pipeline_lock = threading.Lock()
@@ -362,6 +366,28 @@ def _encode_alert_snapshot_pair(
     if not annotated_ok or not clean_ok:
         raise RuntimeError("Failed to encode alert snapshot")
     return annotated_buffer.tobytes(), clean_buffer.tobytes()
+
+
+def _encode_inference_snapshot_pair(
+    camera_id: str,
+    clean_frame: np.ndarray,
+    detections: list[dict],
+    jpeg_quality: int,
+    *,
+    annotated_frame: np.ndarray | None = None,
+) -> tuple[bytes, bytes]:
+    """Encode an alert snapshot from the exact frame used for inference."""
+    if annotated_frame is None:
+        annotated_frame = _draw_stream_detection_records(
+            clean_frame,
+            detections,
+            camera_id,
+        )
+    return _encode_alert_snapshot_pair(
+        annotated_frame,
+        clean_frame,
+        jpeg_quality,
+    )
 
 
 def _normalize_text(value: str) -> str:
@@ -1531,17 +1557,12 @@ def _process_detection_observation(
             snapshot_jpeg = None
             clean_snapshot_jpeg = None
             try:
-                alert_view = annotated_frame
-                if alert_view is None:
-                    alert_view = _draw_stream_detection_records(
-                        frame,
-                        detections,
-                        camera_id,
-                    )
-                snapshot_jpeg, clean_snapshot_jpeg = _encode_alert_snapshot_pair(
-                    alert_view,
+                snapshot_jpeg, clean_snapshot_jpeg = _encode_inference_snapshot_pair(
+                    camera_id,
                     frame,
+                    detections,
                     int(current_cfg.get("global", {}).get("jpeg_quality", 70)),
+                    annotated_frame=annotated_frame,
                 )
             except Exception:
                 logger.exception(
@@ -2039,20 +2060,3 @@ async def camera_frame_watchdog_loop(
                 await asyncio.to_thread(restart_camera, cam_id)
         except Exception:
             logger.exception("Camera frame watchdog failed")
-
-
-def mjpeg_generator(camera_id: str):
-    while True:
-        frame_bytes = state.camera_frames.get(camera_id)
-        if frame_bytes is not None and _is_live_frame_fresh(camera_id):
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-        else:
-            status = state.camera_runtime_status.get(camera_id, "starting")
-            placeholder = _status_frame(camera_id, status)
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + placeholder + b"\r\n"
-        cfg = get_config()
-        global_config = cfg["global"]
-        camera = cfg["cameras"].get(camera_id, {})
-        target_fps = camera.get("fps", global_config["target_fps"])
-        fps = _configured_stream_fps(camera, global_config, target_fps)
-        time.sleep(1.0 / fps)
