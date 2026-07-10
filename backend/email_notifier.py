@@ -152,7 +152,11 @@ def _send(host: str, port: int, user: str, password: str,
     try:
         if user and password:
             server.login(user, password)
-        server.sendmail(from_addr, to_addrs, msg.as_string())
+        refused_recipients = server.sendmail(from_addr, to_addrs, msg.as_string())
+        if refused_recipients:
+            # SMTP may accept only a subset. Reporting the channel as delivered
+            # would silently hide the rejected safety-alert recipients.
+            raise smtplib.SMTPRecipientsRefused(refused_recipients)
     except Exception:
         try:
             server.quit()

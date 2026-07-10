@@ -61,9 +61,9 @@ const severities: Severity[] = ["P1", "P2", "P3", "P4"]
 type ChannelMatrix = Record<Severity, Record<Channel, boolean>>
 
 const defaultChannelMatrix: ChannelMatrix = {
-  P1: { inApp: true, telegram: true, email: true, webhook: true },
-  P2: { inApp: true, telegram: true, email: true, webhook: true },
-  P3: { inApp: true, telegram: true, email: false, webhook: false },
+  P1: { inApp: true, telegram: false, email: false, webhook: false },
+  P2: { inApp: true, telegram: false, email: false, webhook: false },
+  P3: { inApp: true, telegram: false, email: false, webhook: false },
   P4: { inApp: true, telegram: false, email: false, webhook: false },
 }
 

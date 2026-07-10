@@ -425,6 +425,16 @@ def test_telegram_section_defaults():
     assert tg["severities"] == ["P1", "P2"]
 
 
+def test_default_routing_does_not_enable_unconfigured_external_channels():
+    cfg = config_manager.DEFAULT_CONFIG
+
+    for severity, channels in cfg["alert_routing"]["channel_matrix"].items():
+        assert channels["inApp"] is True
+        assert channels["telegram"] is False
+        assert channels["email"] is False
+        assert channels["webhook"] is False
+
+
 # ── thread safety ────────────────────────────────────────────────────────────
 
 def test_concurrent_updates():

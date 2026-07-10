@@ -42,23 +42,54 @@ def _normalize_channel(channel: str) -> str:
     return str(channel or "").strip().lower()
 
 
+def _terminal_channel_reason(
+    cfg: dict,
+    channel: str,
+    alert: dict,
+) -> tuple[str, str] | None:
+    """Return why a configured channel cannot succeed without an operator change."""
+    channel_cfg = cfg.get(channel, {})
+    if not isinstance(channel_cfg, dict) or not channel_cfg.get("enabled", False):
+        return ("inactive", "Channel is disabled")
+
+    if channel == "telegram":
+        configured = bool(channel_cfg.get("bot_token") and channel_cfg.get("chat_id"))
+    elif channel == "email":
+        configured = bool(
+            channel_cfg.get("smtp_host")
+            and channel_cfg.get("from_address")
+            and channel_cfg.get("to_addresses")
+        )
+    elif channel == "webhook":
+        configured = bool(channel_cfg.get("url"))
+    else:
+        configured = True
+    if not configured:
+        return ("invalid", "Channel configuration is incomplete")
+
+    severities = channel_cfg.get("severities", ["P1", "P2"])
+    if not isinstance(severities, (list, tuple, set)) or alert.get("severity") not in severities:
+        return ("inactive", f"Severity {alert.get('severity', 'unknown')} is filtered")
+    return None
+
+
 def notify_with_results(
     alert: dict,
     snapshot_path: str | None = None,
     *,
     channels: list[str] | None = None,
+    test_request: bool = False,
 ) -> list[dict]:
     """Route an alert and return one honest result per requested channel."""
     cfg = get_config()
-    if channels is None:
+    implicit_routing = channels is None
+    if implicit_routing:
         routing = cfg.get("alert_routing", {})
         matrix = routing.get("channel_matrix", {})
         severity_channels = matrix.get(alert.get("severity", "P4"), {})
         raw_channels = [channel for channel, enabled in severity_channels.items() if enabled]
-        test_request = False
     else:
         raw_channels = channels
-        test_request = True
 
     requested_channels: list[str] = []
     seen_channels: set[str] = set()
@@ -103,6 +134,22 @@ def notify_with_results(
                 "message": "No channel handler is configured",
             })
             continue
+        terminal = _terminal_channel_reason(cfg, channel, alert)
+        if terminal is not None:
+            reason_code, terminal_reason = terminal
+            # The channel matrix and global provider switch are both routing
+            # gates. On normal implicit routing, a disabled or severity-filtered
+            # provider was not requested for this alert. Explicit tests/retries
+            # still surface the terminal state honestly.
+            if implicit_routing and reason_code == "inactive":
+                continue
+            results.append({
+                "channel": result_channel,
+                "success": False,
+                "status": "skipped",
+                "message": terminal_reason,
+            })
+            continue
         try:
             success = bool(handler.send_alert(alert, snapshot_path))
             results.append({
@@ -123,9 +170,21 @@ def notify_with_results(
 
 
 def notify(alert: dict, snapshot_path: str | None = None) -> bool:
-    """Route an alert and report whether at least one configured path handled it."""
+    """Route an alert and report whether every requested external path succeeded.
+
+    In-app persistence is sufficient only when no external channel was
+    requested; it must not mask a failed Telegram, email, or webhook target.
+    """
     try:
-        return any(result["success"] for result in notify_with_results(alert, snapshot_path))
+        results = notify_with_results(alert, snapshot_path)
+        external_results = [
+            result
+            for result in results
+            if _normalize_channel(result.get("channel")) != "inapp"
+        ]
+        if external_results:
+            return all(result.get("success", False) for result in external_results)
+        return all(result.get("success", False) for result in results)
     except Exception:
         logger.exception("Notification dispatch failed")
         return False
@@ -254,6 +313,20 @@ def _send_escalation(alert: dict, step: dict) -> str:
     handler = _CHANNEL_HANDLERS.get(channel)
     if not handler:
         logger.warning("Escalation channel %s not available", channel)
+        return ESCALATION_TERMINAL
+
+    terminal = _terminal_channel_reason(get_config(), channel, escalated)
+    if terminal is not None:
+        _reason_code, reason = terminal
+        logger.warning(
+            "Escalation channel is not deliverable",
+            extra={
+                "alert_id": alert.get("id"),
+                "role": role,
+                "channel": channel,
+                "reason": reason,
+            },
+        )
         return ESCALATION_TERMINAL
 
     try:
