@@ -147,16 +147,36 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
 }
 
 _DEFAULT_LONG_TAIL_PROMPTS = ["fire", "smoke", "flames"]
+_OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
+_MAX_CLASS_EMBEDDING_CACHE_ENTRIES = 16
 _MODEL_LOCK = threading.RLock()
-_MODEL_RUNTIMES: dict[ModelKey, dict[str, Any]] = {
-    model_key: {
+
+
+def _new_model_runtime() -> dict[str, Any]:
+    return {
         "handle": None,
         "lock": threading.Lock(),
         "loaded_path": None,
         "current_classes": [],
+        "class_embeddings": {},
     }
-    for model_key in MODEL_DEFINITIONS
-}
+
+
+def _build_model_runtimes() -> dict[ModelKey, dict[str, Any]]:
+    """Use one runtime for model keys that point at the same model asset."""
+    runtimes: dict[ModelKey, dict[str, Any]] = {}
+    runtimes_by_asset: dict[str, dict[str, Any]] = {}
+    for model_key, definition in MODEL_DEFINITIONS.items():
+        asset_key = str(definition["shared_asset_key"])
+        runtime = runtimes_by_asset.get(asset_key)
+        if runtime is None:
+            runtime = _new_model_runtime()
+            runtimes_by_asset[asset_key] = runtime
+        runtimes[model_key] = runtime
+    return runtimes
+
+
+_MODEL_RUNTIMES = _build_model_runtimes()
 _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
     model_key: {
         "status": "not_downloaded",
@@ -630,14 +650,56 @@ def _set_open_vocab_classes(handle: YOLO, classes: list[str]):
     try:
         handle.to("cpu")
         os.chdir(str(tmp_models_dir))
-        handle.set_classes(classes)
+        embeddings = handle.get_text_pe(classes)
+        handle.set_classes(classes, embeddings)
+        return embeddings.detach().cpu()
     finally:
         os.chdir(original_cwd)
+
+
+def _default_open_vocab_classes(model_key: ModelKey) -> list[str]:
+    if model_key == "ppe_specialist":
+        return list(ALL_PPE_PROMPT_TERMS)
+    return list(_DEFAULT_LONG_TAIL_PROMPTS)
+
+
+def _apply_open_vocab_classes(
+    runtime: dict[str, Any],
+    handle,
+    classes: list[str],
+    *,
+    device: str,
+) -> None:
+    cache_key = tuple(classes)
+    embedding_cache = runtime["class_embeddings"]
+    embeddings = embedding_cache.pop(cache_key, None)
+    if embeddings is None:
+        embeddings = _set_open_vocab_classes(handle, classes)
+        handle.to(device)
+    else:
+        handle.set_classes(classes, embeddings)
+    embedding_cache[cache_key] = embeddings
+    while len(embedding_cache) > _MAX_CLASS_EMBEDDING_CACHE_ENTRIES:
+        oldest_key = next(iter(embedding_cache))
+        embedding_cache.pop(oldest_key)
+    runtime["current_classes"] = classes
 
 
 def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     runtime = _MODEL_RUNTIMES[model_key]
     if runtime["handle"] is not None and runtime["loaded_path"] == str(source_path):
+        if model_key in _OPEN_VOCAB_MODEL_KEYS:
+            from config_manager import get_config
+
+            with runtime["lock"]:
+                initial_classes = _default_open_vocab_classes(model_key)
+                if runtime["current_classes"] != initial_classes:
+                    _apply_open_vocab_classes(
+                        runtime,
+                        runtime["handle"],
+                        initial_classes,
+                        device=get_config()["global"]["device"],
+                    )
         return
 
     if model_key == "face_recognition":
@@ -660,18 +722,15 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
 
     local_model = _copy_to_local_fs(model_key, source_path)
     handle = YOLO(str(local_model))
-    if model_key == "ppe_specialist":
-        initial_classes = list(ALL_PPE_PROMPT_TERMS)
-    else:
-        initial_classes = list(_DEFAULT_LONG_TAIL_PROMPTS)
+    initial_classes = _default_open_vocab_classes(model_key)
 
     device = _runtime_device(_configured_local_device())
-    _set_open_vocab_classes(handle, initial_classes)
-    handle.to(device)
     runtime["handle"] = handle
     runtime["loaded_path"] = str(source_path)
-    runtime["current_classes"] = initial_classes
+    runtime["current_classes"] = []
+    runtime["class_embeddings"] = {}
     runtime["warmed"] = False
+    _apply_open_vocab_classes(runtime, handle, initial_classes, device=device)
 
 
 def initialize() -> None:
@@ -895,12 +954,11 @@ def predict(
             dummy = np.zeros((320, 320, 3), dtype=np.uint8)
             handle.predict(dummy, verbose=False, device=runtime_device, imgsz=imgsz)
             runtime["warmed"] = True
-        if model_key in _OPEN_VOCAB_MODEL_KEYS and classes is not None:
-            requested_classes = [value for value in classes if isinstance(value, str) and value]
+        if model_key in _OPEN_VOCAB_MODEL_KEYS:
+            requested = classes if classes is not None else _default_open_vocab_classes(model_key)
+            requested_classes = [value for value in requested if isinstance(value, str) and value]
             if runtime["current_classes"] != requested_classes:
-                _set_open_vocab_classes(handle, requested_classes)
-                handle.to(runtime_device)
-                runtime["current_classes"] = requested_classes
+                _apply_open_vocab_classes(runtime, handle, requested_classes, device=runtime_device)
         return handle.predict(frame, conf=conf, verbose=False, device=runtime_device, imgsz=imgsz)
 
 
