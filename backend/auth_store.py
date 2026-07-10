@@ -68,12 +68,32 @@ def decode_token(token: str) -> dict:
 
 # ── Password hashing ────────────────────────────────────────────────────────
 
+BCRYPT_MAX_PASSWORD_BYTES = 72
+_PASSWORD_TOO_LONG_ERROR = "Password must be at most 72 bytes when encoded as UTF-8"
+
+
+def _password_bytes(password: str) -> bytes:
+    return password.encode("utf-8")
+
+
 def _hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    encoded = _password_bytes(password)
+    if len(encoded) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise ValueError(_PASSWORD_TOO_LONG_ERROR)
+    return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode()
 
 
 def _verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
+    encoded = _password_bytes(password)
+    # bcrypt <5.0 silently truncated raw input bytes. Preserve verification for
+    # hashes created under that behavior while rejecting all new oversized
+    # passwords in validate_password() and _hash_password().
+    encoded = encoded[:BCRYPT_MAX_PASSWORD_BYTES]
+    try:
+        return bcrypt.checkpw(encoded, hashed.encode())
+    except (TypeError, ValueError):
+        logger.warning("Unable to verify an invalid stored password hash")
+        return False
 
 
 _SPECIAL_CHARS = r"!@#$%^&*()\-_+=\[\]{}|;:,.<>?"
@@ -82,6 +102,8 @@ _SPECIAL_CHARS = r"!@#$%^&*()\-_+=\[\]{}|;:,.<>?"
 def validate_password(password: str) -> tuple[bool, str | None]:
     """Validate password strength. Returns (is_valid, error_message)."""
     import re
+    if len(_password_bytes(password)) > BCRYPT_MAX_PASSWORD_BYTES:
+        return False, _PASSWORD_TOO_LONG_ERROR
     if len(password) < 8:
         return False, "Password must be at least 8 characters"
     if not re.search(r"[A-Z]", password):
