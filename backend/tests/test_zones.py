@@ -50,7 +50,7 @@ def fresh_state():
     alert_store.init_db()
     with alert_store._get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE alerts")
+            cur.execute("TRUNCATE TABLE alert_delivery_outbox, alerts")
         conn.commit()
 
     config_manager._config = None

@@ -2,17 +2,57 @@
 SafetyLens alert endpoints — list, stats, time-series, acknowledge, resolve, snooze, false-positive, snapshots.
 """
 
+from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Query, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
+import alert_delivery_store
+import alert_delivery_worker
 import alert_store
 import audit_store
-from dependencies import require_operator_or_admin
+from dependencies import require_admin, require_operator_or_admin
 from video_processing import broadcast_alert
 
 router = APIRouter(prefix="/api", tags=["alerts"])
+
+
+class DeliveryReplayRequest(BaseModel):
+    allow_ambiguous: bool = Field(False, alias="allowAmbiguous")
+
+
+def _public_delivery(row: dict) -> dict:
+    """Project operational state without destination or provider secrets."""
+    def timestamp(name: str):
+        value = row.get(name)
+        return value.isoformat() if isinstance(value, datetime) else value
+
+    return {
+        "deliveryId": str(row.get("id")),
+        "alertId": str(row.get("alert_id")),
+        "kind": row.get("kind"),
+        "channel": row.get("channel"),
+        "priority": row.get("priority"),
+        "state": row.get("state"),
+        "claimCount": row.get("claim_count"),
+        "internalFailureCount": row.get("internal_failure_count"),
+        "attemptCount": row.get("attempt_count"),
+        "eligibleAt": timestamp("eligible_at"),
+        "expiresAt": timestamp("expires_at"),
+        "nextAttemptAt": timestamp("next_attempt_at"),
+        "lastAttemptAt": timestamp("last_attempt_at"),
+        "lastErrorCode": row.get("last_error_code"),
+        "lastAcceptanceUnknown": bool(row.get("last_acceptance_unknown")),
+        "everAcceptanceUnknown": bool(row.get("ever_acceptance_unknown")),
+        "terminalReason": row.get("terminal_reason"),
+        "deliveredAt": timestamp("delivered_at"),
+        "terminalAt": timestamp("terminal_at"),
+        "createdAt": timestamp("created_at"),
+        "updatedAt": timestamp("updated_at"),
+    }
 
 
 @router.get("/alerts/detection-classes")
@@ -152,6 +192,68 @@ async def api_false_positive_alert(alert_id: str, request: Request):
     )
     await broadcast_alert({"type": "updated", "data": result})
     return result
+
+
+@router.get("/alert-deliveries", dependencies=[Depends(require_admin)])
+async def api_list_alert_deliveries(
+    state: Optional[str] = Query(None),
+    alert_id: Optional[str] = Query(None, alias="alertId"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Expose replayable IDs and safe delivery state to administrators."""
+    try:
+        rows = alert_delivery_store.list_deliveries(
+            state=state,
+            alert_id=alert_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return [_public_delivery(row) for row in rows]
+
+
+@router.post(
+    "/alert-deliveries/{delivery_id}/replay",
+    dependencies=[Depends(require_admin)],
+)
+async def api_replay_terminal_delivery(
+    delivery_id: UUID,
+    body: DeliveryReplayRequest,
+    request: Request,
+):
+    """Explicitly replay recent terminal work after an operator fixes config."""
+    delivery_id = str(delivery_id)
+    existing = alert_delivery_store.get_delivery(delivery_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Alert delivery not found")
+    if existing.get("state") != "terminal":
+        raise HTTPException(status_code=409, detail="Only terminal delivery work can be replayed")
+    # Record the authorized request before making work eligible. If audit
+    # persistence fails, the delivery remains terminal and cannot be sent.
+    audit_store.log_event(
+        "alert.delivery_replay",
+        target_type="alert_delivery",
+        target_id=delivery_id,
+        details={
+            "channel": existing.get("channel"),
+            "alertId": existing.get("alert_id"),
+            "allowAmbiguous": body.allow_ambiguous,
+            "everAcceptanceUnknown": bool(existing.get("ever_acceptance_unknown")),
+            "outcome": "requested",
+        },
+        **audit_store.build_actor_context(request),
+    )
+    replayed = alert_delivery_store.requeue_terminal(
+        delivery_id,
+        allow_ambiguous=body.allow_ambiguous,
+    )
+    if not replayed:
+        raise HTTPException(
+            status_code=409,
+            detail="Delivery is too old or may already have been accepted; explicit confirmation is required",
+        )
+    alert_delivery_worker.wake()
+    return {"ok": True, "deliveryId": delivery_id, "state": "pending"}
 
 
 @router.get("/snapshots/{filename}")

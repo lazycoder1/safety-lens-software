@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 
@@ -487,43 +488,17 @@ def test_retry_handoff_releases_capacity_before_fast_next_attempt():
     assert pipeline.shutdown(timeout=1)
 
 
-def test_production_delivery_adapter_preserves_per_channel_outcomes(monkeypatch):
-    calls = []
+def test_explicit_inapp_target_satisfies_contract_without_external_partial_metric():
+    def deliver(_alert, output_ids):
+        assert output_ids == ["inApp", "email"]
+        return DeliveryOutcome(
+            delivered_output_ids=("email",),
+            handled_output_ids=("inapp",),
+        )
 
-    def notify(_alert, _snapshot, *, channels):
-        calls.append(channels)
-        return [
-            {"channel": "inApp", "success": True, "status": "handled"},
-            {"channel": "email", "success": True, "status": "delivered"},
-            {"channel": "telegram", "success": False, "status": "failed"},
-            {"channel": "sms", "success": False, "status": "skipped"},
-        ]
-
-    monkeypatch.setattr(video_processing.notification_dispatcher, "notify_with_results", notify)
-
-    outcome = video_processing._alert_delivery({"id": "alert-1", "snapshotUrl": None})
-
-    assert calls == [None]
-    assert outcome == DeliveryOutcome(
-        delivered_output_ids=("email",),
-        retry_output_ids=("telegram",),
-        terminal_output_ids=("sms",),
-        handled_output_ids=("inapp",),
-    )
-
-
-def test_explicit_inapp_target_satisfies_contract_without_external_partial_metric(monkeypatch):
-    def notify(_alert, _snapshot, *, channels):
-        assert channels == ["inApp", "email"]
-        return [
-            {"channel": "inApp", "success": True, "status": "handled"},
-            {"channel": "email", "success": True, "status": "delivered"},
-        ]
-
-    monkeypatch.setattr(video_processing.notification_dispatcher, "notify_with_results", notify)
     pipeline = AlertPipeline(
         persist_alert=_alert_from_payload,
-        deliver_alert=video_processing._alert_delivery,
+        deliver_alert=deliver,
         delivery_attempts=1,
     )
 
@@ -551,6 +526,258 @@ def test_unstarted_pipeline_stats_keep_the_operational_schema(monkeypatch):
     assert stats["delivery_failures"] == 0
     assert stats["partially_delivered"] == 0
     assert stats["delivery_retry_queue_full"] == 0
+    assert stats["outbox_handoffs"] == 0
+    assert stats["consecutive_persistence_failures"] == 0
+    assert stats["last_persistence_failure_at"] is None
+    assert stats["last_persistence_success_at"] is None
+    assert stats["persistence_in_flight"] is False
+    assert stats["oldest_persistence_age_seconds"] is None
+
+
+def test_durable_outbox_handoff_is_not_counted_as_provider_delivery(monkeypatch):
+    wakes = []
+    monkeypatch.setattr(video_processing.alert_delivery_worker, "wake", lambda: wakes.append(True))
+    pipeline = AlertPipeline(
+        persist_alert=_alert_from_payload,
+        deliver_alert=video_processing._outbox_handoff,
+    )
+
+    pipeline.submit({"sequence": 1}).result(timeout=1)
+    assert pipeline.drain(timeout=1)
+
+    stats = pipeline.stats()
+    assert wakes == [True]
+    assert stats["outbox_handoffs"] == 1
+    assert stats["delivered"] == 0
+    assert stats["delivery_failures"] == 0
+    assert pipeline.shutdown(timeout=1)
+
+
+def test_legacy_true_delivery_callback_keeps_delivered_semantics():
+    pipeline = AlertPipeline(
+        persist_alert=_alert_from_payload,
+        deliver_alert=lambda _alert, _outputs: True,
+    )
+
+    pipeline.submit({"sequence": 1}).result(timeout=1)
+    assert pipeline.drain(timeout=1)
+    assert pipeline.stats()["delivered"] == 1
+    assert pipeline.stats()["outbox_handoffs"] == 0
+    assert pipeline.shutdown(timeout=1)
+
+
+def test_invalid_delivery_routing_does_not_suppress_alert_persistence(
+    monkeypatch,
+    caplog,
+):
+    captured = []
+
+    class FakePipeline:
+        def submit(self, payload, **_kwargs):
+            captured.append(payload)
+            return "queued"
+
+    monkeypatch.setattr(video_processing, "_get_alert_pipeline", lambda: FakePipeline())
+    monkeypatch.setattr(
+        video_processing,
+        "get_config_snapshot",
+        lambda: {"cameras": {"cam1": {"name": "Camera 1", "zone": "Loading"}}},
+    )
+
+    def invalid_routing(*_args, **_kwargs):
+        raise ValueError("smtp-password-must-not-leak")
+
+    monkeypatch.setattr(
+        video_processing.notification_dispatcher,
+        "resolve_delivery_targets",
+        invalid_routing,
+    )
+
+    result = video_processing.create_alert(
+        "cam1",
+        "No helmet",
+        "P2",
+        0.9,
+        snapshot_jpeg=b"snapshot",
+        clean_snapshot_jpeg=b"clean",
+    )
+
+    assert result == "queued"
+    assert captured[0]["delivery_targets"] == []
+    assert "smtp-password-must-not-leak" not in caplog.text
+
+
+def test_start_failure_rolls_back_durable_outbox(monkeypatch):
+    calls = []
+
+    class FailingPipeline:
+        def start(self):
+            calls.append("pipeline-start")
+            raise RuntimeError("pipeline start failed")
+
+        def shutdown(self, **_kwargs):
+            calls.append("pipeline-stop")
+            return True
+
+    monkeypatch.setattr(video_processing, "_get_alert_pipeline", lambda: FailingPipeline())
+    monkeypatch.setattr(
+        video_processing.alert_delivery_worker,
+        "start",
+        lambda: calls.append("outbox-start"),
+    )
+    monkeypatch.setattr(
+        video_processing.alert_delivery_worker,
+        "stop",
+        lambda _timeout: calls.append("outbox-stop") or True,
+    )
+
+    with pytest.raises(RuntimeError, match="pipeline start failed"):
+        video_processing.start_alert_pipeline()
+
+    assert calls == ["outbox-start", "pipeline-start", "pipeline-stop", "outbox-stop"]
+    assert video_processing._alert_event_loop is None
+
+
+def test_stop_always_stops_durable_outbox_without_legacy_pipeline(monkeypatch):
+    calls = []
+    monkeypatch.setattr(video_processing, "_alert_pipeline", None)
+    monkeypatch.setattr(
+        video_processing.alert_delivery_worker,
+        "stop",
+        lambda _timeout: calls.append("outbox-stop") or True,
+    )
+
+    assert video_processing.stop_alert_pipeline(1.0) is True
+    assert calls == ["outbox-stop"]
+
+
+def test_stop_still_stops_durable_outbox_when_legacy_shutdown_fails(monkeypatch):
+    calls = []
+
+    class FailingPipeline:
+        def shutdown(self, **_kwargs):
+            calls.append("pipeline-stop")
+            raise RuntimeError("shutdown failed")
+
+    monkeypatch.setattr(video_processing, "_alert_pipeline", FailingPipeline())
+    monkeypatch.setattr(
+        video_processing.alert_delivery_worker,
+        "stop",
+        lambda _timeout: calls.append("outbox-stop") or True,
+    )
+
+    assert video_processing.stop_alert_pipeline(1.0) is False
+    assert calls == ["pipeline-stop", "outbox-stop"]
+
+
+def test_stale_alerts_are_resolved_before_delivery_workers_start(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        video_processing.alert_store,
+        "auto_resolve_stale_alerts_batch",
+        lambda: (calls.append("auto-resolve") or (1, False)),
+    )
+    monkeypatch.setattr(
+        video_processing.alert_delivery_store,
+        "backfill_active_escalations_batch",
+        lambda *_args, **_kwargs: (0, None),
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "start_alert_pipeline",
+        lambda: calls.append("workers-start"),
+    )
+
+    asyncio.run(video_processing.start_alert_delivery_workers())
+
+    assert calls == ["auto-resolve", "workers-start"]
+
+
+def test_upgrade_backfill_is_bounded_before_start_and_continues_online(monkeypatch):
+    calls = []
+    cutoffs = []
+
+    def backfill(_cfg, _resolver, *, after_id=None, minimum_timestamp=None, **_kwargs):
+        calls.append(f"backfill:{after_id or 'first'}")
+        cutoffs.append(minimum_timestamp)
+        return (1, "cursor-1") if after_id is None else (1, None)
+
+    monkeypatch.setattr(
+        video_processing.alert_store,
+        "auto_resolve_stale_alerts_batch",
+        lambda: (calls.append("auto-resolve") or (0, False)),
+    )
+    monkeypatch.setattr(
+        video_processing.alert_delivery_store,
+        "backfill_active_escalations_batch",
+        backfill,
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "start_alert_pipeline",
+        lambda: calls.append("workers-start"),
+    )
+
+    async def run_startup():
+        await video_processing.start_alert_delivery_workers()
+        assert video_processing._alert_backfill_task is not None
+        await video_processing._alert_backfill_task
+
+    asyncio.run(run_startup())
+
+    assert calls == [
+        "auto-resolve",
+        "backfill:first",
+        "workers-start",
+        "backfill:cursor-1",
+    ]
+    assert cutoffs[0]
+    assert cutoffs == [cutoffs[0], cutoffs[0]]
+
+
+def test_stale_reconciliation_is_bounded_before_start_and_continues_online(
+    monkeypatch,
+):
+    calls = []
+
+    monkeypatch.setattr(
+        video_processing.alert_store,
+        "auto_resolve_stale_alerts_batch",
+        lambda: (calls.append("reconcile:first") or (250, True)),
+    )
+
+    async def finish_reconciliation():
+        calls.append("reconcile:remaining")
+        return 3
+
+    monkeypatch.setattr(
+        video_processing.alert_store,
+        "reconcile_stale_alerts",
+        finish_reconciliation,
+    )
+    monkeypatch.setattr(
+        video_processing.alert_delivery_store,
+        "backfill_active_escalations_batch",
+        lambda *_args, **_kwargs: (0, None),
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "start_alert_pipeline",
+        lambda: calls.append("workers-start"),
+    )
+
+    async def run_startup():
+        await video_processing.start_alert_delivery_workers()
+        assert video_processing._alert_reconciliation_task is not None
+        await video_processing._alert_reconciliation_task
+
+    asyncio.run(run_startup())
+
+    assert calls == [
+        "reconcile:first",
+        "workers-start",
+        "reconcile:remaining",
+    ]
 
 
 def test_transient_persistence_failures_are_retried():
@@ -576,6 +803,23 @@ def test_transient_persistence_failures_are_retried():
     assert pipeline.shutdown(timeout=1)
 
 
+def test_started_idle_pipeline_has_no_false_persistence_failure_signal():
+    pipeline = AlertPipeline(
+        persist_alert=_alert_from_payload,
+        deliver_alert=lambda _alert, _outputs: True,
+    )
+
+    pipeline.start()
+    stats = pipeline.stats()
+
+    assert stats["consecutive_persistence_failures"] == 0
+    assert stats["last_persistence_failure_at"] is None
+    assert stats["last_persistence_success_at"] is None
+    assert stats["persistence_in_flight"] is False
+    assert stats["oldest_persistence_age_seconds"] is None
+    assert pipeline.shutdown(timeout=1)
+
+
 def test_permanent_persistence_failure_is_visible_on_future_and_stats():
     def persist(**_payload):
         raise RuntimeError("database unavailable")
@@ -589,7 +833,74 @@ def test_permanent_persistence_failure_is_visible_on_future_and_stats():
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         pipeline.submit({"sequence": 1}).result(timeout=1)
-    assert pipeline.stats()["persistence_failures"] == 1
+    stats = pipeline.stats()
+    assert stats["persistence_failures"] == 1
+    assert stats["consecutive_persistence_failures"] == 1
+    assert stats["last_persistence_failure_at"] is not None
+    assert stats["last_persistence_success_at"] is None
+    assert pipeline.shutdown(timeout=1)
+
+
+def test_success_after_permanent_persistence_failure_clears_unresolved_signal():
+    attempts = 0
+
+    def persist(**payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("database unavailable")
+        return _alert_from_payload(**payload)
+
+    pipeline = AlertPipeline(
+        persist_alert=persist,
+        deliver_alert=lambda _alert, _outputs: True,
+        persistence_attempts=1,
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        pipeline.submit({"sequence": 1}).result(timeout=1)
+    failure_stats = pipeline.stats()
+    assert failure_stats["consecutive_persistence_failures"] == 1
+
+    assert pipeline.submit({"sequence": 2}).result(timeout=1)["sequence"] == 2
+    recovery_stats = pipeline.stats()
+    assert recovery_stats["persistence_failures"] == 1
+    assert recovery_stats["consecutive_persistence_failures"] == 0
+    assert recovery_stats["last_persistence_success_at"] >= (
+        failure_stats["last_persistence_failure_at"]
+    )
+    assert pipeline.shutdown(timeout=1)
+
+
+def test_stats_expose_oldest_in_flight_persistence_age():
+    persistence_started = threading.Event()
+    release_persistence = threading.Event()
+
+    def persist(**payload):
+        persistence_started.set()
+        assert release_persistence.wait(timeout=2)
+        return _alert_from_payload(**payload)
+
+    pipeline = AlertPipeline(
+        persist_alert=persist,
+        deliver_alert=lambda _alert, _outputs: True,
+    )
+    future = pipeline.submit({"sequence": 1})
+    assert persistence_started.wait(timeout=1)
+
+    stats = pipeline.stats()
+    assert stats["persistence_in_flight"] is True
+    assert stats["oldest_persistence_age_seconds"] is not None
+    assert stats["consecutive_persistence_failures"] == 0
+    assert stats["last_persistence_failure_at"] is None
+    assert stats["last_persistence_success_at"] is None
+
+    release_persistence.set()
+    assert future.result(timeout=1)["sequence"] == 1
+    assert pipeline.drain(timeout=1)
+    stats = pipeline.stats()
+    assert stats["persistence_in_flight"] is False
+    assert stats["oldest_persistence_age_seconds"] is None
     assert pipeline.shutdown(timeout=1)
 
 
@@ -995,7 +1306,7 @@ def test_create_alert_prefers_explicit_inference_frame_snapshots(monkeypatch):
     monkeypatch.setattr(video_processing, "_get_alert_pipeline", lambda: FakePipeline())
     monkeypatch.setattr(
         video_processing,
-        "get_config",
+        "get_config_snapshot",
         lambda: {"cameras": {"cam1": {"name": "Camera 1", "zone": "Loading"}}},
     )
     video_processing.state.camera_frames["cam1"] = b"newer-shared-frame"

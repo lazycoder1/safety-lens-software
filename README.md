@@ -10,3 +10,8 @@ Before recreating an edge container, follow the
 [runtime state migration and verification gate](docs/runtime-state.md). Runtime
 credentials, license/heartbeat files, diagnostics, and models are deliberately
 kept outside immutable images.
+
+External Telegram, email, and webhook delivery uses provider-aware outcomes
+and retry deadlines. See [docs/alert-delivery.md](docs/alert-delivery.md) for
+the classification contract, idempotency behavior, and current durability
+boundary.

@@ -27,7 +27,7 @@ def fresh_db():
     # Truncate
     with alert_store._get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE alerts")
+            cur.execute("TRUNCATE TABLE alert_delivery_outbox, alerts")
         conn.commit()
     # Re-create snapshots dir
     _test_snapshots.mkdir(parents=True, exist_ok=True)
@@ -65,6 +65,7 @@ def test_init_db_creates_indexes():
     assert "idx_alerts_severity" in names
     assert "idx_alerts_timestamp" in names
     assert "idx_alerts_camera" in names
+    assert "idx_alerts_active_stale" in names
 
 
 # ── create_alert ─────────────────────────────────────────────────────────────
@@ -96,12 +97,12 @@ def test_create_alert_returns_dict_with_expected_keys():
     assert alert["falsePositive"] is False
 
 
-def test_create_alert_id_is_8_chars():
+def test_create_alert_id_is_full_uuid():
     alert = alert_store.create_alert(
         camera_id="cam1", camera_name="C", zone="Z",
         rule="R", severity="P3", confidence=0.5,
     )
-    assert len(alert["id"]) == 8
+    assert len(alert["id"]) == 36
 
 
 def test_create_alert_confidence_rounded():
@@ -420,6 +421,64 @@ def test_concurrent_creates():
     assert len(errors) == 0
     alerts = alert_store.get_alerts(limit=500)
     assert len(alerts) == 40
+
+
+def test_auto_resolve_stale_alerts_uses_bounded_batches_and_cancels_escalations():
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    target = {
+        "kind": "escalation",
+        "target_key": "email:ops@example.com:step-1",
+        "channel": "email",
+        "delay_seconds": 30 * 24 * 60 * 60,
+    }
+    for index in range(3):
+        alert_store.create_alert(
+            f"cam{index}",
+            f"Camera {index}",
+            "Zone A",
+            "Helmet",
+            "P2",
+            0.9,
+            timestamp=old_timestamp,
+            delivery_targets=[target],
+        )
+
+    resolved, has_more = alert_store.auto_resolve_stale_alerts_batch(
+        batch_size=2
+    )
+
+    assert (resolved, has_more) == (2, True)
+    with alert_store._get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT alerts.status, delivery.state, COUNT(*)
+                FROM alerts
+                JOIN alert_delivery_outbox AS delivery
+                  ON delivery.alert_id = alerts.id
+                GROUP BY alerts.status, delivery.state
+                ORDER BY alerts.status, delivery.state
+                """
+            )
+            states = cur.fetchall()
+    assert sorted(states) == [
+        ("active", "pending", 1),
+        ("resolved", "cancelled", 2),
+    ]
+
+    resolved, has_more = alert_store.auto_resolve_stale_alerts_batch(
+        batch_size=2
+    )
+
+    assert (resolved, has_more) == (1, False)
+    with alert_store._get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) FROM alerts GROUP BY status")
+            assert cur.fetchall() == [("resolved", 3)]
+            cur.execute(
+                "SELECT state, COUNT(*) FROM alert_delivery_outbox GROUP BY state"
+            )
+            assert cur.fetchall() == [("cancelled", 3)]
 
 
 def test_cleanup_snapshots_prunes_old_resolved_alerts():

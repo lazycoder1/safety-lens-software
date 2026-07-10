@@ -11,7 +11,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26m.pt"  # COCO pretrained YOLO26 — 80 classes, NMS-free
 YOLOE_MODEL_PATH = PROJECT_ROOT / "yoloe-11s-seg.pt"
 VIDEO_DIR = PROJECT_ROOT / "test-videos"
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+try:
+    VLM_TIMEOUT_SECONDS = float(os.environ.get("SAFETYLENS_VLM_TIMEOUT_SECONDS", "60"))
+except (TypeError, ValueError):
+    VLM_TIMEOUT_SECONDS = 60.0
+VLM_TIMEOUT_SECONDS = min(300.0, max(5.0, VLM_TIMEOUT_SECONDS))
 FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
 MODEL_SERVER_URL = os.environ.get("SAFETYLENS_MODEL_SERVER_URL", "").rstrip("/")
 MODEL_SERVER_TOKEN = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")

@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import Future
 
 import numpy as np
 import pytest
@@ -6,6 +7,93 @@ import pytest
 from mjpeg_fanout import MjpegFanout
 import state
 import video_processing
+
+
+def test_late_inference_result_is_discarded_after_camera_stop(monkeypatch):
+    stop_event = threading.Event()
+
+    class FixedCapture:
+        def __init__(self):
+            self.released = False
+
+        def isOpened(self):
+            return not self.released
+
+        def read(self):
+            return True, np.zeros((90, 160, 3), dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    capture = FixedCapture()
+    execution_plan = {
+        "required_model_keys": [],
+        "run_face_recognition": False,
+        "run_pose_specialist": False,
+        "run_ppe_specialist": False,
+    }
+    config = {
+        "cameras": {
+            "cam1": {
+                "video": "test.avi",
+                "stream_type": "file",
+                "fps": 20,
+                "inference_fps": 1,
+                "execution_plan": execution_plan,
+            }
+        },
+        "global": {
+            "target_fps": 20,
+            "inference_fps": 1,
+            "stream_fps": 10,
+            "alert_cooldown": 30,
+            "yolo_conf": 0.3,
+            "jpeg_quality": 70,
+            "inference_width": 160,
+            "device": "cpu",
+        },
+    }
+    violation_checks = []
+    alerts = []
+
+    def slow_inference(_camera_id, frame, *_args, **_kwargs):
+        # Simulate shutdown timing out while native inference is still running.
+        stop_event.set()
+        return frame.copy(), [
+            {"class": "person", "confidence": 0.9, "bbox": [1, 2, 30, 40]}
+        ]
+
+    monkeypatch.setattr(video_processing, "get_config", lambda: config)
+    monkeypatch.setattr(video_processing, "open_video_capture", lambda *_args, **_kwargs: capture)
+    monkeypatch.setattr(video_processing.model_manager, "missing_model_keys", lambda _keys: [])
+    monkeypatch.setattr(video_processing.licensing, "is_inference_allowed", lambda: True)
+    monkeypatch.setattr(
+        video_processing.inference_scheduler,
+        "next_inference_slot",
+        lambda *_args, **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(video_processing, "_run_grouped_inference", slow_inference)
+    monkeypatch.setattr(
+        video_processing,
+        "check_violations",
+        lambda *_args, **_kwargs: violation_checks.append(True) or [],
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "create_alert",
+        lambda **_kwargs: alerts.append(True),
+    )
+    monkeypatch.setattr(state, "camera_frames", {})
+    monkeypatch.setattr(state, "camera_clean_frames", {})
+    monkeypatch.setattr(state, "camera_detections", {})
+    monkeypatch.setattr(state, "camera_runtime_status", {})
+    monkeypatch.setattr(video_processing, "_last_pose_results", {})
+
+    video_processing.video_processor("cam1", stop_event)
+
+    assert capture.released is True
+    assert violation_checks == []
+    assert alerts == []
 
 
 @pytest.mark.parametrize(
@@ -251,3 +339,120 @@ def test_cached_pose_result_is_evaluated_once_per_inference(monkeypatch):
     assert capture.released is True
     assert pose_checks == [1, 5]
     assert alert_capture_indices == [5]
+
+
+def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inference(
+    monkeypatch,
+):
+    stop_event = threading.Event()
+
+    class FixedCapture:
+        def __init__(self):
+            self.read_count = 0
+            self.released = False
+
+        def isOpened(self):
+            return not self.released
+
+        def read(self):
+            self.read_count += 1
+            if self.read_count <= 5:
+                return True, np.zeros((90, 160, 3), dtype=np.uint8)
+            stop_event.set()
+            return False, None
+
+        def release(self):
+            self.released = True
+
+    capture = FixedCapture()
+    execution_plan = {
+        "required_model_keys": [],
+        "run_face_recognition": False,
+        "run_pose_specialist": False,
+        "run_ppe_specialist": False,
+    }
+    config = {
+        "cameras": {
+            "cam1": {
+                "name": "Test Camera",
+                "video": "test.avi",
+                "stream_type": "file",
+                "fps": 1000,
+                "inference_fps": 1000,
+                "execution_plan": execution_plan,
+            }
+        },
+        "global": {
+            "target_fps": 1000,
+            "inference_fps": 1000,
+            "stream_fps": 10,
+            "alert_cooldown": 30,
+            "yolo_conf": 0.3,
+            "jpeg_quality": 70,
+            "inference_width": 160,
+            "device": "cpu",
+        },
+    }
+    detection = {"class": "person", "confidence": 0.9, "bbox": [1, 2, 30, 40]}
+    candidate = {
+        "camera_id": "cam1",
+        "rule": "Test Violation",
+        "severity": "P2",
+        "confidence": 0.9,
+        "description": "Synthetic violation",
+        "source": "test",
+        "threshold": 1,
+    }
+    first_persistence = Future()
+    second_persistence = Future()
+    persistence_submissions = []
+
+    def run_inference(_camera_id, frame, *_args, **_kwargs):
+        if capture.read_count == 3:
+            first_persistence.set_exception(RuntimeError("database unavailable"))
+        elif capture.read_count == 4:
+            second_persistence.set_result({"id": "persisted-alert"})
+        return frame.copy(), [detection]
+
+    def create_alert(**_kwargs):
+        persistence_submissions.append(capture.read_count)
+        return first_persistence if len(persistence_submissions) == 1 else second_persistence
+
+    monkeypatch.setattr(video_processing, "get_config", lambda: config)
+    monkeypatch.setattr(video_processing, "open_video_capture", lambda *_args, **_kwargs: capture)
+    monkeypatch.setattr(video_processing.model_manager, "missing_model_keys", lambda _keys: [])
+    monkeypatch.setattr(video_processing.licensing, "is_inference_allowed", lambda: True)
+    monkeypatch.setattr(
+        video_processing.inference_scheduler,
+        "next_inference_slot",
+        lambda *_args, **kwargs: (
+            0.0 if "now" not in kwargs else float(capture.read_count) + 0.5
+        ),
+    )
+    monkeypatch.setattr(video_processing.time, "monotonic", lambda: float(capture.read_count))
+    monkeypatch.setattr(video_processing.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(video_processing, "_run_grouped_inference", run_inference)
+    monkeypatch.setattr(video_processing, "check_violations", lambda *_args: [candidate])
+    monkeypatch.setattr(video_processing, "check_zone_intrusions", lambda *_args: [])
+    monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args: [])
+    monkeypatch.setattr(
+        video_processing,
+        "_encode_inference_snapshot_pair",
+        lambda *_args, **_kwargs: (b"annotated", b"clean"),
+    )
+    monkeypatch.setattr(video_processing, "create_alert", create_alert)
+    monkeypatch.setattr(video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(video_processing, "stream_fanout", MjpegFanout())
+    monkeypatch.setattr(state, "camera_frames", {})
+    monkeypatch.setattr(state, "camera_clean_frames", {})
+    monkeypatch.setattr(state, "camera_detections", {})
+    monkeypatch.setattr(state, "camera_runtime_status", {})
+    monkeypatch.setattr(video_processing, "_last_pose_results", {})
+
+    video_processing.video_processor("cam1", stop_event)
+
+    # Frame 2 cannot duplicate the unresolved frame-1 submission. Once that
+    # write fails on frame 3, the same fresh inference is immediately eligible
+    # to retry. A successful second write then starts normal suppression.
+    assert persistence_submissions == [1, 3]
+    assert capture.released is True

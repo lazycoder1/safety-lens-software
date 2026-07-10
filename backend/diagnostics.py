@@ -38,6 +38,20 @@ _HEALTH_CACHE_TTL = 5.0
 _health_cache_lock = __import__("threading").Lock()
 
 
+def _registered_worker_is_alive(
+    workers: dict,
+    camera_id: str,
+) -> bool:
+    """Return actual thread liveness, not mere registry membership."""
+    ownership = workers.get(camera_id)
+    if ownership is None:
+        return False
+    try:
+        return bool(ownership[0].is_alive())
+    except (AttributeError, IndexError, TypeError):
+        return False
+
+
 def _diagnostic_secret_values(config: dict) -> list[str]:
     values = [
         config.get("database", {}).get("url"),
@@ -80,21 +94,34 @@ def build_health_snapshot() -> dict:
         cameras = []
         enabled_cameras = 0
         running_cameras = 0
+        missing_vlm_companions = 0
         for cam_id, cam in cfg.get("cameras", {}).items():
             enabled = bool(cam.get("enabled", True))
-            worker_running = cam_id in state.camera_threads
+            worker_running = _registered_worker_is_alive(
+                state.camera_threads,
+                cam_id,
+            )
+            vlm_expected = cam.get("demo") == "yolo+vlm"
+            vlm_worker_running = _registered_worker_is_alive(
+                state.vlm_threads,
+                cam_id,
+            )
             frame_available = state.camera_frames.get(cam_id) is not None
             stream_stats = stream_fanout.stats(cam_id)
             if enabled:
                 enabled_cameras += 1
             if enabled and worker_running:
                 running_cameras += 1
+            if enabled and vlm_expected and not vlm_worker_running:
+                missing_vlm_companions += 1
             cameras.append(
                 {
                     "id": cam_id,
                     "name": cam.get("name", cam_id),
                     "enabled": enabled,
                     "workerRunning": worker_running,
+                    "vlmExpected": vlm_expected,
+                    "vlmWorkerRunning": vlm_worker_running,
                     "frameAvailable": frame_available,
                     "runtimeStatus": state.camera_runtime_status.get(cam_id, "offline"),
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
@@ -119,9 +146,14 @@ def build_health_snapshot() -> dict:
         if license_status.state == licensing.LicenseState.SUSPENDED and status != "error":
             status = "degraded"
             reasons.append("license suspended")
-        if enabled_cameras and running_cameras < enabled_cameras and status == "ok":
-            status = "degraded"
+        if enabled_cameras and running_cameras < enabled_cameras:
+            if status == "ok":
+                status = "degraded"
             reasons.append("one or more enabled cameras are not running")
+        if missing_vlm_companions:
+            if status == "ok":
+                status = "degraded"
+            reasons.append("one or more enabled VLM camera companions are not running")
 
         result = {
             "status": status,
