@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,15 @@ config_manager.CONFIG_PATH = _test_config
 
 
 @pytest.fixture(autouse=True)
-def fresh_config():
+def fresh_config(monkeypatch):
     """Reset config state before each test."""
     config_manager._config = None
+    config_manager._config_version = None
+    config_manager._config_checked_at = 0.0
+    config_manager._config_refresh_error_logged = False
     config_manager.CONFIG_PATH = _test_config
+    monkeypatch.delenv(config_manager.CONFIG_STORE_ENV, raising=False)
+    monkeypatch.delenv(config_manager.CONFIG_REFRESH_SECONDS_ENV, raising=False)
     if _test_config.exists():
         _test_config.unlink()
     tmp = Path(str(_test_config) + ".tmp")
@@ -58,6 +64,23 @@ def test_load_config_reads_existing_file():
     cfg = config_manager.load_config()
     assert cfg["global"]["target_fps"] == 10
     assert cfg["cameras"] == {}
+
+
+def test_load_config_uses_one_postgres_snapshot_for_config_and_version(monkeypatch):
+    loaded = deepcopy(config_manager.DEFAULT_CONFIG)
+    loaded["global"]["target_fps"] = 12
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(
+        config_manager,
+        "_load_from_postgres_record",
+        lambda: (loaded, "version-2"),
+    )
+    monkeypatch.setattr(config_manager, "normalize_config", lambda cfg: (cfg, False))
+
+    config = config_manager.load_config()
+
+    assert config["global"]["target_fps"] == 12
+    assert config_manager._config_version == "version-2"
 
 
 def test_load_config_normalizes_legacy_camera_rule_fields():
@@ -471,6 +494,85 @@ def test_get_config_returns_cached():
     cfg1 = config_manager.get_config()
     cfg2 = config_manager.get_config()
     assert cfg1 is cfg2
+
+
+def test_get_config_refreshes_changed_postgres_record(monkeypatch):
+    cached = deepcopy(config_manager.DEFAULT_CONFIG)
+    updated = deepcopy(config_manager.DEFAULT_CONFIG)
+    updated["global"]["target_fps"] = 12
+    config_manager._config = cached
+    config_manager._config_version = "version-1"
+    config_manager._config_checked_at = 1.0
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(config_manager.time, "monotonic", lambda: 5.0)
+    monkeypatch.setattr(config_manager, "_postgres_config_version", lambda: "version-2")
+    monkeypatch.setattr(config_manager, "_load_from_postgres", lambda: updated)
+    monkeypatch.setattr(config_manager, "normalize_config", lambda cfg: (cfg, False))
+
+    refreshed = config_manager.get_config()
+
+    assert refreshed["global"]["target_fps"] == 12
+    assert config_manager._config_version == "version-2"
+
+
+def test_get_config_skips_postgres_check_within_refresh_interval(monkeypatch):
+    cached = deepcopy(config_manager.DEFAULT_CONFIG)
+    config_manager._config = cached
+    config_manager._config_version = "version-1"
+    config_manager._config_checked_at = 4.0
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(config_manager.time, "monotonic", lambda: 5.0)
+
+    def unexpected_version_check():
+        raise AssertionError("Postgres should not be checked inside the refresh interval")
+
+    monkeypatch.setattr(config_manager, "_postgres_config_version", unexpected_version_check)
+
+    assert config_manager.get_config() is cached
+
+
+def test_get_config_keeps_cached_config_when_postgres_refresh_fails(monkeypatch):
+    cached = deepcopy(config_manager.DEFAULT_CONFIG)
+    config_manager._config = cached
+    config_manager._config_version = "version-1"
+    config_manager._config_checked_at = 1.0
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(config_manager.time, "monotonic", lambda: 5.0)
+
+    def fail_version_check():
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(config_manager, "_postgres_config_version", fail_version_check)
+
+    assert config_manager.get_config() is cached
+    assert config_manager._config_refresh_error_logged is True
+
+
+def test_postgres_refresh_does_not_replace_a_newer_local_save(monkeypatch):
+    cached = deepcopy(config_manager.DEFAULT_CONFIG)
+    external = deepcopy(config_manager.DEFAULT_CONFIG)
+    external["global"]["target_fps"] = 12
+    local = deepcopy(config_manager.DEFAULT_CONFIG)
+    local["global"]["target_fps"] = 15
+    config_manager._config = cached
+    config_manager._config_version = "version-1"
+    config_manager._config_checked_at = 1.0
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(config_manager.time, "monotonic", lambda: 5.0)
+    monkeypatch.setattr(config_manager, "_postgres_config_version", lambda: "version-2")
+    monkeypatch.setattr(config_manager, "_save_to_postgres", lambda _cfg: "version-3")
+    monkeypatch.setattr(config_manager, "normalize_config", lambda cfg: (cfg, False))
+
+    def load_while_local_save_wins():
+        config_manager.save_config(local)
+        return external
+
+    monkeypatch.setattr(config_manager, "_load_from_postgres", load_while_local_save_wins)
+
+    refreshed = config_manager.get_config()
+
+    assert refreshed["global"]["target_fps"] == 15
+    assert config_manager._config_version == "version-3"
 
 
 # ── save_config ──────────────────────────────────────────────────────────────

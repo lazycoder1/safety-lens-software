@@ -4,9 +4,11 @@ Thread-safe config loading, saving, and updating with atomic writes.
 """
 
 import json
+import logging
 import os
 import tempfile
 import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -18,10 +20,15 @@ from camera_config_utils import normalize_config
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 CONFIG_STORE_ENV = "SAFETYLENS_CONFIG_STORE"
+CONFIG_REFRESH_SECONDS_ENV = "SAFETYLENS_CONFIG_REFRESH_SECONDS"
 PG_CONFIG_ID = "default"
 
+logger = logging.getLogger("safetylens.config")
 _lock = threading.Lock()
 _config: dict | None = None
+_config_version = None
+_config_checked_at = 0.0
+_config_refresh_error_logged = False
 
 
 def _env_float(name: str, default: float) -> float:
@@ -433,9 +440,10 @@ def redact_alert_outputs(outputs: list[dict]) -> list[dict]:
 
 def load_config() -> dict:
     """Read config from disk. Creates default config if file is missing."""
-    global _config
+    global _config, _config_checked_at, _config_version
     with _lock:
-        loaded = _load_raw_config_unlocked()
+        loaded, _config_version = _load_raw_config_with_version_unlocked()
+        _config_checked_at = time.monotonic()
         _config = _merge_defaults(loaded, DEFAULT_CONFIG)
         if isinstance(loaded, dict) and isinstance(loaded.get("cameras"), dict):
             _config["cameras"] = deepcopy(loaded["cameras"])
@@ -454,19 +462,72 @@ def save_config(config: dict) -> None:
 
 def _save_unlocked(config: dict) -> None:
     """Write config to disk (caller must hold _lock)."""
-    global _config
+    global _config, _config_checked_at, _config_version
     if _resolve_config_store() == "postgres":
-        _save_to_postgres(config)
+        _config_version = _save_to_postgres(config)
     else:
         _save_to_disk(config)
+        _config_version = None
     _config = config
+    _config_checked_at = time.monotonic()
+
+
+def _config_refresh_interval_seconds() -> float:
+    try:
+        return max(0.1, float(os.environ.get(CONFIG_REFRESH_SECONDS_ENV, "2.0")))
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def _refresh_postgres_config_if_stale() -> None:
+    """Refresh a process-local cache when another process updates Postgres.
+
+    The version check is rate-limited and runs outside the main config lock so
+    one slow database check does not stall every camera worker. A local save
+    that wins while the refresh is in flight prevents the older snapshot from
+    replacing it.
+    """
+    global _config, _config_checked_at, _config_refresh_error_logged, _config_version
+
+    now = time.monotonic()
+    with _lock:
+        if _config is None or now - _config_checked_at < _config_refresh_interval_seconds():
+            return
+        _config_checked_at = now
+        cached_version = _config_version
+
+    try:
+        current_version = _postgres_config_version()
+        if current_version == cached_version:
+            with _lock:
+                _config_refresh_error_logged = False
+            return
+        loaded = _load_from_postgres()
+        if loaded is None:
+            return
+        refreshed = _merge_defaults(loaded, DEFAULT_CONFIG)
+        refreshed, _normalized = normalize_config(refreshed)
+    except Exception:
+        with _lock:
+            if not _config_refresh_error_logged:
+                logger.warning("Postgres config refresh failed; using cached configuration", exc_info=True)
+                _config_refresh_error_logged = True
+        return
+
+    with _lock:
+        if _config_version == cached_version:
+            _config = refreshed
+            _config_version = current_version
+        _config_refresh_error_logged = False
 
 
 def get_config() -> dict:
-    """Return current in-memory config, loading from disk on first call."""
+    """Return config, refreshing a changed Postgres record at a bounded rate."""
     global _config
     if _config is None:
         return load_config()
+    if _resolve_config_store() == "postgres":
+        _refresh_postgres_config_if_stale()
     with _lock:
         return _config
 
@@ -555,15 +616,15 @@ def _resolve_config_store() -> str:
     return "postgres" if raw_value in {"postgres", "pg"} else "json"
 
 
-def _load_raw_config_unlocked() -> dict:
+def _load_raw_config_with_version_unlocked() -> tuple[dict, object | None]:
     if _resolve_config_store() == "postgres":
-        loaded = _load_from_postgres()
+        loaded, version = _load_from_postgres_record()
         if loaded is not None:
-            return loaded
+            return loaded, version
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
-    return json.loads(json.dumps(DEFAULT_CONFIG))
+            return json.load(f), None
+    return json.loads(json.dumps(DEFAULT_CONFIG)), None
 
 
 def _save_to_disk(config: dict) -> None:
@@ -606,21 +667,34 @@ def _ensure_pg_config_table(conn) -> None:
     conn.commit()
 
 
-def _load_from_postgres() -> dict | None:
+def _load_from_postgres_record() -> tuple[dict | None, object | None]:
     with psycopg2.connect(_get_postgres_dsn()) as conn:
         _ensure_pg_config_table(conn)
         with conn.cursor() as cur:
-            cur.execute("SELECT config FROM app_config WHERE id = %s", (PG_CONFIG_ID,))
+            cur.execute("SELECT config, updated_at FROM app_config WHERE id = %s", (PG_CONFIG_ID,))
             row = cur.fetchone()
             if not row:
-                return None
+                return None, None
             payload = row[0]
             if isinstance(payload, str):
-                return json.loads(payload)
-            return payload
+                payload = json.loads(payload)
+            return payload, row[1]
 
 
-def _save_to_postgres(config: dict) -> None:
+def _load_from_postgres() -> dict | None:
+    payload, _version = _load_from_postgres_record()
+    return payload
+
+
+def _postgres_config_version():
+    with psycopg2.connect(_get_postgres_dsn()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT updated_at FROM app_config WHERE id = %s", (PG_CONFIG_ID,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def _save_to_postgres(config: dict):
     with psycopg2.connect(_get_postgres_dsn()) as conn:
         _ensure_pg_config_table(conn)
         with conn.cursor() as cur:
@@ -631,7 +705,10 @@ def _save_to_postgres(config: dict) -> None:
                 ON CONFLICT (id) DO UPDATE
                 SET config = EXCLUDED.config,
                     updated_at = NOW()
+                RETURNING updated_at
                 """,
                 (PG_CONFIG_ID, Json(config)),
             )
+            row = cur.fetchone()
         conn.commit()
+        return row[0]
