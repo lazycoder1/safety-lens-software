@@ -16,25 +16,30 @@ export interface PasswordStrength {
 }
 
 const SPECIAL_CHARS = /[!@#$%^&*()\-_+=[\]{}|;:,.<>?]/
+const BCRYPT_MAX_PASSWORD_BYTES = 72
 
 export function evaluatePassword(password: string): PasswordStrength {
+  const characterCount = Array.from(password).length
+  const passwordBytes = new TextEncoder().encode(password).length
   const checks: PasswordCheck[] = [
-    { label: "At least 8 characters", met: password.length >= 8 },
+    { label: "At least 8 characters", met: characterCount >= 8 },
     { label: "Uppercase letter", met: /[A-Z]/.test(password) },
     { label: "Lowercase letter", met: /[a-z]/.test(password) },
     { label: "Number", met: /[0-9]/.test(password) },
     { label: "Special character", met: SPECIAL_CHARS.test(password) },
+    { label: "At most 72 UTF-8 bytes", met: passwordBytes <= BCRYPT_MAX_PASSWORD_BYTES },
   ]
 
-  const metCount = checks.filter((c) => c.met).length
+  const strengthChecks = checks.slice(0, 5)
+  const metCount = strengthChecks.filter((c) => c.met).length
 
   let score: number
-  if (password.length === 0) score = 0
+  if (characterCount === 0) score = 0
   else if (!checks[0].met) score = 1
   else if (metCount <= 2) score = 2
   else if (metCount <= 3) score = 3
   else if (metCount <= 4) score = 4
-  else score = password.length >= 12 ? 5 : 4
+  else score = characterCount >= 12 ? 5 : 4
 
   const levels: [StrengthLevel, string][] = [
     ["too-weak", "Too Weak"],
@@ -46,7 +51,7 @@ export function evaluatePassword(password: string): PasswordStrength {
   ]
 
   const [level, label] = levels[score]
-  const isValid = metCount === 5
+  const isValid = checks.every((check) => check.met)
 
   return { score, level, label, checks, isValid }
 }
