@@ -18,14 +18,14 @@ from config_manager import get_config
 logger = logging.getLogger("safetylens.email")
 
 
-def send_alert(alert: dict, snapshot_path: str | None = None) -> None:
-    """Send alert notification via email. Never raises — logs errors instead."""
+def send_alert(alert: dict, snapshot_path: str | None = None) -> bool:
+    """Send an email alert and return whether SMTP accepted it."""
     try:
         cfg = get_config()
         email_cfg = cfg.get("email", {})
 
         if not email_cfg.get("enabled", False):
-            return
+            return False
 
         smtp_host = email_cfg.get("smtp_host", "")
         smtp_port = email_cfg.get("smtp_port", 587)
@@ -36,10 +36,10 @@ def send_alert(alert: dict, snapshot_path: str | None = None) -> None:
         severity_filter = email_cfg.get("severities", ["P1", "P2"])
 
         if not smtp_host or not from_addr or not to_addrs:
-            return
+            return False
 
         if alert.get("severity") not in severity_filter:
-            return
+            return False
 
         subject, html_body = _build_email(alert, snapshot_path)
         msg = MIMEMultipart("related")
@@ -55,8 +55,10 @@ def send_alert(alert: dict, snapshot_path: str | None = None) -> None:
         _send(smtp_host, smtp_port, smtp_user, smtp_pass, from_addr, to_addrs, msg)
 
         logger.info("Email alert sent", extra={"alert_id": alert.get("id"), "camera_id": alert.get("cameraId")})
+        return True
     except Exception:
         logger.exception("Email notification failed")
+        return False
 
 
 def test_connection(smtp_host: str, smtp_port: int, smtp_user: str, smtp_pass: str,
@@ -151,5 +153,16 @@ def _send(host: str, port: int, user: str, password: str,
         if user and password:
             server.login(user, password)
         server.sendmail(from_addr, to_addrs, msg.as_string())
-    finally:
+    except Exception:
+        try:
+            server.quit()
+        except Exception:
+            logger.debug("SMTP cleanup failed after send failure", exc_info=True)
+        raise
+
+    # Once sendmail succeeds, a QUIT failure does not mean the server rejected
+    # the message. Treating it as a delivery failure would trigger duplicates.
+    try:
         server.quit()
+    except Exception:
+        logger.warning("SMTP cleanup failed after message was accepted", exc_info=True)

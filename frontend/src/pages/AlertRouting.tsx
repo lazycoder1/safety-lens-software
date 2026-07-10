@@ -45,28 +45,52 @@ import {
 
 type Tab = "channels" | "timeouts" | "escalation" | "templates"
 
-type Channel = "inApp" | "telegram" | "whatsapp" | "sms" | "plc" | "emailDigest"
+type Channel = "inApp" | "telegram" | "email" | "webhook"
 
 const channelLabels: Record<Channel, string> = {
   inApp: "In-App",
   telegram: "Telegram",
-  whatsapp: "WhatsApp",
-  sms: "SMS",
-  plc: "PLC",
-  emailDigest: "Email Digest",
+  email: "Email",
+  webhook: "Webhook",
 }
 
-const channels: Channel[] = ["inApp", "telegram", "whatsapp", "sms", "plc", "emailDigest"]
+const channels: Channel[] = ["inApp", "telegram", "email", "webhook"]
 
 const severities: Severity[] = ["P1", "P2", "P3", "P4"]
 
 type ChannelMatrix = Record<Severity, Record<Channel, boolean>>
 
 const defaultChannelMatrix: ChannelMatrix = {
-  P1: { inApp: true, telegram: true, whatsapp: true, sms: true, plc: true, emailDigest: true },
-  P2: { inApp: true, telegram: true, whatsapp: true, sms: false, plc: true, emailDigest: true },
-  P3: { inApp: true, telegram: true, whatsapp: false, sms: false, plc: false, emailDigest: true },
-  P4: { inApp: true, telegram: false, whatsapp: false, sms: false, plc: false, emailDigest: false },
+  P1: { inApp: true, telegram: true, email: true, webhook: true },
+  P2: { inApp: true, telegram: true, email: true, webhook: true },
+  P3: { inApp: true, telegram: true, email: false, webhook: false },
+  P4: { inApp: true, telegram: false, email: false, webhook: false },
+}
+
+function normalizeChannelMatrix(value: unknown): ChannelMatrix {
+  const source = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {}
+
+  return severities.reduce((matrix, severity) => {
+    const valueForSeverity = source[severity]
+    const sourceRow = valueForSeverity && typeof valueForSeverity === "object"
+      ? valueForSeverity as Record<string, unknown>
+      : {}
+    const row = { ...defaultChannelMatrix[severity] }
+
+    for (const channel of channels) {
+      if (typeof sourceRow[channel] === "boolean") {
+        row[channel] = sourceRow[channel]
+      }
+    }
+    if (typeof sourceRow.email !== "boolean" && typeof sourceRow.emailDigest === "boolean") {
+      row.email = sourceRow.emailDigest
+    }
+
+    matrix[severity] = row
+    return matrix
+  }, {} as ChannelMatrix)
 }
 
 /* Timeouts */
@@ -97,9 +121,15 @@ interface EscalationStep {
   channel: string
 }
 
+function normalizeEscalationChannel(channel: unknown): "telegram" | "email" | "webhook" {
+  const normalized = String(channel ?? "").trim().toLowerCase()
+  if (normalized === "email" || normalized === "webhook") return normalized
+  return "telegram"
+}
+
 const defaultEscalation: EscalationStep[] = [
-  { id: 1, afterMinutes: 3, role: "Floor Manager", channel: "Telegram" },
-  { id: 2, afterMinutes: 10, role: "Plant Manager", channel: "SMS" },
+  { id: 1, afterMinutes: 3, role: "Floor Manager", channel: "telegram" },
+  { id: 2, afterMinutes: 10, role: "Plant Manager", channel: "email" },
 ]
 
 /* Test alert */
@@ -113,6 +143,8 @@ interface TestAlertConfig {
 interface TestResult {
   channel: string
   success: boolean
+  status?: string
+  message?: string
 }
 
 /* ------------------------------------------------------------------ */
@@ -129,7 +161,7 @@ export function AlertRouting() {
     severity: "P2",
     cameraId: cameras[0].id,
     ruleId: alertRoutingRules[0].id,
-    channels: { inApp: true, telegram: true, whatsapp: false, sms: false, plc: false, emailDigest: false },
+    channels: { inApp: false, telegram: true, email: false, webhook: false },
   })
   const [testResults, setTestResults] = useState<TestResult[] | null>(null)
   const [testRunning, setTestRunning] = useState(false)
@@ -207,7 +239,7 @@ export function AlertRouting() {
 
         // Alert routing
         const ar = cfg.alert_routing || {}
-        if (ar.channel_matrix) setChannelMatrix(ar.channel_matrix)
+        if (ar.channel_matrix) setChannelMatrix(normalizeChannelMatrix(ar.channel_matrix))
         if (ar.timeouts) {
           // Convert dict-based timeouts to array for the UI
           const arr = Object.entries(ar.timeouts).map(([category, vals]: [string, any]) => ({
@@ -216,7 +248,14 @@ export function AlertRouting() {
           }))
           if (arr.length > 0) setTimeouts(arr)
         }
-        if (ar.escalation_steps) setEscalationSteps(ar.escalation_steps)
+        if (Array.isArray(ar.escalation_steps)) {
+          setEscalationSteps(
+            ar.escalation_steps.map((step: EscalationStep) => ({
+              ...step,
+              channel: normalizeEscalationChannel(step.channel),
+            }))
+          )
+        }
       })
       .catch(() => {
         /* config endpoint unavailable — keep defaults */
@@ -334,7 +373,7 @@ export function AlertRouting() {
         id: newId,
         afterMinutes: lastStep ? lastStep.afterMinutes + 10 : 5,
         role: "Safety Officer",
-        channel: "WhatsApp",
+        channel: "telegram",
       },
     ])
     setRoutingDirty(true)
@@ -497,17 +536,22 @@ export function AlertRouting() {
         rule: "Test Alert",
         cameraName: "Test Camera",
         zone: "Test Zone",
+        channels: selectedChannels,
       })
-      const results: TestResult[] = selectedChannels.map((ch) => ({
-        channel: channelLabels[ch],
-        success: result.ok ?? true,
-      }))
+      const results: TestResult[] = Array.isArray(result.results)
+        ? result.results.map((entry: TestResult) => ({
+            channel: channelLabels[entry.channel as Channel] ?? entry.channel,
+            success: Boolean(entry.success),
+            status: entry.status,
+            message: entry.message,
+          }))
+        : []
       setTestResults(results)
 
       if (result.ok) {
-        toast.success("Test alert dispatched to configured channels")
+        toast.success("Test alert delivered to every selected channel")
       } else {
-        toast.error("Test alert dispatch failed")
+        toast.error("One or more selected channels did not accept the test alert")
       }
     } catch {
       toast.error("Could not reach the server")
@@ -1175,10 +1219,9 @@ export function AlertRouting() {
                       }
                       className="px-2 py-1 text-sm border rounded-[var(--radius-md)] bg-white text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-info)] focus:border-transparent cursor-pointer"
                     >
-                      <option value="Telegram">Telegram</option>
-                      <option value="SMS">SMS</option>
-                      <option value="WhatsApp">WhatsApp</option>
-                      <option value="Email">Email</option>
+                      <option value="telegram">Telegram</option>
+                      <option value="email">Email</option>
+                      <option value="webhook">Webhook</option>
                     </select>
 
                     {/* Remove */}
@@ -1390,9 +1433,9 @@ export function AlertRouting() {
                   <p className="text-xs font-medium text-[var(--color-text-secondary)]">
                     Results
                   </p>
-                  {testResults.map((result) => (
+                  {testResults.map((result, index) => (
                     <div
-                      key={result.channel}
+                      key={`${result.channel}-${index}`}
                       className={cn(
                         "flex items-center justify-between px-3 py-2 rounded-[var(--radius-md)] text-xs font-medium",
                         result.success
@@ -1400,17 +1443,24 @@ export function AlertRouting() {
                           : "bg-[var(--color-critical-bg)] text-[#991b1b]"
                       )}
                     >
-                      <span>{result.channel}</span>
+                      <div className="min-w-0">
+                        <div>{result.channel}</div>
+                        {result.message && (
+                          <p className="mt-0.5 text-[11px] font-normal opacity-80">
+                            {result.message}
+                          </p>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1">
                         {result.success ? (
                           <>
                             <CheckCircle2 size={12} />
-                            Delivered
+                            {result.status ?? "Delivered"}
                           </>
                         ) : (
                           <>
                             <XCircle size={12} />
-                            Failed
+                            {result.status ?? "Failed"}
                           </>
                         )}
                       </div>
