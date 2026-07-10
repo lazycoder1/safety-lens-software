@@ -16,6 +16,20 @@ python3 scripts/export_tensorrt_engine.py \
 
 The export writes `yolo26s.engine` and `yolo26s.engine.json`. The sidecar records hashes for both the source model and engine, the fixed image size, precision, task, and TensorRT version. Export is deliberately offline because it can take several minutes and consume most of an 8 GB Jetson's memory.
 
+For a fixed-prompt YOLOE PPE engine, repeat `--class` in the exact order the camera plan uses and provide the MobileCLIP encoder:
+
+```bash
+python3 scripts/export_tensorrt_engine.py \
+  --source /models/yoloe_open_vocab/yoloe-26s-seg.pt \
+  --output /models/yoloe_open_vocab/yoloe-26s-seg-helmet.engine \
+  --text-encoder /models/mobileclip2_b.ts \
+  --class "motorcycle helmet" --class-group rider_helmet_required \
+  --class "rider helmet" --class-group rider_helmet_required \
+  --class "helmet" --class-group rider_helmet_required
+```
+
+Set `SAFETYLENS_PPE_TENSORRT_ENGINE` to enable it. PPE and dynamic long-tail YOLOE use separate runtimes when this is configured. If the requested PPE prompts differ from the engine manifest, SafetyLens releases the engine and falls back to the dynamic PyTorch model.
+
 ## Enable it
 
 Set the absolute engine path for the model-server service and recreate that service:

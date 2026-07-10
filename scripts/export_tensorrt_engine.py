@@ -25,6 +25,9 @@ def export_engine(
     workspace: float,
     device: int,
     force: bool,
+    classes: list[str] | None = None,
+    class_groups: list[str] | None = None,
+    text_encoder_path: Path | None = None,
 ) -> dict:
     if source_path.suffix.lower() != ".pt" or not source_path.is_file():
         raise ValueError("Source must be an existing Ultralytics .pt model")
@@ -37,19 +40,50 @@ def export_engine(
     from ultralytics import YOLO
     import tensorrt
 
+    classes = list(classes or [])
+    class_groups = list(class_groups or [])
+    if any(not value.strip() for value in classes) or len(classes) != len(set(classes)):
+        raise ValueError("Fixed prompt classes must be non-empty and unique")
+    if classes and (len(class_groups) != len(classes) or any(not value.strip() for value in class_groups)):
+        raise ValueError("Each fixed prompt class requires one non-empty semantic class group")
+    if not classes and class_groups:
+        raise ValueError("Semantic class groups require fixed prompt classes")
     with tempfile.TemporaryDirectory(prefix="tensorrt-export-", dir=output_path.parent) as temporary_dir:
         temporary_source = Path(temporary_dir) / source_path.name
         shutil.copy2(source_path, temporary_source)
-        exported = Path(YOLO(str(temporary_source)).export(
-            format="engine",
-            imgsz=imgsz,
-            half=True,
-            batch=1,
-            dynamic=False,
-            workspace=workspace,
-            device=device,
-            verbose=False,
-        ))
+        if classes:
+            candidates = [
+                text_encoder_path,
+                source_path.parent / "mobileclip2_b.ts",
+                ROOT / "backend" / "mobileclip2_b.ts",
+                ROOT / "mobileclip2_b.ts",
+            ]
+            encoder = next((path for path in candidates if path is not None and path.is_file()), None)
+            if encoder is None:
+                raise FileNotFoundError("Fixed-prompt export requires mobileclip2_b.ts")
+            shutil.copy2(encoder, Path(temporary_dir) / encoder.name)
+
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(temporary_dir)
+            model = YOLO(str(temporary_source))
+            task = str(model.task)
+            if classes:
+                if not hasattr(model, "set_classes"):
+                    raise ValueError("Fixed prompt classes require a YOLOE model")
+                model.set_classes(classes)
+            exported = Path(model.export(
+                format="engine",
+                imgsz=imgsz,
+                half=True,
+                batch=1,
+                dynamic=False,
+                workspace=workspace,
+                device=device,
+                verbose=False,
+            ))
+        finally:
+            os.chdir(original_cwd)
         if not exported.is_file():
             raise RuntimeError("Ultralytics did not produce a TensorRT engine")
         os.replace(exported, output_path)
@@ -59,7 +93,9 @@ def export_engine(
         engine_path=output_path,
         imgsz=imgsz,
         precision="fp16",
-        task="detect",
+        task=task,
+        classes=classes,
+        class_groups=class_groups,
         metadata={
             "batch": 1,
             "dynamic": False,
@@ -77,6 +113,9 @@ def main() -> int:
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--workspace", type=float, default=2.0)
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--class", dest="classes", action="append", default=[])
+    parser.add_argument("--class-group", dest="class_groups", action="append", default=[])
+    parser.add_argument("--text-encoder", type=Path)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     output = args.output or args.source.with_suffix(".engine")
@@ -87,6 +126,9 @@ def main() -> int:
         workspace=args.workspace,
         device=args.device,
         force=args.force,
+        classes=args.classes,
+        class_groups=args.class_groups,
+        text_encoder_path=args.text_encoder.resolve() if args.text_encoder else None,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
