@@ -796,6 +796,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     inference_interval,
                 )
 
+            # Cached detections remain available for rendering, but only a newly
+            # completed model result may advance temporal alert/fall state.
+            fresh_inference_result = False
             if time.monotonic() >= next_inference_at:
                 try:
                     annotated, detections = _run_grouped_inference(
@@ -827,12 +830,14 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             detections,
                             camera_id,
                         )
+                    fresh_inference_result = True
                 except Exception:
                     logger.exception("Detection failed", extra={"camera_id": camera_id})
                     annotated = frame
                     detections = []
                 last_annotated = annotated
-                last_detection_frame = frame.copy()
+                if fresh_inference_result:
+                    last_detection_frame = frame.copy()
                 state.camera_detections[camera_id] = detections
                 next_inference_at = inference_scheduler.next_inference_slot(
                     camera_id,
@@ -845,18 +850,22 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             # Fall detection runs independently — pose model doesn't need COCO detections
             has_fall_candidates = False
             fall_candidates = []
-            if execution_plan.get("run_pose_specialist") and camera_id in _last_pose_results:
+            if (
+                fresh_inference_result
+                and execution_plan.get("run_pose_specialist")
+                and camera_id in _last_pose_results
+            ):
                 fall_candidates = check_fall_detections(_last_pose_results[camera_id], camera_id, frame)
                 has_fall_candidates = len(fall_candidates) > 0
 
-            if detections or has_fall_candidates:
+            if fresh_inference_result and (detections or has_fall_candidates):
                 candidates = []
+                frame_h, frame_w = frame.shape[:2]
                 if detections:
                     if execution_plan.get("run_ppe_specialist"):
                         candidates.extend(check_yoloe_violations(detections, camera_id))
                     candidates.extend(check_violations(detections, camera_id))
 
-                    frame_h, frame_w = frame.shape[:2]
                     candidates.extend(check_zone_intrusions(detections, camera_id, frame_w, frame_h))
 
                 candidates.extend(fall_candidates)
@@ -922,7 +931,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                 for rule_key in list(violation_window):
                     if len(violation_window[rule_key]) >= window_size and sum(violation_window[rule_key]) == 0:
                         violation_window.pop(rule_key, None)
-            else:
+            elif fresh_inference_result:
                 for rule_key in list(violation_window):
                     violation_window[rule_key].append(False)
                     if len(violation_window[rule_key]) > window_size:
