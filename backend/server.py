@@ -168,12 +168,13 @@ async def startup():
 
     # Phase 1: fast init — server becomes responsive for /api/health and /api/auth/login
     db.init_pool()
+    load_config()
+    auth_store.init_jwt_secret()
     alert_store.init_db()
     face_store.init_db()
     audit_store.init_db()
     auth_store.init_auth_db()
     error_store.init_db()
-    load_config()
     start_alert_pipeline()
 
     # License gate. Inference workers always start, but they self-pause

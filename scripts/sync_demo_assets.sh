@@ -31,7 +31,7 @@ usage() {
 Usage: ./scripts/sync_demo_assets.sh --host HOST [options]
 
 Uploads gitignored demo assets to the Vast backend host:
-- backend/config.json
+- backend/config.json (direct host/JSON deployments only; not Docker Compose)
 - test-videos/
 - models/
 - root-level model files such as yolo26m.pt and yoloe-11s-seg.pt
@@ -42,7 +42,7 @@ Options:
   --user USER            SSH user. Default: root
   --identity PATH        SSH private key. Default: ../.project-keys/vast_techser_ed25519
   --remote-dir PATH      Remote project directory. Default: /opt/safetylens/video-analytics
-  --skip-config          Do not upload backend/config.json
+  --skip-config          Do not upload host-mode backend/config.json
   --with-env             Upload .env as well
   -h, --help             Show this help
 EOF

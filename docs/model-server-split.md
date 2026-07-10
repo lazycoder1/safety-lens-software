@@ -24,7 +24,8 @@ cd /Users/gauthamgsabahit/workspace/techser/video-analytics
 python -m uvicorn model_server:app --app-dir backend --host 0.0.0.0 --port 8100
 ```
 
-Optional shared-secret auth:
+Required shared-secret auth whenever the server is reachable outside a private
+local Compose network:
 
 ```bash
 export SAFETYLENS_MODEL_SERVER_TOKEN='change-me'
@@ -54,6 +55,12 @@ For a local split stack:
 ```bash
 docker compose -f docker-compose.split.yml up --build
 ```
+
+The checked-in Compose file does not publish port `8100` on the host. The edge
+reaches the model server over the internal network at
+`http://model-server:8100`. Remote deployments must add an explicit port or
+reverse-proxy override, set a non-empty token on both services, and restrict the
+listener with the host firewall.
 
 For a real sales laptop deployment, run only the `edge` service on the laptop and point `SAFETYLENS_MODEL_SERVER_URL` at the hosted GPU model server.
 

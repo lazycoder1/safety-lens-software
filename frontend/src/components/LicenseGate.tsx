@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import {
   getLicenseStatus,
   uploadLicense,
+  uploadHeartbeat,
   type LicenseStatusResponse,
 } from "@/lib/api"
 
@@ -31,16 +32,23 @@ export function LicenseGate() {
   }, [])
 
   const handleFile = useCallback(async (file: File) => {
-    if (!file.name.toLowerCase().endsWith(".lic")) {
-      toast.error("Please upload a .lic license file")
+    const lowerName = file.name.toLowerCase()
+    const isLicense = lowerName.endsWith(".lic")
+    const isHeartbeat = lowerName.endsWith(".json")
+    if (!isLicense && !isHeartbeat) {
+      toast.error("Please upload a .lic license or .json heartbeat file")
       return
     }
     setUploading(true)
     try {
-      const next = await uploadLicense(file)
+      const next = isLicense ? await uploadLicense(file) : await uploadHeartbeat(file)
       setStatus(next)
       if (next.state === "valid") {
-        toast.success(`License activated for ${next.license?.customer_name ?? "this site"}`)
+        toast.success(
+          isLicense
+            ? `License activated for ${next.license?.customer_name ?? "this site"}`
+            : "Heartbeat refreshed",
+        )
         setDismissed(true)
       } else {
         toast.info(`License uploaded — status: ${next.state}`)
@@ -125,17 +133,17 @@ export function LicenseGate() {
               <span className="font-semibold text-amber-700">
                 {status.days_until_suspension} days
               </span>
-              . Please upload a renewed license.
+              . Refresh the heartbeat or upload a renewed license as indicated above.
             </p>
           )}
 
           {status.state === "warning" && status.days_until_suspension !== null && (
             <p className="text-sm text-gray-600">
-              Your license expires in{" "}
+              The system will suspend in{" "}
               <span className="font-semibold text-amber-700">
                 {status.days_until_suspension} days
               </span>
-              . Contact your implementation partner for renewal.
+              if the license is not renewed.
             </p>
           )}
 
@@ -143,7 +151,7 @@ export function LicenseGate() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".lic"
+            accept=".lic,.json,application/json"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]
@@ -173,7 +181,7 @@ export function LicenseGate() {
               <Upload className="w-6 h-6 text-gray-400" />
             )}
             <p className="text-sm text-gray-500">
-              {uploading ? "Uploading..." : "Drop a .lic file here, or click to browse"}
+              {uploading ? "Uploading..." : "Drop a .lic license or .json heartbeat here"}
             </p>
           </div>
         </div>
@@ -181,7 +189,10 @@ export function LicenseGate() {
         {/* Footer */}
         <div className="px-6 py-4 bg-gray-50 border-t flex items-center justify-between">
           <button
-            onClick={() => navigate("/system/license")}
+            onClick={() => {
+              setDismissed(true)
+              navigate("/system/license")
+            }}
             className="text-sm text-blue-600 hover:text-blue-800 font-medium"
           >
             Go to License page

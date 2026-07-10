@@ -2,10 +2,11 @@
 User authentication and management for SafetyLens backend.
 """
 
-import json
+import fcntl
 import logging
 import os
 import secrets
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -15,38 +16,116 @@ import jwt
 from psycopg2.extras import RealDictCursor
 
 from db import get_conn
+from runtime_storage import STATE_DIR, atomic_write_private
 
 logger = logging.getLogger("safetylens.auth")
 
 
-def _load_jwt_secret() -> str:
-    """Read JWT secret from env, then config.json, else generate & persist."""
-    env = os.environ.get("JWT_SECRET")
-    if env:
-        return env
-    cfg_path = Path(__file__).parent / "config.json"
-    try:
-        cfg = json.loads(cfg_path.read_text())
-        secret = cfg.get("auth", {}).get("jwt_secret")
-        if secret:
-            return secret
-    except Exception:
-        pass
-    # Last resort: generate and persist into config.json
-    secret = secrets.token_hex(32)
-    try:
-        cfg = json.loads(cfg_path.read_text())
-        cfg.setdefault("auth", {})["jwt_secret"] = secret
-        cfg_path.write_text(json.dumps(cfg, indent=2))
-        logger.info("Generated and saved JWT_SECRET to config.json")
-    except Exception:
-        logger.warning("JWT_SECRET not persisted — tokens will invalidate on restart")
+_JWT_SECRET_FILE_VALUE = os.environ.get("JWT_SECRET_FILE", "").strip()
+JWT_SECRET_PATH = Path(
+    _JWT_SECRET_FILE_VALUE or str(STATE_DIR / "auth" / "jwt.secret")
+).expanduser()
+_JWT_SECRET_MIN_LENGTH = 32
+_jwt_secret_lock = threading.Lock()
+
+
+def _validate_jwt_secret(secret: str, source: str) -> str:
+    if secret != secret.strip() or any(char in secret for char in ("\r", "\n", "\x00")):
+        raise RuntimeError(f"JWT secret from {source} must not contain surrounding whitespace or line breaks")
+    if len(secret.encode("utf-8")) < _JWT_SECRET_MIN_LENGTH:
+        raise RuntimeError(
+            f"JWT secret from {source} must be at least {_JWT_SECRET_MIN_LENGTH} bytes"
+        )
     return secret
 
 
-JWT_SECRET = _load_jwt_secret()
+def _read_jwt_secret_file(path: Path, source: str) -> str:
+    secret = path.read_text()
+    if secret.endswith("\r\n"):
+        secret = secret[:-2]
+    elif secret.endswith("\n"):
+        secret = secret[:-1]
+    return _validate_jwt_secret(secret, source)
+
+
+def _load_jwt_secret(seed_secret: str | None = None) -> str:
+    """Load an explicit secret or create one once in the persistent state dir."""
+    env = os.environ.get("JWT_SECRET", "")
+    if env:
+        return _validate_jwt_secret(env, "JWT_SECRET")
+
+    explicit_file = os.environ.get("JWT_SECRET_FILE", "").strip()
+    if explicit_file:
+        if not JWT_SECRET_PATH.is_file():
+            raise RuntimeError(f"JWT_SECRET_FILE does not exist: {JWT_SECRET_PATH}")
+        return _read_jwt_secret_file(JWT_SECRET_PATH, "JWT_SECRET_FILE")
+
+    JWT_SECRET_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(JWT_SECRET_PATH.parent, 0o700)
+    lock_path = JWT_SECRET_PATH.with_suffix(JWT_SECRET_PATH.suffix + ".lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    os.chmod(lock_path, 0o600)
+    try:
+        with os.fdopen(lock_fd, "r+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if JWT_SECRET_PATH.is_file():
+                os.chmod(JWT_SECRET_PATH, 0o600)
+                secret = _read_jwt_secret_file(JWT_SECRET_PATH, str(JWT_SECRET_PATH))
+                if seed_secret is not None:
+                    validated_seed = _validate_jwt_secret(seed_secret, "legacy config")
+                    if not secrets.compare_digest(secret, validated_seed):
+                        raise RuntimeError(
+                            "Persistent JWT secret does not match legacy application config; "
+                            "refusing to invalidate tokens or share deployment identity"
+                        )
+            else:
+                secret = seed_secret or secrets.token_hex(32)
+                _validate_jwt_secret(secret, "legacy config")
+                atomic_write_private(JWT_SECRET_PATH, (secret + "\n").encode())
+                logger.info(
+                    "Stored JWT secret in persistent runtime state",
+                    extra={"migrated": seed_secret is not None},
+                )
+            return _validate_jwt_secret(secret, str(JWT_SECRET_PATH))
+    finally:
+        # fdopen owns lock_fd on the normal path; only close it if fdopen failed.
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+
+
+JWT_SECRET: str | None = None
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 8
+
+
+def init_jwt_secret() -> str:
+    """Initialize the process secret and migrate the legacy config value once."""
+    global JWT_SECRET
+    if JWT_SECRET is not None:
+        return JWT_SECRET
+    with _jwt_secret_lock:
+        if JWT_SECRET is not None:
+            return JWT_SECRET
+
+        from config_manager import get_config, remove_legacy_jwt_secret
+
+        config = get_config()
+        auth_config = config.get("auth", {})
+        legacy_secret = auth_config.get("jwt_secret") if isinstance(auth_config, dict) else None
+        JWT_SECRET = _load_jwt_secret(seed_secret=legacy_secret)
+
+        # JWT material has a dedicated ownership boundary now. Remove only the
+        # matching legacy field, never rewrite a stale whole-config snapshot.
+        if isinstance(auth_config, dict) and "jwt_secret" in auth_config:
+            if remove_legacy_jwt_secret(legacy_secret):
+                logger.info("Removed legacy JWT secret from application config")
+        return JWT_SECRET
+
+
+def _get_jwt_secret() -> str:
+    return JWT_SECRET if JWT_SECRET is not None else init_jwt_secret()
 
 
 # ── JWT ─────────────────────────────────────────────────────────────────────
@@ -59,11 +138,11 @@ def create_token(user_id: str, username: str, role: str) -> str:
         "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    return jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
 
 
 # ── Password hashing ────────────────────────────────────────────────────────

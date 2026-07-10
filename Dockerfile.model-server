@@ -1,7 +1,8 @@
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3-pip python3.11-dev \
@@ -17,6 +18,7 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./backend/
+COPY scripts/export_tensorrt_engine.py ./scripts/export_tensorrt_engine.py
 
 EXPOSE 8100
 

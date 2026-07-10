@@ -83,6 +83,33 @@ def test_load_config_uses_one_postgres_snapshot_for_config_and_version(monkeypat
     assert config_manager._config_version == "version-2"
 
 
+def test_load_config_seeds_postgres_when_authoritative_row_is_missing(monkeypatch):
+    saved = []
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(config_manager, "_load_from_postgres_record", lambda: (None, None))
+    monkeypatch.setattr(config_manager, "_save_to_postgres", lambda cfg: saved.append(deepcopy(cfg)) or "version-1")
+    monkeypatch.setattr(config_manager, "normalize_config", lambda cfg: (cfg, False))
+
+    config = config_manager.load_config()
+
+    assert saved == [config]
+    assert config_manager._config_version == "version-1"
+
+
+def test_remove_legacy_jwt_secret_preserves_other_json_config():
+    config = deepcopy(config_manager.DEFAULT_CONFIG)
+    config["auth"] = {"jwt_secret": "legacy-secret", "issuer": "site-1"}
+    config["global"]["target_fps"] = 11
+    config_manager.save_config(config)
+
+    removed = config_manager.remove_legacy_jwt_secret("legacy-secret")
+
+    assert removed is True
+    persisted = json.loads(_test_config.read_text())
+    assert persisted["auth"] == {"issuer": "site-1"}
+    assert persisted["global"]["target_fps"] == 11
+
+
 def test_load_config_normalizes_legacy_camera_rule_fields():
     custom = {
         "global": {},
@@ -329,6 +356,7 @@ def test_save_config_writes_to_disk():
     assert _test_config.exists()
     loaded = json.loads(_test_config.read_text())
     assert loaded["global"]["target_fps"] == 12
+    assert _test_config.stat().st_mode & 0o777 == 0o600
 
 
 def test_save_config_atomic_write():

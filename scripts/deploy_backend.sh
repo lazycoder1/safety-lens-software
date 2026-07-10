@@ -128,7 +128,7 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 if [[ -z "${JWT_SECRET:-}" ]]; then
-  warn "JWT_SECRET is empty. Tokens will invalidate whenever the backend restarts."
+  log "JWT_SECRET is empty; a persistent signing key will be created under the runtime state directory."
 fi
 
 if [[ ! -f "$PROJECT_DIR/yolo26m.pt" && ! -f "$PROJECT_DIR/models/coco_primary/yolo26m.pt" ]]; then

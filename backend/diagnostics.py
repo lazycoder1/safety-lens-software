@@ -7,7 +7,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,16 +24,33 @@ import state
 from config_manager import get_config, get_redacted_config
 from logging_config import LOGS_DIR
 from mjpeg_fanout import stream_fanout
+from runtime_storage import STATE_DIR
+from secret_redaction import redact_text_secrets
 
 logger = logging.getLogger("safetylens.diagnostics")
 
-DIAGNOSTICS_DIR = Path(__file__).parent / "diagnostics"
+DIAGNOSTICS_DIR = STATE_DIR / "diagnostics"
 APP_START_TIME = time.time()
 
 _health_cache: dict | None = None
 _health_cache_time: float = 0.0
 _HEALTH_CACHE_TTL = 5.0
 _health_cache_lock = __import__("threading").Lock()
+
+
+def _diagnostic_secret_values(config: dict) -> list[str]:
+    values = [
+        config.get("database", {}).get("url"),
+        config.get("telegram", {}).get("bot_token"),
+        config.get("email", {}).get("smtp_pass"),
+        config.get("webhook", {}).get("url"),
+        *config.get("webhook", {}).get("headers", {}).values(),
+    ]
+    for camera in config.get("cameras", {}).values():
+        values.extend(
+            [camera.get("username"), camera.get("password"), camera.get("video")]
+        )
+    return [str(value) for value in values if value not in (None, "")]
 
 
 def build_health_snapshot() -> dict:
@@ -126,7 +145,8 @@ def build_health_snapshot() -> dict:
 
 
 def create_diagnostics_bundle() -> Path:
-    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(DIAGNOSTICS_DIR, 0o700)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     bundle_path = DIAGNOSTICS_DIR / f"safetylens-diagnostics-{timestamp}.zip"
 
@@ -136,31 +156,56 @@ def create_diagnostics_bundle() -> Path:
     license_status = licensing.get_status().to_public_dict()
     stats = alert_store.get_stats()
     config = get_redacted_config()
+    secret_values = _diagnostic_secret_values(get_config())
 
-    with ZipFile(bundle_path, "w", compression=ZIP_DEFLATED) as zf:
-        zf.writestr("health.json", json.dumps(health, indent=2))
-        zf.writestr("license.json", json.dumps(license_status, indent=2))
-        zf.writestr("alerts-stats.json", json.dumps(stats, indent=2))
-        zf.writestr("recent-alerts.json", json.dumps(recent_alerts, indent=2))
-        zf.writestr("audit-log.json", json.dumps(recent_audit, indent=2))
-        zf.writestr("config.redacted.json", json.dumps(config, indent=2))
+    fd, tmp_name = tempfile.mkstemp(prefix=".diagnostics-", suffix=".zip", dir=DIAGNOSTICS_DIR)
+    os.fchmod(fd, 0o600)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with ZipFile(tmp_path, "w", compression=ZIP_DEFLATED) as zf:
+            zf.writestr("health.json", json.dumps(health, indent=2))
+            zf.writestr("license.json", json.dumps(license_status, indent=2))
+            zf.writestr("alerts-stats.json", json.dumps(stats, indent=2))
+            zf.writestr("recent-alerts.json", json.dumps(recent_alerts, indent=2))
+            zf.writestr("audit-log.json", json.dumps(recent_audit, indent=2))
+            zf.writestr("config.redacted.json", json.dumps(config, indent=2))
 
-        if LOGS_DIR.exists():
-            for path in sorted(LOGS_DIR.glob("safetylens.log*")):
-                if path.is_file():
-                    zf.write(path, arcname=f"logs/{path.name}")
+            if LOGS_DIR.exists():
+                for path in sorted(LOGS_DIR.glob("safetylens.log*")):
+                    if not path.is_file():
+                        continue
+                    with path.open("r", encoding="utf-8", errors="replace") as source:
+                        with zf.open(f"logs/{path.name}", "w") as destination:
+                            for line in source:
+                                safe_line = redact_text_secrets(line, secret_values)
+                                destination.write(safe_line.encode("utf-8"))
+        with tmp_path.open("rb") as bundle_file:
+            os.fsync(bundle_file.fileno())
+        os.replace(tmp_path, bundle_path)
+        os.chmod(bundle_path, 0o600)
+        directory_fd = os.open(DIAGNOSTICS_DIR, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
     logger.info("Diagnostics bundle created", extra={"path": str(bundle_path)})
     return bundle_path
 
 
 def cleanup_diagnostics_files(*, retention_days: int, max_bytes: int) -> dict:
-    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(DIAGNOSTICS_DIR, 0o700)
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(retention_days, 0))
     deleted_files = 0
     reclaimed_bytes = 0
 
     files = [path for path in DIAGNOSTICS_DIR.iterdir() if path.is_file()]
+    for path in files:
+        os.chmod(path, 0o600)
     files.sort(key=lambda path: path.stat().st_mtime)
 
     for path in files:

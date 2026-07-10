@@ -23,10 +23,15 @@ runs/
 backend/snapshots/
 backend/face_photos/
 backend/face_snapshots/
+backend/diagnostics/
 backend/logs/
 backend/alerts.db
+backend/*.db-*
+backend/*.sqlite
+backend/*.sqlite-*
 backend/__pycache__/
 backend/.pytest_cache/
+/logs/
 
 # Config with secrets
 backend/config.json
@@ -35,9 +40,15 @@ backend/config.json
 backend/keys/*_private.pem
 backend/license/
 backend/heartbeat/
-
-# Local packaged extras bundle (models/videos/config) should not be source-controlled
+backend/auth/
 safetylens-extras.zip
+
+# Local environment and deployment backups can contain credentials
+.env
+.env.*
+!.env.example
+.deploy/
+.project-keys/
 
 # IDE
 .vscode/

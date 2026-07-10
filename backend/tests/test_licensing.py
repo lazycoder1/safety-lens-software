@@ -229,7 +229,7 @@ class TestComputeStatus:
             now=now,
         )
         assert status.state == licensing.LicenseState.VALID
-        assert status.days_until_suspension > 300
+        assert status.days_until_suspension == 44
 
     def test_license_within_warning_window_warns(self):
         now = datetime.now(timezone.utc)
@@ -264,13 +264,39 @@ class TestComputeStatus:
 
     def test_no_heartbeat_with_fresh_license_is_valid(self):
         now = datetime.now(timezone.utc)
-        # Brand-new installs should not be penalized before the first heartbeat.
+        # A brand-new install gets one signed initial heartbeat window.
         status = licensing.compute_status(
-            _license(now + timedelta(days=300)),
+            _license(now + timedelta(days=300), issued_at=now),
             None,
             now=now,
         )
         assert status.state == licensing.LicenseState.VALID
+        assert status.days_until_suspension == 49
+
+    def test_missing_heartbeat_ages_from_signed_license_issue_date(self):
+        now = datetime.now(timezone.utc)
+        license = _license(
+            now + timedelta(days=300),
+            issued_at=now - timedelta(days=40),
+        )
+
+        status = licensing.compute_status(license, None, now=now)
+
+        assert status.state == licensing.LicenseState.GRACE
+        assert status.days_until_suspension == 9
+
+    def test_deleting_heartbeat_cannot_reset_revocation_window(self):
+        now = datetime.now(timezone.utc)
+        license = _license(
+            now + timedelta(days=300),
+            issued_at=now - timedelta(days=50),
+        )
+
+        status = licensing.compute_status(license, None, now=now)
+
+        assert status.state == licensing.LicenseState.SUSPENDED
+        assert status.days_until_suspension == 0
+        assert "heartbeat" in status.reason.lower()
 
     def test_expired_heartbeat_within_grace_is_grace(self):
         now = datetime.now(timezone.utc)
@@ -291,6 +317,28 @@ class TestComputeStatus:
         )
         assert status.state == licensing.LicenseState.SUSPENDED
         assert "heartbeat" in status.reason.lower()
+
+    def test_overlapping_grace_periods_report_earliest_suspension(self):
+        now = datetime.now(timezone.utc)
+        status = licensing.compute_status(
+            _license(now - timedelta(days=5)),
+            _heartbeat(now - timedelta(days=10)),
+            now=now,
+        )
+
+        assert status.state == licensing.LicenseState.GRACE
+        assert status.days_until_suspension == 4
+
+    def test_license_warning_reports_earlier_heartbeat_suspension(self):
+        now = datetime.now(timezone.utc)
+        status = licensing.compute_status(
+            _license(now + timedelta(days=7)),
+            _heartbeat(now + timedelta(days=1)),
+            now=now,
+        )
+
+        assert status.state == licensing.LicenseState.WARNING
+        assert status.days_until_suspension == 15
 
     def test_suspended_takes_priority_over_warning(self):
         now = datetime.now(timezone.utc)
@@ -314,6 +362,8 @@ class TestPersistence:
         assert licensing.LICENSE_PATH.exists()
         assert license.license_id == "SL-2026-9999"
         assert licensing.LICENSE_PATH.read_bytes() == blob
+        assert licensing.LICENSE_PATH.stat().st_mode & 0o777 == 0o600
+        assert licensing.LICENSE_PATH.parent.stat().st_mode & 0o777 == 0o700
 
     def test_save_invalid_license_does_not_overwrite(self, configured_module):
         private_key, _ = configured_module
@@ -337,6 +387,7 @@ class TestPersistence:
         hb = licensing.save_heartbeat(_sign_heartbeat(private_key))
         assert hb.license_id == "SL-2026-9999"
         assert licensing.HEARTBEAT_PATH.exists()
+        assert licensing.HEARTBEAT_PATH.stat().st_mode & 0o777 == 0o600
 
     def test_save_heartbeat_for_wrong_license_fails(self, configured_module):
         private_key, _ = configured_module

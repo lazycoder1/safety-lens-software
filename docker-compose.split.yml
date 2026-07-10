@@ -24,6 +24,8 @@ services:
     environment:
       DATABASE_URL: postgresql://safetylens:${POSTGRES_PASSWORD:-safetylens}@db:5432/safetylens
       SAFETYLENS_CONFIG_STORE: postgres
+      SAFETYLENS_STATE_DIR: /var/lib/safetylens
+      JWT_SECRET: ${JWT_SECRET:-}
       SAFETYLENS_CONFIG_REFRESH_SECONDS: ${SAFETYLENS_CONFIG_REFRESH_SECONDS:-2.0}
       MJPEG_MAX_SUBSCRIBERS_PER_CAMERA: ${MJPEG_MAX_SUBSCRIBERS_PER_CAMERA:-16}
       MJPEG_MAX_SUBSCRIBERS_TOTAL: ${MJPEG_MAX_SUBSCRIBERS_TOTAL:-64}
@@ -44,9 +46,10 @@ services:
       - snapshots:/app/backend/snapshots
       - face_photos:/app/backend/face_photos
       - face_snapshots:/app/backend/face_snapshots
+      - runtime_state:/var/lib/safetylens
+      - models:/app/models
       - ./logs:/app/backend/logs
       - ./test-videos:/app/test-videos:ro
-      - ./backend/config.json:/app/backend/config.json
     depends_on:
       db:
         condition: service_healthy
@@ -56,12 +59,12 @@ services:
       context: .
       dockerfile: Dockerfile.model-server
     restart: unless-stopped
-    ports:
-      - "${SAFETYLENS_MODEL_SERVER_PORT:-8100}:8100"
     environment:
       SAFETYLENS_MODEL_SERVER_TOKEN: ${SAFETYLENS_MODEL_SERVER_TOKEN:-}
       SAFETYLENS_COCO_TENSORRT_ENGINE: ${SAFETYLENS_COCO_TENSORRT_ENGINE:-}
       SAFETYLENS_PPE_TENSORRT_ENGINE: ${SAFETYLENS_PPE_TENSORRT_ENGINE:-}
+    volumes:
+      - models:/app/models
     deploy:
       resources:
         reservations:
@@ -75,3 +78,5 @@ volumes:
   snapshots:
   face_photos:
   face_snapshots:
+  runtime_state:
+  models:

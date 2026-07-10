@@ -66,6 +66,11 @@ function formatDate(iso: string | undefined | null): string {
   }
 }
 
+function daysUntil(iso: string): number {
+  const milliseconds = new Date(iso).getTime() - Date.now()
+  return Math.max(0, Math.floor(milliseconds / 86_400_000))
+}
+
 export function LicenseStatus() {
   const [status, setStatus] = useState<LicenseStatusResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -222,9 +227,9 @@ export function LicenseStatus() {
               <span className="text-xs font-medium text-[var(--color-text-secondary)]">Expires</span>
               <span className="text-sm text-[var(--color-text-primary)]">
                 {formatDate(license.expires_at)}
-                {status.days_until_suspension !== null && status.state === "valid" && (
+                {status.state === "valid" && (
                   <span className="text-[var(--color-success)] text-xs ml-2">
-                    ({status.days_until_suspension} days remaining)
+                    ({daysUntil(license.expires_at)} days remaining)
                   </span>
                 )}
                 {status.state === "warning" && (
@@ -234,7 +239,7 @@ export function LicenseStatus() {
                   <span className="text-[var(--color-critical)] text-xs ml-2">(in grace period)</span>
                 )}
                 {status.state === "suspended" && (
-                  <span className="text-[var(--color-critical)] text-xs ml-2">(expired)</span>
+                  <span className="text-[var(--color-critical)] text-xs ml-2">(suspended)</span>
                 )}
               </span>
             </div>

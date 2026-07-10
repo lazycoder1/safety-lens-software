@@ -29,14 +29,16 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from runtime_storage import STATE_DIR, atomic_write_private
+
 logger = logging.getLogger("safetylens.licensing")
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 
 _BACKEND_DIR = Path(__file__).parent
 PUBLIC_KEY_PATH = _BACKEND_DIR / "keys" / "license_pub.pem"
-LICENSE_DIR = _BACKEND_DIR / "license"
-HEARTBEAT_DIR = _BACKEND_DIR / "heartbeat"
+LICENSE_DIR = STATE_DIR / "license"
+HEARTBEAT_DIR = STATE_DIR / "heartbeat"
 LICENSE_PATH = LICENSE_DIR / "current.lic"
 HEARTBEAT_PATH = HEARTBEAT_DIR / "current.json"
 
@@ -356,16 +358,18 @@ def compute_status(
     license_warning_threshold = license.expires_at - timedelta(days=WARNING_THRESHOLD_DAYS)
     license_in_warning_window = now >= license_warning_threshold
 
-    if heartbeat is None:
-        # No heartbeat ever fetched — brand-new install that hasn't phoned
-        # home yet. Don't penalize: treat heartbeat as healthy so the license
-        # expiry date alone governs state transitions.
-        hb_past_validity = False
-        hb_grace_end = now + timedelta(days=GRACE_PERIOD_DAYS)
-    else:
-        hb_past_validity = now >= heartbeat.valid_until
-        hb_grace_end = heartbeat.valid_until + timedelta(days=GRACE_PERIOD_DAYS)
+    # A missing heartbeat is only healthy during the first signed heartbeat
+    # window. Deriving that window from license.issued_at prevents deleting the
+    # heartbeat file (or recreating a container) from resetting revocation.
+    hb_valid_until = (
+        heartbeat.valid_until
+        if heartbeat is not None
+        else license.issued_at + timedelta(days=HEARTBEAT_VALIDITY_DAYS)
+    )
+    hb_past_validity = now >= hb_valid_until
+    hb_grace_end = hb_valid_until + timedelta(days=GRACE_PERIOD_DAYS)
     hb_past_grace = hb_past_validity and now >= hb_grace_end
+    suspension_at = min(license_grace_end, hb_grace_end)
 
     # Suspension takes priority
     if license_past_grace:
@@ -381,7 +385,7 @@ def compute_status(
             has_license=True,
         )
     if hb_past_grace:
-        last_seen = heartbeat.valid_until.date() if heartbeat else "never"
+        last_seen = heartbeat.valid_until.date() if heartbeat else hb_valid_until.date()
         return LicenseStatus(
             state=LicenseState.SUSPENDED,
             license=license,
@@ -397,7 +401,7 @@ def compute_status(
 
     # Then grace period (license/heartbeat past validity but within grace)
     if license_expired:
-        days_left = max(0, (license_grace_end - now).days)
+        days_left = max(0, (suspension_at - now).days)
         return LicenseStatus(
             state=LicenseState.GRACE,
             license=license,
@@ -410,7 +414,7 @@ def compute_status(
             has_license=True,
         )
     if hb_past_validity:
-        days_left = max(0, (hb_grace_end - now).days)
+        days_left = max(0, (suspension_at - now).days)
         return LicenseStatus(
             state=LicenseState.GRACE,
             license=license,
@@ -426,23 +430,24 @@ def compute_status(
     # Then warning (close to expiry but still healthy)
     if license_in_warning_window:
         days_left = max(0, (license.expires_at - now).days)
+        days_until_suspension = max(0, (suspension_at - now).days)
         return LicenseStatus(
             state=LicenseState.WARNING,
             license=license,
             heartbeat=heartbeat,
             reason=f"License expires in {days_left} days on {license.expires_at.date()}. Please plan to renew.",
-            days_until_suspension=days_left + GRACE_PERIOD_DAYS,
+            days_until_suspension=days_until_suspension,
             has_license=True,
         )
 
     # All good
-    days_left = max(0, (license.expires_at - now).days)
+    days_left = max(0, (suspension_at - now).days)
     return LicenseStatus(
         state=LicenseState.VALID,
         license=license,
         heartbeat=heartbeat,
         reason="License is valid.",
-        days_until_suspension=days_left + GRACE_PERIOD_DAYS,
+        days_until_suspension=days_left,
         has_license=True,
     )
 
@@ -451,10 +456,7 @@ def compute_status(
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(content)
-    os.replace(tmp, path)
+    atomic_write_private(path, content)
 
 
 def _load_license_from_disk() -> Optional[License]:
@@ -527,6 +529,12 @@ def init_licensing() -> LicenseStatus:
     """
     global _public_key, _cached_status
     with _lock:
+        for directory in (LICENSE_DIR, HEARTBEAT_DIR):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(directory, 0o700)
+        for state_file in (LICENSE_PATH, HEARTBEAT_PATH):
+            if state_file.is_file():
+                os.chmod(state_file, 0o600)
         _public_key = _load_public_key()
         license = _load_license_from_disk()
         heartbeat = _load_heartbeat_from_disk(license.license_id) if license else None

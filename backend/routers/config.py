@@ -10,6 +10,7 @@ from pydantic import BaseModel
 import audit_store
 from config_manager import get_config, get_public_config, save_config
 from dependencies import require_admin
+from secret_redaction import REDACTED_VALUE, is_redacted
 from video_processing import restart_all_cameras
 import telegram_notifier
 import email_notifier
@@ -86,6 +87,26 @@ class TestAlertRequest(BaseModel):
     channels: Optional[list[str]] = None
 
 
+def _drop_redacted(updates: dict, *keys: str) -> dict:
+    for key in keys:
+        if is_redacted(updates.get(key)):
+            updates.pop(key)
+    return updates
+
+
+def _preserve_redacted_headers(updates: dict, current: dict) -> dict:
+    incoming = updates.get("headers")
+    if not isinstance(incoming, dict):
+        return updates
+    existing = current.get("headers", {})
+    updates["headers"] = {
+        key: existing[key] if is_redacted(value) and key in existing else value
+        for key, value in incoming.items()
+        if not is_redacted(value) or key in existing
+    }
+    return updates
+
+
 @router.get("/config")
 async def api_get_config():
     return get_public_config()
@@ -129,7 +150,7 @@ async def api_update_telegram(body: TelegramConfigUpdate, request: Request):
     cfg = get_config()
     if "telegram" not in cfg:
         cfg["telegram"] = {"enabled": False, "bot_token": "", "chat_id": "", "severities": ["P1", "P2"]}
-    updates = body.model_dump(exclude_none=True)
+    updates = _drop_redacted(body.model_dump(exclude_none=True), "bot_token")
     cfg["telegram"].update(updates)
     save_config(cfg)
     safe_updates = dict(updates)
@@ -142,7 +163,7 @@ async def api_update_telegram(body: TelegramConfigUpdate, request: Request):
         details={"updates": safe_updates},
         **audit_store.build_actor_context(request),
     )
-    return cfg["telegram"]
+    return get_public_config()["telegram"]
 
 
 @router.post("/config/telegram/test", dependencies=[Depends(require_admin)])
@@ -157,6 +178,8 @@ async def api_test_telegram():
 async def api_telegram_groups(body: TelegramConfigUpdate):
     """Fetch groups/chats the bot has been added to via getUpdates."""
     bot_token = body.bot_token
+    if is_redacted(bot_token):
+        bot_token = get_config().get("telegram", {}).get("bot_token")
     if not bot_token:
         return {"ok": False, "error": "Bot token is required", "groups": []}
     groups = telegram_notifier.fetch_groups(bot_token)
@@ -172,7 +195,7 @@ async def api_update_email(body: EmailConfigUpdate, request: Request):
     cfg = get_config()
     if "email" not in cfg:
         cfg["email"] = {"enabled": False, "smtp_host": "", "smtp_port": 587, "smtp_user": "", "smtp_pass": "", "from_address": "", "to_addresses": [], "severities": ["P1", "P2"]}
-    updates = body.model_dump(exclude_none=True)
+    updates = _drop_redacted(body.model_dump(exclude_none=True), "smtp_pass")
     cfg["email"].update(updates)
     save_config(cfg)
     safe_updates = dict(updates)
@@ -185,7 +208,7 @@ async def api_update_email(body: EmailConfigUpdate, request: Request):
         details={"updates": safe_updates},
         **audit_store.build_actor_context(request),
     )
-    return cfg["email"]
+    return get_public_config()["email"]
 
 
 @router.post("/config/email/test", dependencies=[Depends(require_admin)])
@@ -215,17 +238,21 @@ async def api_update_webhook(body: WebhookConfigUpdate, request: Request):
     cfg = get_config()
     if "webhook" not in cfg:
         cfg["webhook"] = {"enabled": False, "url": "", "headers": {}, "severities": ["P1", "P2"], "include_snapshot": False}
-    updates = body.model_dump(exclude_none=True)
+    updates = _drop_redacted(body.model_dump(exclude_none=True), "url")
+    updates = _preserve_redacted_headers(updates, cfg["webhook"])
     cfg["webhook"].update(updates)
     save_config(cfg)
+    safe_updates = dict(updates)
+    if safe_updates.get("url"):
+        safe_updates["url"] = REDACTED_VALUE
     audit_store.log_event(
         "config.webhook_update",
         target_type="config",
         target_id="webhook",
-        details={"updates": updates},
+        details={"updates": safe_updates},
         **audit_store.build_actor_context(request),
     )
-    return cfg["webhook"]
+    return get_public_config()["webhook"]
 
 
 @router.post("/config/webhook/test", dependencies=[Depends(require_admin)])

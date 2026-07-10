@@ -2,11 +2,11 @@
 
 This runbook moves the live `video-analytics` backend from JSON config storage to Postgres-backed `app_config`.
 
-Current state as of `2026-04-22`:
-
-- `DATABASE_URL` is already present on the Vast demo box.
-- `SAFETYLENS_CONFIG_STORE` still resolves to `json`.
-- The live camera config is therefore still persisted in `/opt/safetylens/video-analytics/backend/config.json`.
+Use this runbook only to migrate an older direct host/JSON deployment. The
+checked-in Compose files already select PostgreSQL and no longer mount
+`backend/config.json`; their `app_config/default` row must be verified before a
+container recreation. See [runtime-state.md](runtime-state.md) for the complete
+state migration gate.
 
 ## Files
 
@@ -52,6 +52,7 @@ Expected output before cutover: `json`
 ```bash
 cp /opt/safetylens/video-analytics/backend/config.json \
   /opt/safetylens/video-analytics/.deploy/config.backup.$(date +%Y%m%d-%H%M%S).json
+chmod 600 /opt/safetylens/video-analytics/.deploy/config.backup.*.json
 ```
 
 2. Import the current JSON config into Postgres.
@@ -126,4 +127,6 @@ PY
 2. Restart the backend.
 3. If needed, restore the JSON backup to `/opt/safetylens/video-analytics/backend/config.json`.
 
-The backend will fall back to JSON storage again on restart.
+This rollback applies only to direct host deployments. Compose intentionally has
+no JSON bind; restore the verified PostgreSQL backup and persistent state
+volumes instead.
