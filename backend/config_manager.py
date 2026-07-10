@@ -275,6 +275,7 @@ DEFAULT_CONFIG = {
     "global": {
         "target_fps": 6,
         "inference_fps": 2.0,
+        "stream_fps": 4,
         "yolo_conf": 0.35,
         "jpeg_quality": 60,
         "inference_width": 640,

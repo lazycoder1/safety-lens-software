@@ -108,6 +108,17 @@ def _positive_fps(value, fallback: float) -> float:
     return fps if fps > 0 else fallback
 
 
+def _configured_stream_fps(camera: dict, global_config: dict, target_fps: float) -> float:
+    target = _positive_fps(target_fps, 1.0)
+    default = min(target, 4.0)
+    configured = camera.get("stream_fps", global_config.get("stream_fps", default))
+    return min(target, _positive_fps(configured, default))
+
+
+def _stream_publish_due(last_published_at: float, now: float, stream_fps: float) -> bool:
+    return last_published_at <= 0.0 or now - last_published_at >= 1.0 / stream_fps
+
+
 def _normalize_text(value: str) -> str:
     return value.lower().replace("_", " ").replace("-", " ").strip()
 
@@ -1355,6 +1366,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             get_config(),
             inference_interval,
         )
+        last_stream_published_at = 0.0
         try:
             while cap.isOpened() and not stop_event.is_set():
                 if not licensing.is_inference_allowed():
@@ -1397,7 +1409,11 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 alert_cooldown = int(current_g.get("alert_cooldown", alert_cooldown))
                 state.camera_runtime_status[camera_id] = "running"
 
-                _publish_live_frame(camera_id, frame, jpeg_quality=jpeg_quality)
+                stream_fps = _configured_stream_fps(current_cam, current_g, target_fps)
+                stream_now = time.monotonic()
+                if _stream_publish_due(last_stream_published_at, stream_now, stream_fps):
+                    _publish_live_frame(camera_id, frame, jpeg_quality=jpeg_quality)
+                    last_stream_published_at = stream_now
 
                 if pending_inference and pending_inference.done():
                     try:
@@ -1660,5 +1676,8 @@ def mjpeg_generator(camera_id: str):
             placeholder = _status_frame(camera_id, status)
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + placeholder + b"\r\n"
         cfg = get_config()
-        fps = cfg["global"]["target_fps"]
+        global_config = cfg["global"]
+        camera = cfg["cameras"].get(camera_id, {})
+        target_fps = camera.get("fps", global_config["target_fps"])
+        fps = _configured_stream_fps(camera, global_config, target_fps)
         time.sleep(1.0 / fps)
