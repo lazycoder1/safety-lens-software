@@ -31,6 +31,8 @@ def build_manifest(
     imgsz: int,
     precision: str,
     task: str,
+    classes: list[str] | None = None,
+    class_groups: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if imgsz < 1:
@@ -50,6 +52,8 @@ def build_manifest(
         "imgsz": imgsz,
         "precision": precision,
         "task": task,
+        "classes": list(classes or []),
+        "classGroups": list(class_groups or []),
         "metadata": metadata or {},
     }
 
@@ -66,6 +70,8 @@ def validate_engine(
     source_path: Path,
     engine_path: Path,
     expected_task: str,
+    expected_classes: list[str] | None = None,
+    expected_class_groups: list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if engine_path.suffix.lower() != ".engine":
         return None, "Configured TensorRT artifact must use the .engine suffix"
@@ -88,6 +94,24 @@ def validate_engine(
         return None, "TensorRT manifest engine filename does not match the configured engine"
     if payload.get("precision") not in {"fp16", "fp32", "int8"}:
         return None, "TensorRT manifest precision is invalid"
+    classes = payload.get("classes", [])
+    if (
+        not isinstance(classes, list)
+        or any(not isinstance(value, str) or not value.strip() for value in classes)
+        or len(classes) != len(set(classes))
+    ):
+        return None, "TensorRT manifest classes are invalid"
+    if expected_classes is not None and classes != expected_classes:
+        return None, "TensorRT manifest classes do not match the configured prompts"
+    class_groups = payload.get("classGroups", [])
+    if (
+        not isinstance(class_groups, list)
+        or any(not isinstance(value, str) or not value.strip() for value in class_groups)
+        or (class_groups and len(class_groups) != len(classes))
+    ):
+        return None, "TensorRT manifest class groups are invalid"
+    if expected_class_groups is not None and class_groups != expected_class_groups:
+        return None, "TensorRT manifest class groups do not match the configured semantics"
     try:
         imgsz = int(payload.get("imgsz"))
     except (TypeError, ValueError):

@@ -14,6 +14,15 @@ def test_model_keys_with_the_same_asset_share_one_runtime():
     assert ppe_runtime is not model_manager._MODEL_RUNTIMES["coco_primary"]
 
 
+def test_fixed_ppe_engine_gets_a_separate_runtime(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_PPE_TENSORRT_ENGINE", "/models/ppe.engine")
+
+    runtimes = model_manager._build_model_runtimes()
+
+    assert runtimes["ppe_specialist"] is not runtimes["yoloe_long_tail"]
+    assert runtimes["ppe_specialist"]["lock"] is not runtimes["yoloe_long_tail"]["lock"]
+
+
 def test_shared_open_vocab_runtime_switches_default_prompts(monkeypatch):
     class FakeHandle:
         def __init__(self):

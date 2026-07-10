@@ -3,7 +3,7 @@ import json
 from tensorrt_engine import build_manifest, manifest_path, validate_engine, write_manifest
 
 
-def _write_valid_artifacts(tmp_path):
+def _write_valid_artifacts(tmp_path, *, task="detect", classes=None, class_groups=None):
     source = tmp_path / "model.pt"
     engine = tmp_path / "model.engine"
     source.write_bytes(b"pytorch-model")
@@ -13,7 +13,9 @@ def _write_valid_artifacts(tmp_path):
         engine_path=engine,
         imgsz=960,
         precision="fp16",
-        task="detect",
+        task=task,
+        classes=classes,
+        class_groups=class_groups,
     )
     write_manifest(manifest_path(engine), payload)
     return source, engine, payload
@@ -90,3 +92,44 @@ def test_validate_engine_rejects_mislabeled_manifest(tmp_path):
 
     assert validated is None
     assert error == "TensorRT manifest engine filename does not match the configured engine"
+
+
+def test_validate_engine_accepts_matching_fixed_classes(tmp_path):
+    classes = ["hard hat", "safety helmet"]
+    class_groups = ["helmet_required", "helmet_required"]
+    source, engine, _payload = _write_valid_artifacts(
+        tmp_path,
+        task="segment",
+        classes=classes,
+        class_groups=class_groups,
+    )
+
+    payload, error = validate_engine(
+        source_path=source,
+        engine_path=engine,
+        expected_task="segment",
+        expected_classes=classes,
+        expected_class_groups=class_groups,
+    )
+
+    assert error is None
+    assert payload["classes"] == classes
+    assert payload["classGroups"] == class_groups
+
+
+def test_validate_engine_rejects_prompt_drift(tmp_path):
+    source, engine, _payload = _write_valid_artifacts(
+        tmp_path,
+        task="segment",
+        classes=["hard hat", "safety helmet"],
+    )
+
+    payload, error = validate_engine(
+        source_path=source,
+        engine_path=engine,
+        expected_task="segment",
+        expected_classes=["hard hat"],
+    )
+
+    assert payload is None
+    assert error == "TensorRT manifest classes do not match the configured prompts"
