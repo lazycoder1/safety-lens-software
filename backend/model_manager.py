@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import base64
+import gc
 import shutil
 import tempfile
 import threading
@@ -16,8 +17,9 @@ from typing import Any
 
 import numpy as np
 
-from capability_registry import ALL_PPE_PROMPT_TERMS, ModelKey
+from capability_registry import ALL_PPE_PROMPT_TERMS, CLASS_TERM_TO_CAPABILITY, ModelKey
 from constants import MODEL_SERVER_TIMEOUT_SECONDS, MODEL_SERVER_TOKEN, MODEL_SERVER_URL, PROJECT_ROOT
+from tensorrt_engine import validate_engine
 
 logger = logging.getLogger("safetylens.models")
 
@@ -80,16 +82,46 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
 }
 
 _DEFAULT_LONG_TAIL_PROMPTS = ["fire", "smoke", "flames"]
+_OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
+_MAX_CLASS_EMBEDDING_CACHE_ENTRIES = 16
 _MODEL_LOCK = threading.RLock()
-_MODEL_RUNTIMES: dict[ModelKey, dict[str, Any]] = {
-    model_key: {
+
+
+def _new_model_runtime() -> dict[str, Any]:
+    return {
         "handle": None,
         "lock": threading.Lock(),
         "loaded_path": None,
+        "runtime_path": None,
+        "runtime_backend": None,
+        "runtime_fallback_error": None,
+        "fallback_path": None,
+        "fixed_imgsz": None,
+        "fixed_classes": [],
+        "fixed_class_groups": [],
         "current_classes": [],
+        "class_embeddings": {},
+        "warmed": False,
     }
-    for model_key in MODEL_DEFINITIONS
-}
+
+
+def _build_model_runtimes() -> dict[ModelKey, dict[str, Any]]:
+    """Use one runtime for model keys that point at the same model asset."""
+    runtimes: dict[ModelKey, dict[str, Any]] = {}
+    runtimes_by_asset: dict[str, dict[str, Any]] = {}
+    for model_key, definition in MODEL_DEFINITIONS.items():
+        asset_key = str(definition["shared_asset_key"])
+        if model_key == "ppe_specialist" and os.environ.get("SAFETYLENS_PPE_TENSORRT_ENGINE", "").strip():
+            asset_key = f"{asset_key}:ppe-tensorrt"
+        runtime = runtimes_by_asset.get(asset_key)
+        if runtime is None:
+            runtime = _new_model_runtime()
+            runtimes_by_asset[asset_key] = runtime
+        runtimes[model_key] = runtime
+    return runtimes
+
+
+_MODEL_RUNTIMES = _build_model_runtimes()
 _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
     model_key: {
         "status": "not_downloaded",
@@ -172,6 +204,7 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
     definition = MODEL_DEFINITIONS[model_key]
     state = deepcopy(_MODEL_STATES[model_key])
     active_path = state.get("active_path")
+    runtime = _MODEL_RUNTIMES[model_key]
     return {
         "model_key": model_key,
         "display_name": definition["display_name"],
@@ -186,6 +219,12 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
         "shared_asset_key": definition["shared_asset_key"],
         "is_ready": state["status"] == "ready",
         "is_downloaded": bool(active_path),
+        "runtime_backend": runtime.get("runtime_backend"),
+        "runtime_path": runtime.get("runtime_path"),
+        "runtime_fallback_error": runtime.get("runtime_fallback_error"),
+        "runtime_fixed_imgsz": runtime.get("fixed_imgsz"),
+        "runtime_fixed_classes": list(runtime.get("fixed_classes") or []),
+        "runtime_fixed_class_groups": list(runtime.get("fixed_class_groups") or []),
     }
 
 
@@ -300,21 +339,148 @@ def _set_open_vocab_classes(handle: YOLO, classes: list[str]):
     try:
         handle.to("cpu")
         os.chdir(str(tmp_models_dir))
-        handle.set_classes(classes)
+        embeddings = handle.get_text_pe(classes)
+        handle.set_classes(classes, embeddings)
+        return embeddings.detach().cpu()
     finally:
         os.chdir(original_cwd)
 
 
+def _default_open_vocab_classes(model_key: ModelKey) -> list[str]:
+    if model_key == "ppe_specialist":
+        return list(ALL_PPE_PROMPT_TERMS)
+    return list(_DEFAULT_LONG_TAIL_PROMPTS)
+
+
+def _apply_open_vocab_classes(
+    runtime: dict[str, Any],
+    handle,
+    classes: list[str],
+    *,
+    device: str,
+) -> None:
+    cache_key = tuple(classes)
+    embedding_cache = runtime["class_embeddings"]
+    embeddings = embedding_cache.pop(cache_key, None)
+    if embeddings is None:
+        embeddings = _set_open_vocab_classes(handle, classes)
+        handle.to(device)
+    else:
+        handle.set_classes(classes, embeddings)
+    embedding_cache[cache_key] = embeddings
+    while len(embedding_cache) > _MAX_CLASS_EMBEDDING_CACHE_ENTRIES:
+        oldest_key = next(iter(embedding_cache))
+        embedding_cache.pop(oldest_key)
+    runtime["current_classes"] = classes
+
+
+def _configured_runtime_path(
+    model_key: ModelKey,
+    source_path: Path,
+) -> tuple[Path, str, int | None, list[str], list[str], str | None]:
+    settings = {
+        "coco_primary": ("SAFETYLENS_COCO_TENSORRT_ENGINE", "detect"),
+        "ppe_specialist": ("SAFETYLENS_PPE_TENSORRT_ENGINE", "segment"),
+    }
+    setting = settings.get(model_key)
+    if setting is None:
+        return source_path, "pytorch", None, [], [], None
+    environment_name, expected_task = setting
+    configured = os.environ.get(environment_name, "").strip()
+    if not configured:
+        return source_path, "pytorch", None, [], [], None
+    engine_path = Path(configured).expanduser()
+    if not engine_path.is_absolute():
+        engine_path = source_path.parent / engine_path
+    manifest, error = validate_engine(
+        source_path=source_path,
+        engine_path=engine_path,
+        expected_task=expected_task,
+    )
+    if error:
+        logger.warning(
+            "TensorRT engine rejected; using PyTorch",
+            extra={"model_key": model_key, "engine_path": str(engine_path), "reason": error},
+        )
+        return source_path, "pytorch", None, [], [], error
+    fixed_classes = list(manifest.get("classes") or [])
+    fixed_class_groups = list(manifest.get("classGroups") or [])
+    if model_key == "ppe_specialist" and (
+        not fixed_classes or len(fixed_class_groups) != len(fixed_classes)
+    ):
+        error = "PPE TensorRT manifest must declare fixed prompt classes and semantic groups"
+        logger.warning(
+            "TensorRT engine rejected; using PyTorch",
+            extra={"model_key": model_key, "engine_path": str(engine_path), "reason": error},
+        )
+        return source_path, "pytorch", None, [], [], error
+    return engine_path, "tensorrt", int(manifest["imgsz"]), fixed_classes, fixed_class_groups, None
+
+
+def _set_runtime_metadata(
+    runtime: dict[str, Any],
+    *,
+    source_path: Path,
+    runtime_path: Path,
+    backend: str,
+    fixed_imgsz: int | None,
+    fixed_classes: list[str],
+    fixed_class_groups: list[str],
+    fallback_error: str | None,
+) -> None:
+    runtime["loaded_path"] = str(source_path)
+    runtime["runtime_path"] = str(runtime_path)
+    runtime["runtime_backend"] = backend
+    runtime["runtime_fallback_error"] = fallback_error
+    runtime["fallback_path"] = str(source_path) if backend == "tensorrt" else None
+    runtime["fixed_imgsz"] = fixed_imgsz
+    runtime["fixed_classes"] = list(fixed_classes)
+    runtime["fixed_class_groups"] = list(fixed_class_groups)
+
+
 def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     runtime = _MODEL_RUNTIMES[model_key]
-    if runtime["handle"] is not None and runtime["loaded_path"] == str(source_path):
+    (
+        runtime_path,
+        backend,
+        fixed_imgsz,
+        fixed_classes,
+        fixed_class_groups,
+        fallback_error,
+    ) = _configured_runtime_path(model_key, source_path)
+    if (
+        runtime["handle"] is not None
+        and runtime["loaded_path"] == str(source_path)
+        and runtime.get("runtime_path") == str(runtime_path)
+    ):
+        if model_key in _OPEN_VOCAB_MODEL_KEYS and backend != "tensorrt":
+            from config_manager import get_config
+
+            with runtime["lock"]:
+                initial_classes = _default_open_vocab_classes(model_key)
+                if runtime["current_classes"] != initial_classes:
+                    _apply_open_vocab_classes(
+                        runtime,
+                        runtime["handle"],
+                        initial_classes,
+                        device=get_config()["global"]["device"],
+                    )
         return
 
     if model_key == "face_recognition":
         # InsightFace owns its own runtime and lazy-loads in face_recognition.py.
         # The model manager only tracks whether the expected model directory exists.
         runtime["handle"] = "insightface"
-        runtime["loaded_path"] = str(source_path)
+        _set_runtime_metadata(
+            runtime,
+            source_path=source_path,
+            runtime_path=source_path,
+            backend="insightface",
+            fixed_imgsz=None,
+            fixed_classes=[],
+            fixed_class_groups=[],
+            fallback_error=None,
+        )
         runtime["current_classes"] = []
         return
 
@@ -324,26 +490,92 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     device = get_config()["global"]["device"]
 
     if model_key in ("coco_primary", "pose_specialist"):
-        handle = YOLO(str(source_path))
+        try:
+            handle = (
+                YOLO(str(runtime_path), task="detect")
+                if backend == "tensorrt"
+                else YOLO(str(runtime_path))
+            )
+        except Exception as exc:
+            if backend != "tensorrt":
+                raise
+            logger.exception(
+                "TensorRT model load failed; using PyTorch",
+                extra={"model_key": model_key, "runtime_path": str(runtime_path)},
+            )
+            runtime_path = source_path
+            backend = "pytorch_fallback"
+            fixed_imgsz = None
+            fallback_error = f"TensorRT load failed: {exc}"
+            handle = YOLO(str(source_path))
         runtime["handle"] = handle
-        runtime["loaded_path"] = str(source_path)
+        _set_runtime_metadata(
+            runtime,
+            source_path=source_path,
+            runtime_path=runtime_path,
+            backend=backend,
+            fixed_imgsz=fixed_imgsz,
+            fixed_classes=fixed_classes,
+            fixed_class_groups=fixed_class_groups,
+            fallback_error=fallback_error,
+        )
         runtime["current_classes"] = []
         runtime["warmed"] = False
         return
 
+    if model_key == "ppe_specialist" and backend == "tensorrt":
+        try:
+            handle = YOLO(str(runtime_path), task="segment")
+            engine_classes = [str(value) for value in handle.names.values()]
+            if engine_classes != fixed_classes:
+                raise RuntimeError("TensorRT engine classes do not match its manifest")
+        except Exception as exc:
+            logger.exception(
+                "TensorRT model load failed; using PyTorch",
+                extra={"model_key": model_key, "runtime_path": str(runtime_path)},
+            )
+            runtime_path = source_path
+            backend = "pytorch_fallback"
+            fixed_imgsz = None
+            fixed_classes = []
+            fixed_class_groups = []
+            fallback_error = f"TensorRT load failed: {exc}"
+        else:
+            runtime["handle"] = handle
+            _set_runtime_metadata(
+                runtime,
+                source_path=source_path,
+                runtime_path=runtime_path,
+                backend=backend,
+                fixed_imgsz=fixed_imgsz,
+                fixed_classes=fixed_classes,
+                fixed_class_groups=fixed_class_groups,
+                fallback_error=fallback_error,
+            )
+            runtime["current_classes"] = list(fixed_classes)
+            runtime["class_embeddings"] = {}
+            runtime["warmed"] = False
+            return
+
     local_model = _copy_to_local_fs(model_key, source_path)
     handle = YOLO(str(local_model))
-    if model_key == "ppe_specialist":
-        initial_classes = list(ALL_PPE_PROMPT_TERMS)
-    else:
-        initial_classes = list(_DEFAULT_LONG_TAIL_PROMPTS)
+    initial_classes = _default_open_vocab_classes(model_key)
 
-    _set_open_vocab_classes(handle, initial_classes)
-    handle.to(device)
     runtime["handle"] = handle
-    runtime["loaded_path"] = str(source_path)
-    runtime["current_classes"] = initial_classes
+    _set_runtime_metadata(
+        runtime,
+        source_path=source_path,
+        runtime_path=source_path,
+        backend=backend,
+        fixed_imgsz=None,
+        fixed_classes=[],
+        fixed_class_groups=[],
+        fallback_error=fallback_error,
+    )
+    runtime["current_classes"] = []
+    runtime["class_embeddings"] = {}
     runtime["warmed"] = False
+    _apply_open_vocab_classes(runtime, handle, initial_classes, device=device)
 
 
 def initialize() -> None:
@@ -547,6 +779,67 @@ def _run_install_job(job_id: str):
                 _ACTIVE_JOB_ID = None
 
 
+def _predict_with_runtime(
+    model_key: ModelKey,
+    runtime: dict[str, Any],
+    frame,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str] | None = None,
+):
+    handle = runtime["handle"]
+    if handle is None:
+        raise RuntimeError(f"Model {model_key} is not loaded")
+    effective_imgsz = runtime.get("fixed_imgsz") or imgsz
+
+    requested_classes = None
+    if model_key in _OPEN_VOCAB_MODEL_KEYS:
+        requested = classes if classes is not None else _default_open_vocab_classes(model_key)
+        requested_classes = [value for value in requested if isinstance(value, str) and value]
+        fixed_classes = list(runtime.get("fixed_classes") or [])
+        if fixed_classes and requested_classes != fixed_classes:
+            raise RuntimeError("Configured prompts do not match the fixed TensorRT engine classes")
+
+    if not runtime.get("warmed"):
+        dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+        handle.predict(dummy, verbose=False, device=device, imgsz=effective_imgsz)
+        runtime["warmed"] = True
+    if model_key in _OPEN_VOCAB_MODEL_KEYS:
+        if runtime["current_classes"] != requested_classes:
+            _apply_open_vocab_classes(runtime, handle, requested_classes, device=device)
+    return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=effective_imgsz)
+
+
+def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> None:
+    fallback_path = runtime.get("fallback_path")
+    if not fallback_path:
+        raise error
+    old_handle = runtime.get("handle")
+    runtime["handle"] = None
+    del old_handle
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        logger.debug("CUDA cache cleanup skipped during TensorRT fallback", exc_info=True)
+    from ultralytics import YOLO
+
+    runtime["handle"] = YOLO(str(fallback_path))
+    runtime["runtime_path"] = str(fallback_path)
+    runtime["runtime_backend"] = "pytorch_fallback"
+    runtime["runtime_fallback_error"] = str(error)
+    runtime["fallback_path"] = None
+    runtime["fixed_imgsz"] = None
+    runtime["fixed_classes"] = []
+    runtime["fixed_class_groups"] = []
+    runtime["warmed"] = False
+
+
 def predict(
     model_key: ModelKey,
     frame,
@@ -557,22 +850,35 @@ def predict(
     classes: list[str] | None = None,
 ):
     runtime = _MODEL_RUNTIMES[model_key]
-    handle = runtime["handle"]
-    if handle is None:
-        raise RuntimeError(f"Model {model_key} is not loaded")
 
     with runtime["lock"]:
-        if not runtime.get("warmed"):
-            dummy = np.zeros((320, 320, 3), dtype=np.uint8)
-            handle.predict(dummy, verbose=False, device=device, imgsz=imgsz)
-            runtime["warmed"] = True
-        if model_key != "coco_primary" and classes is not None:
-            requested_classes = [value for value in classes if isinstance(value, str) and value]
-            if runtime["current_classes"] != requested_classes:
-                _set_open_vocab_classes(handle, requested_classes)
-                handle.to(device)
-                runtime["current_classes"] = requested_classes
-        return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=imgsz)
+        try:
+            return _predict_with_runtime(
+                model_key,
+                runtime,
+                frame,
+                conf=conf,
+                device=device,
+                imgsz=imgsz,
+                classes=classes,
+            )
+        except Exception as exc:
+            if runtime.get("runtime_backend") != "tensorrt":
+                raise
+            logger.exception(
+                "TensorRT inference failed; activating PyTorch fallback",
+                extra={"model_key": model_key, "runtime_path": runtime.get("runtime_path")},
+            )
+            _activate_pytorch_fallback(runtime, exc)
+            return _predict_with_runtime(
+                model_key,
+                runtime,
+                frame,
+                conf=conf,
+                device=device,
+                imgsz=imgsz,
+                classes=classes,
+            )
 
 
 def _records_from_results(results) -> list[dict[str, Any]]:
@@ -589,6 +895,57 @@ def _records_from_results(results) -> list[dict[str, Any]]:
             "bbox": list(map(int, box.xyxy[0])),
         })
     return records
+
+
+def _bbox_iou(left: list[int], right: list[int]) -> float:
+    x1 = max(left[0], right[0])
+    y1 = max(left[1], right[1])
+    x2 = min(left[2], right[2])
+    y2 = min(left[3], right[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    left_area = max(0, left[2] - left[0]) * max(0, left[3] - left[1])
+    right_area = max(0, right[2] - right[0]) * max(0, right[3] - right[1])
+    union = left_area + right_area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _deduplicate_prompt_synonyms(
+    records: list[dict[str, Any]],
+    classes: list[str],
+    *,
+    class_groups: list[str] | None = None,
+    iou_threshold: float = 0.95,
+) -> list[dict[str, Any]]:
+    class_groups = list(class_groups or [])
+
+    def semantic_group(class_id: int) -> str | None:
+        if len(class_groups) == len(classes):
+            return class_groups[class_id]
+        class_name = classes[class_id].lower().replace("_", " ").replace("-", " ").strip()
+        return CLASS_TERM_TO_CAPABILITY.get(class_name)
+
+    kept: list[dict[str, Any]] = []
+    for record in sorted(records, key=lambda value: float(value["confidence"]), reverse=True):
+        class_id = int(record["class_id"])
+        if class_id < 0 or class_id >= len(classes):
+            kept.append(record)
+            continue
+        capability = semantic_group(class_id)
+        duplicate = False
+        if capability:
+            for existing in kept:
+                existing_class_id = int(existing["class_id"])
+                if existing_class_id < 0 or existing_class_id >= len(classes) or existing_class_id == class_id:
+                    continue
+                if (
+                    semantic_group(existing_class_id) == capability
+                    and _bbox_iou(record["bbox"], existing["bbox"]) >= iou_threshold
+                ):
+                    duplicate = True
+                    break
+        if not duplicate:
+            kept.append(record)
+    return kept
 
 
 def predict_records(
@@ -615,6 +972,11 @@ def predict_records(
         }
         return _remote_post("/api/infer", payload).get("detections", [])
 
-    return _records_from_results(
+    records = _records_from_results(
         predict(model_key, frame, conf=conf, device=device, imgsz=imgsz, classes=classes)
     )
+    if model_key in _OPEN_VOCAB_MODEL_KEYS:
+        active_classes = classes if classes is not None else _default_open_vocab_classes(model_key)
+        class_groups = list(_MODEL_RUNTIMES[model_key].get("fixed_class_groups") or [])
+        return _deduplicate_prompt_synonyms(records, active_classes, class_groups=class_groups)
+    return records
