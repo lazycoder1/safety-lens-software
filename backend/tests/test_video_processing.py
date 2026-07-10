@@ -422,7 +422,7 @@ def test_grouped_inference_runs_closed_set_candidate_with_rule_labels(monkeypatc
             "conf": 0.22,
             "device": "cpu",
             "imgsz": 640,
-            "classes": None,
+            "classes": [],
         }
     ]
     assert invocations["ppe_closed_set_candidate"] == 1

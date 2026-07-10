@@ -37,7 +37,6 @@ from detection import (
     check_yoloe_violations,
     check_zone_intrusions,
     draw_detection_records,
-    draw_detections,
     draw_pose_detections,
     extract_violation_bboxes,
 )
@@ -577,16 +576,71 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         "fire_smoke_specialist": 0,
         "pose_specialist": 0,
     }
-
+    ppe_prompts = execution_plan.get("ppe_prompt_terms") or []
+    long_tail_prompts = execution_plan.get("yoloe_prompt_terms") or []
+    batch_requests = []
     if execution_plan.get("run_coco_primary"):
         model_invocations["coco_primary"] += 1
-        records = model_manager.predict_records(
-            "coco_primary",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
+        batch_requests.append({
+            "request_id": "coco_primary",
+            "model_key": "coco_primary",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+        })
+    if execution_plan.get("run_ppe_specialist") and ppe_prompts:
+        ppe_conf = _rule_confidence_for_model_family(camera_id, "ppe_specialist", conf)
+        model_invocations["ppe_specialist"] += 1
+        batch_requests.append({
+            "request_id": "ppe_specialist",
+            "model_key": "ppe_specialist",
+            "conf": ppe_conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": ppe_prompts,
+        })
+    if execution_plan.get("run_ppe_closed_set_candidate"):
+        candidate_capabilities = _capabilities_for_model_key(
+            execution_plan,
+            "ppe_closed_set_candidate",
         )
+        candidate_conf = _rule_confidence_for_capabilities(
+            camera_id,
+            candidate_capabilities,
+            conf,
+        )
+        model_invocations["ppe_closed_set_candidate"] += 1
+        batch_requests.append({
+            "request_id": "ppe_closed_set_candidate",
+            "model_key": "ppe_closed_set_candidate",
+            "conf": candidate_conf,
+            "device": device,
+            "imgsz": imgsz,
+        })
+    if execution_plan.get("run_yoloe_long_tail") and long_tail_prompts:
+        model_invocations["yoloe_long_tail"] += 1
+        batch_requests.append({
+            "request_id": "yoloe_long_tail",
+            "model_key": "yoloe_long_tail",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": long_tail_prompts,
+        })
+    if execution_plan.get("run_fire_smoke_specialist"):
+        fire_conf = _rule_confidence_for_capability(camera_id, "fire_smoke", conf)
+        model_invocations["fire_smoke_specialist"] += 1
+        batch_requests.append({
+            "request_id": "fire_smoke_specialist",
+            "model_key": "fire_smoke_specialist",
+            "conf": fire_conf,
+            "device": device,
+            "imgsz": imgsz,
+        })
+    record_batches = model_manager.predict_record_batches(frame, batch_requests)
+
+    if execution_plan.get("run_coco_primary"):
+        records = record_batches["coco_primary"]
         annotated, coco_detections = draw_detection_records(
             annotated,
             records,
@@ -596,18 +650,8 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         detections.extend(_normalize_detection_batch(coco_detections, "coco_primary"))
         visible_detection_count += len(coco_detections)
 
-    if execution_plan.get("run_ppe_specialist") and execution_plan.get("ppe_prompt_terms"):
-        ppe_prompts = execution_plan["ppe_prompt_terms"]
-        ppe_conf = _rule_confidence_for_model_family(camera_id, "ppe_specialist", conf)
-        model_invocations["ppe_specialist"] += 1
-        records = model_manager.predict_records(
-            "ppe_specialist",
-            frame,
-            conf=ppe_conf,
-            device=device,
-            imgsz=imgsz,
-            classes=ppe_prompts,
-        )
+    if execution_plan.get("run_ppe_specialist") and ppe_prompts:
+        records = record_batches["ppe_specialist"]
         _ppe_annotated, ppe_detections = draw_detection_records(
             annotated,
             records,
@@ -619,16 +663,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         detections.extend(_normalize_detection_batch(ppe_detections, "ppe_specialist"))
 
     if execution_plan.get("run_ppe_closed_set_candidate"):
-        candidate_capabilities = _capabilities_for_model_key(execution_plan, "ppe_closed_set_candidate")
-        candidate_conf = _rule_confidence_for_capabilities(camera_id, candidate_capabilities, conf)
-        model_invocations["ppe_closed_set_candidate"] += 1
-        records = model_manager.predict_records(
-            "ppe_closed_set_candidate",
-            frame,
-            conf=candidate_conf,
-            device=device,
-            imgsz=imgsz,
-        )
+        records = record_batches["ppe_closed_set_candidate"]
         records = _rewrite_detection_record_classes(records, CLOSED_SET_PPE_CLASS_NAMES)
         _candidate_annotated, candidate_detections = draw_detection_records(
             annotated,
@@ -640,17 +675,8 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         )
         detections.extend(_normalize_detection_batch(candidate_detections, "ppe_closed_set_candidate"))
 
-    if execution_plan.get("run_yoloe_long_tail") and execution_plan.get("yoloe_prompt_terms"):
-        long_tail_prompts = execution_plan["yoloe_prompt_terms"]
-        model_invocations["yoloe_long_tail"] += 1
-        records = model_manager.predict_records(
-            "yoloe_long_tail",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-            classes=long_tail_prompts,
-        )
+    if execution_plan.get("run_yoloe_long_tail") and long_tail_prompts:
+        records = record_batches["yoloe_long_tail"]
         _long_tail_annotated, long_tail_detections = draw_detection_records(
             annotated,
             records,
@@ -662,15 +688,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         detections.extend(_normalize_detection_batch(long_tail_detections, "yoloe_long_tail"))
 
     if execution_plan.get("run_fire_smoke_specialist"):
-        fire_conf = _rule_confidence_for_capability(camera_id, "fire_smoke", conf)
-        model_invocations["fire_smoke_specialist"] += 1
-        records = model_manager.predict_records(
-            "fire_smoke_specialist",
-            frame,
-            conf=fire_conf,
-            device=device,
-            imgsz=imgsz,
-        )
+        records = record_batches["fire_smoke_specialist"]
         _fire_annotated, fire_detections = draw_detection_records(
             annotated,
             records,
@@ -1283,8 +1301,6 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     violation_window: dict[str, list[bool]] = {}
     window_size = 15
     frame_counter = 0
-    last_annotated = None
-
     initial_schedule_state = _capability_schedule_state(cam, cfg, execution_plan)
     initial_execution_plan = _scheduled_execution_plan(execution_plan, initial_schedule_state)
     missing_model_keys = model_manager.missing_model_keys(initial_execution_plan["required_model_keys"])
