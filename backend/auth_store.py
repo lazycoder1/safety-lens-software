@@ -70,10 +70,14 @@ def decode_token(token: str) -> dict:
 
 BCRYPT_MAX_PASSWORD_BYTES = 72
 _PASSWORD_TOO_LONG_ERROR = "Password must be at most 72 bytes when encoded as UTF-8"
+_PASSWORD_INVALID_ENCODING_ERROR = "Password contains invalid Unicode characters"
 
 
 def _password_bytes(password: str) -> bytes:
-    return password.encode("utf-8")
+    try:
+        return password.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(_PASSWORD_INVALID_ENCODING_ERROR) from exc
 
 
 def _hash_password(password: str) -> str:
@@ -84,7 +88,10 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_password(password: str, hashed: str) -> bool:
-    encoded = _password_bytes(password)
+    try:
+        encoded = _password_bytes(password)
+    except ValueError:
+        return False
     # bcrypt <5.0 silently truncated raw input bytes. Preserve verification for
     # hashes created under that behavior while rejecting all new oversized
     # passwords in validate_password() and _hash_password().
@@ -102,7 +109,11 @@ _SPECIAL_CHARS = r"!@#$%^&*()\-_+=\[\]{}|;:,.<>?"
 def validate_password(password: str) -> tuple[bool, str | None]:
     """Validate password strength. Returns (is_valid, error_message)."""
     import re
-    if len(_password_bytes(password)) > BCRYPT_MAX_PASSWORD_BYTES:
+    try:
+        encoded = _password_bytes(password)
+    except ValueError:
+        return False, _PASSWORD_INVALID_ENCODING_ERROR
+    if len(encoded) > BCRYPT_MAX_PASSWORD_BYTES:
         return False, _PASSWORD_TOO_LONG_ERROR
     if len(password) < 8:
         return False, "Password must be at least 8 characters"
@@ -203,12 +214,25 @@ def authenticate(username: str, password: str) -> dict | None:
     if row["status"] != "active":
         return None
 
+    legacy_oversized_password = len(_password_bytes(password)) > BCRYPT_MAX_PASSWORD_BYTES
+
     # Update last_login
     now = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE users SET last_login = %s WHERE id = %s", (now, row["id"]))
+            cur.execute(
+                """UPDATE users
+                   SET last_login = %s,
+                       must_change_password = CASE WHEN %s THEN TRUE ELSE must_change_password END
+                   WHERE id = %s""",
+                (now, legacy_oversized_password, row["id"]),
+            )
         conn.commit()
+
+    if legacy_oversized_password:
+        row = dict(row)
+        row["must_change_password"] = True
+        logger.info("Marked legacy oversized password for mandatory rotation")
 
     return _user_dict(row)
 

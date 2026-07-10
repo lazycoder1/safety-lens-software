@@ -50,7 +50,12 @@ export function evaluatePassword(password: string): PasswordStrength {
     ["strong", "Strong"],
   ]
 
-  const [level, label] = levels[score]
+  let [level, label] = levels[score]
+  if (!checks[5].met) {
+    score = 1
+    level = "too-weak"
+    label = "Too Long"
+  }
   const isValid = checks.every((check) => check.met)
 
   return { score, level, label, checks, isValid }
