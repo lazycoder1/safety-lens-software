@@ -267,6 +267,13 @@ def _publish_stream_frame(
     state.camera_frame_updated_at[camera_id] = time.time()
 
 
+def _clear_camera_observation(camera_id: str) -> None:
+    """Discard current-frame state that is invalid once a source disconnects."""
+    state.camera_frames[camera_id] = None
+    state.camera_clean_frames[camera_id] = None
+    state.camera_detections[camera_id] = []
+
+
 def _normalize_text(value: str) -> str:
     return value.lower().replace("_", " ").replace("-", " ").strip()
 
@@ -1479,6 +1486,17 @@ def _process_detection_observation(
 
 
 def video_processor(camera_id: str, stop_event: threading.Event):
+    """Run one camera worker and never publish observations after it exits."""
+    try:
+        _video_processor_loop(camera_id, stop_event)
+    except Exception:
+        logger.exception("Camera worker exited unexpectedly", extra={"camera_id": camera_id})
+        raise
+    finally:
+        _clear_camera_observation(camera_id)
+
+
+def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     cfg = get_config()
     cam = cfg["cameras"][camera_id]
     stream_type = cam.get("stream_type", "file")
@@ -1517,8 +1535,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     safe_video_source = redact_video_source(video_source)
     if missing_model_keys:
         state.camera_runtime_status[camera_id] = "awaiting_model_install"
-        state.camera_frames[camera_id] = None
-        state.camera_detections[camera_id] = []
+        _clear_camera_observation(camera_id)
         state.camera_detection_history[camera_id] = []
         state.camera_schedule_telemetry[camera_id] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1535,6 +1552,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
         cap = _open_video_capture(video_source, stream_type)
         if not cap.isOpened():
             cap.release()
+            _clear_camera_observation(camera_id)
+            active_violations.clear()
+            violation_window.clear()
+            last_annotated = None
             delay = reconnect_delay_seconds(reconnect_failures, camera_id) if stream_type == "rtsp" else 5.0
             reconnect_failures += 1
             state.camera_runtime_status[camera_id] = "reconnecting"
@@ -1572,7 +1593,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 ok, frame = _read_live_frame(cap, stream_type)
                 if not ok:
                     state.camera_runtime_status[camera_id] = "reconnecting" if stream_type == "rtsp" else "offline"
-                    _clear_live_frame(camera_id)
+                    _clear_camera_observation(camera_id)
+                    active_violations.clear()
+                    violation_window.clear()
+                    last_annotated = None
                     break
                 if not received_frame:
                     received_frame = True
@@ -1715,6 +1739,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
                 pending_inference.cancel()
             inference_executor.shutdown(wait=False, cancel_futures=True)
 
+        _clear_camera_observation(camera_id)
+        active_violations.clear()
+        violation_window.clear()
+        last_annotated = None
         cap.release()
         if stop_event.is_set():
             return
@@ -1753,10 +1781,8 @@ def start_camera(cam_id: str):
     schedule_state = _capability_schedule_state(cam, cfg, execution_plan)
     scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
     missing_model_keys = model_manager.missing_model_keys(scheduled_plan["required_model_keys"])
-    state.camera_frames[cam_id] = None
-    state.camera_detections[cam_id] = []
+    _clear_camera_observation(cam_id)
     state.camera_detection_history[cam_id] = []
-    state.camera_clean_frames[cam_id] = None
     state.camera_frame_updated_at.pop(cam_id, None)
     state.camera_schedule_telemetry.pop(cam_id, None)
     if missing_model_keys:

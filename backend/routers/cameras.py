@@ -27,6 +27,7 @@ from camera_connection import (
 from camera_config_utils import sync_camera_rule_fields
 from camera_discovery import discover_cameras, resolve_scan_networks, test_camera_connection
 from camera_planner import build_execution_plan, normalize_camera_record
+from camera_runtime import derive_camera_runtime_status
 from config_manager import get_config, save_config
 from dependencies import require_admin
 from video_processing import (
@@ -41,10 +42,20 @@ router = APIRouter(prefix="/api", tags=["cameras"])
 
 
 def _camera_runtime_status(cam_id: str, camera: dict, cfg: dict, ready_model_keys: set[str] | None = None) -> str:
-    if not camera.get("enabled", True):
-        return "offline"
-
-    if cam_id in state.camera_threads:
+    execution_plan = camera.get("execution_plan", build_execution_plan(camera, cfg))
+    schedule_state = _capability_schedule_state(camera, cfg, execution_plan)
+    scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
+    required_model_keys = scheduled_plan.get("required_model_keys", [])
+    if ready_model_keys is not None:
+        missing_models = any(model_key not in ready_model_keys for model_key in required_model_keys)
+    else:
+        missing_models = bool(model_manager.missing_model_keys(required_model_keys))
+    runtime_status = derive_camera_runtime_status(
+        cam_id,
+        camera,
+        missing_models=missing_models,
+    )
+    if runtime_status == "running":
         frame_updated_at = state.camera_frame_updated_at.get(cam_id)
         frame_fresh = (
             state.camera_frames.get(cam_id) is not None
@@ -54,18 +65,7 @@ def _camera_runtime_status(cam_id: str, camera: dict, cfg: dict, ready_model_key
         if frame_fresh:
             return "running"
         return state.camera_runtime_status.get(cam_id, "starting")
-
-    execution_plan = camera.get("execution_plan", build_execution_plan(camera, cfg))
-    schedule_state = _capability_schedule_state(camera, cfg, execution_plan)
-    scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
-    required_model_keys = scheduled_plan.get("required_model_keys", [])
-    if ready_model_keys is not None:
-        missing_model_keys = [model_key for model_key in required_model_keys if model_key not in ready_model_keys]
-    else:
-        missing_model_keys = model_manager.missing_model_keys(required_model_keys)
-    if missing_model_keys:
-        return "awaiting_model_install"
-    return "offline"
+    return runtime_status
 
 
 def _recent_detection_class_counts_max(history: list[dict[str, Any]]) -> dict[str, int]:
@@ -122,7 +122,7 @@ def _camera_public_payload(cam_id: str, cam: dict, cfg: dict, ready_model_keys: 
             "capability_windows",
             (cam.get("execution_plan") or build_execution_plan(cam, cfg)).get("capability_windows", []),
         ),
-        "status": "online" if cam_id in state.camera_threads else "offline",
+        "status": "online" if runtime_status == "running" else "offline",
         "detectionsCount": len(detections),
         "detectionClassCounts": detection_class_counts,
         "recentDetectionHistory": recent_detection_history,
