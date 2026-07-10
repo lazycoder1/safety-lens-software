@@ -4,7 +4,7 @@ SafetyLens config endpoints — global, VLM, telegram, email, webhook, alert rou
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 import audit_store
@@ -83,6 +83,7 @@ class TestAlertRequest(BaseModel):
     rule: str = "Test Alert"
     cameraName: str = "Test Camera"
     zone: str = "Test Zone"
+    channels: Optional[list[str]] = None
 
 
 @router.get("/config")
@@ -248,6 +249,20 @@ async def api_update_alert_routing(body: AlertRoutingUpdate, request: Request):
     if "alert_routing" not in cfg:
         cfg["alert_routing"] = {}
     updates = body.model_dump(exclude_none=True)
+    if "escalation_steps" in updates:
+        supported_channels = {"telegram", "email", "webhook"}
+        normalized_steps = []
+        for step in updates["escalation_steps"]:
+            normalized = dict(step)
+            channel = str(normalized.get("channel", "telegram")).strip().lower()
+            if channel not in supported_channels:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unsupported escalation channel: {channel or 'empty'}",
+                )
+            normalized["channel"] = channel
+            normalized_steps.append(normalized)
+        updates["escalation_steps"] = normalized_steps
     cfg["alert_routing"].update(updates)
     save_config(cfg)
     audit_store.log_event(
@@ -280,8 +295,30 @@ async def api_test_alert_routing(body: TestAlertRequest):
         "source": "test",
         "description": "[TEST] This is a test alert from SafetyLens.",
     }
-    notification_dispatcher.notify(test_alert, None)
-    return {"ok": True, "message": "Test alert dispatched to configured channels"}
+    channels = body.channels
+    if channels is None:
+        matrix = get_config().get("alert_routing", {}).get("channel_matrix", {})
+        channels = [
+            channel
+            for channel, enabled in matrix.get(body.severity, {}).items()
+            if enabled
+        ]
+
+    results = notification_dispatcher.notify_with_results(
+        test_alert,
+        None,
+        channels=channels,
+    )
+    ok = bool(results) and all(result.get("success", False) for result in results)
+    return {
+        "ok": ok,
+        "message": (
+            "Test alert delivered to every requested channel"
+            if ok
+            else "One or more requested channels did not accept the test alert"
+        ),
+        "results": results,
+    }
 
 
 # ---------------------------------------------------------------------------

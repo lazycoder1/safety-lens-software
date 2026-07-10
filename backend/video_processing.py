@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ import licensing
 import model_manager
 import state
 import notification_dispatcher
+from alert_pipeline import AlertPipeline
 from camera_capture import (
     CAMERA_STOP_TIMEOUT_SECONDS,
     open_video_capture,
@@ -231,6 +233,116 @@ def _clear_camera_observation(camera_id: str) -> None:
     state.camera_detections[camera_id] = []
     _last_pose_results.pop(camera_id, None)
 
+_alert_pipeline: AlertPipeline | None = None
+_alert_pipeline_lock = threading.Lock()
+_alert_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _alert_delivery(alert: dict, _output_ids: list[str] | None = None) -> None:
+    snap_url = alert.get("snapshotUrl")
+    snap_full = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1]) if snap_url else None
+    notification_dispatcher.notify(alert, snap_full)
+
+
+def _broadcast_persisted_alert(alert: dict) -> None:
+    if _alert_event_loop is None or not _alert_event_loop.is_running():
+        logger.warning("Alert persisted without an active websocket event loop", extra={"alert_id": alert.get("id")})
+        return
+    broadcast = asyncio.run_coroutine_threadsafe(
+        broadcast_alert({"type": "alert", "data": alert}),
+        _alert_event_loop,
+    )
+    broadcast.result(timeout=5.0)
+
+
+def _get_alert_pipeline() -> AlertPipeline:
+    global _alert_pipeline
+    if _alert_pipeline is None:
+        with _alert_pipeline_lock:
+            if _alert_pipeline is None:
+                _alert_pipeline = AlertPipeline(
+                    persist_alert=alert_store.create_alert,
+                    deliver_alert=_alert_delivery,
+                    on_persisted=_broadcast_persisted_alert,
+                    persist_queue_size=int(os.getenv("ALERT_PERSIST_QUEUE_SIZE", "256")),
+                    delivery_queue_size=int(os.getenv("ALERT_DELIVERY_QUEUE_SIZE", "256")),
+                    delivery_workers=int(os.getenv("ALERT_DELIVERY_WORKERS", "4")),
+                )
+    return _alert_pipeline
+
+
+def start_alert_pipeline() -> None:
+    global _alert_event_loop
+    try:
+        _alert_event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("Starting alert pipeline without a websocket event loop")
+    _get_alert_pipeline().start()
+
+
+def stop_alert_pipeline(timeout: float = 10.0) -> bool:
+    global _alert_event_loop
+    if _alert_pipeline is None:
+        _alert_event_loop = None
+        return True
+    drained = _alert_pipeline.shutdown(wait=True, timeout=timeout)
+    _alert_event_loop = None
+    return drained
+
+
+def get_alert_pipeline_stats() -> dict:
+    if _alert_pipeline is None:
+        return {"running": False, "persist_queue_depth": 0, "delivery_queue_depth": 0}
+    return _alert_pipeline.stats()
+
+
+def _encode_alert_snapshot_pair(
+    annotated_frame: np.ndarray,
+    clean_frame: np.ndarray,
+    jpeg_quality: int,
+    *,
+    max_width: int = 854,
+) -> tuple[bytes, bytes]:
+    """Encode an alert's annotated and clean views from the same inference frame."""
+    height, width = annotated_frame.shape[:2]
+    if width > max_width:
+        scale = max_width / width
+        size = (max_width, int(height * scale))
+        annotated_frame = cv2.resize(annotated_frame, size)
+        clean_frame = cv2.resize(clean_frame, size)
+
+    annotated_ok, annotated_buffer = cv2.imencode(
+        ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+    )
+    clean_ok, clean_buffer = cv2.imencode(
+        ".jpg", clean_frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+    )
+    if not annotated_ok or not clean_ok:
+        raise RuntimeError("Failed to encode alert snapshot")
+    return annotated_buffer.tobytes(), clean_buffer.tobytes()
+
+
+def _encode_inference_snapshot_pair(
+    camera_id: str,
+    clean_frame: np.ndarray,
+    detections: list[dict],
+    jpeg_quality: int,
+    *,
+    annotated_frame: np.ndarray | None = None,
+) -> tuple[bytes, bytes]:
+    """Encode the exact inference frame even when resize-first skipped full-size drawing."""
+    if annotated_frame is None:
+        annotated_frame, clean_frame = _render_stream_views(
+            camera_id,
+            clean_frame,
+            detections,
+        )
+    return _encode_alert_snapshot_pair(
+        annotated_frame,
+        clean_frame,
+        jpeg_quality,
+    )
+
 
 def _normalize_text(value: str) -> str:
     return value.lower().replace("_", " ").replace("-", " ").strip()
@@ -288,34 +400,30 @@ def create_alert(
     description: str = "",
     source: str = "YOLO",
     bboxes: list[dict] | None = None,
-) -> dict | None:
+    snapshot_jpeg: bytes | None = None,
+    clean_snapshot_jpeg: bytes | None = None,
+):
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
-    snapshot_jpeg = state.camera_frames.get(camera_id)
-    clean_snapshot_jpeg = state.camera_clean_frames.get(camera_id)
+    if snapshot_jpeg is None:
+        snapshot_jpeg = state.camera_frames.get(camera_id)
+        clean_snapshot_jpeg = state.camera_clean_frames.get(camera_id)
     if not snapshot_jpeg:
         logger.debug("Skipping alert — no frame captured yet", extra={"camera_id": camera_id, "rule": rule})
         return None
-    alert = alert_store.create_alert(
-        camera_id=camera_id,
-        camera_name=cam.get("name", camera_id),
-        zone=cam.get("zone", "Unknown"),
-        rule=rule,
-        severity=severity,
-        confidence=confidence,
-        description=description,
-        source=source,
-        snapshot_jpeg=snapshot_jpeg,
-        bboxes=bboxes,
-        clean_snapshot_jpeg=clean_snapshot_jpeg,
-    )
-    try:
-        snap_url = alert.get("snapshotUrl")
-        snap_full = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1]) if snap_url else None
-        notification_dispatcher.notify(alert, snap_full)
-    except Exception:
-        logger.exception("Telegram send failed")
-    return alert
+    return _get_alert_pipeline().submit({
+        "camera_id": camera_id,
+        "camera_name": cam.get("name", camera_id),
+        "zone": cam.get("zone", "Unknown"),
+        "rule": rule,
+        "severity": severity,
+        "confidence": confidence,
+        "description": description,
+        "source": source,
+        "snapshot_jpeg": snapshot_jpeg,
+        "bboxes": bboxes,
+        "clean_snapshot_jpeg": clean_snapshot_jpeg,
+    })
 
 
 async def broadcast_alert(msg: dict):
@@ -403,12 +511,10 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
             confidence=0.92,
             description=result[:200],
             source=f"VLM ({vlm_cfg['model']})",
+            snapshot_jpeg=frame_bytes,
         )
         if alert:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
-            loop.close()
+            logger.debug("VLM alert queued", extra={"camera_id": camera_id})
 
 
 def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: dict, *, conf: float, device: str, imgsz: int):
@@ -609,6 +715,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     reconnect_failures = 0
     ever_received_frame = False
     safe_video_source = redact_video_source(video_source)
+    last_detection_frame = None
 
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
     if missing_model_keys:
@@ -722,6 +829,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     annotated = frame
                     detections = []
                 last_annotated = annotated
+                last_detection_frame = frame.copy()
                 state.camera_detections[camera_id] = detections
                 next_inference_at = inference_scheduler.next_inference_slot(
                     camera_id,
@@ -775,6 +883,22 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     last_alert_by_rule[rule_key] = now
                     violation_window[rule_key] = []
                     violation_bboxes = extract_violation_bboxes(candidate["rule"], detections, frame_w, frame_h, camera_id)
+                    snapshot_jpeg = None
+                    clean_snapshot_jpeg = None
+                    if last_detection_frame is not None:
+                        try:
+                            snapshot_jpeg, clean_snapshot_jpeg = _encode_inference_snapshot_pair(
+                                camera_id,
+                                last_detection_frame,
+                                detections,
+                                jpeg_quality,
+                                annotated_frame=last_annotated,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Alert snapshot encoding failed",
+                                extra={"camera_id": camera_id, "rule": candidate["rule"]},
+                            )
                     alert = create_alert(
                         camera_id=candidate["camera_id"],
                         rule=candidate["rule"],
@@ -783,15 +907,14 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         description=candidate["description"],
                         source=candidate["source"],
                         bboxes=violation_bboxes,
+                        snapshot_jpeg=snapshot_jpeg,
+                        clean_snapshot_jpeg=clean_snapshot_jpeg,
                     )
                     if alert:
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(broadcast_alert({"type": "alert", "data": alert}))
-                            loop.close()
-                        except Exception:
-                            logger.exception("Alert broadcast failed")
+                        logger.debug(
+                            "Detection alert queued",
+                            extra={"camera_id": camera_id, "rule": candidate["rule"]},
+                        )
 
                 for rule_key in list(violation_window):
                     if len(violation_window[rule_key]) >= window_size and sum(violation_window[rule_key]) == 0:

@@ -230,3 +230,31 @@ def test_publish_stream_frame_does_not_publish_a_partial_jpeg_pair(monkeypatch):
 
     assert state.camera_frames["cam1"] == b"old-annotated"
     assert state.camera_clean_frames["cam1"] == b"old-clean"
+
+
+def test_inference_snapshot_renders_large_bbox_frame_when_source_annotation_was_skipped():
+    frame = np.zeros((900, 1600, 3), dtype=np.uint8)
+    detections = [
+        {
+            "class_id": 0,
+            "class": "person",
+            "confidence": 0.9,
+            "bbox": [160, 90, 1440, 810],
+            "model_family": "coco_primary",
+        },
+    ]
+    original = deepcopy(detections)
+
+    annotated_jpeg, clean_jpeg = video_processing._encode_inference_snapshot_pair(
+        "cam1",
+        frame,
+        detections,
+        70,
+        annotated_frame=None,
+    )
+
+    annotated = cv2.imdecode(np.frombuffer(annotated_jpeg, np.uint8), cv2.IMREAD_COLOR)
+    clean = cv2.imdecode(np.frombuffer(clean_jpeg, np.uint8), cv2.IMREAD_COLOR)
+    assert annotated.shape == clean.shape == (480, 854, 3)
+    assert not np.array_equal(annotated, clean)
+    assert detections == original
