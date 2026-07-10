@@ -213,15 +213,39 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
     annotated = frame.copy()
     detections: list[dict] = []
     visible_detection_count = 0
+    ppe_prompts = execution_plan.get("ppe_prompt_terms") or []
+    long_tail_prompts = execution_plan.get("yoloe_prompt_terms") or []
+    batch_requests = []
+    if execution_plan.get("run_coco_primary"):
+        batch_requests.append({
+            "request_id": "coco_primary",
+            "model_key": "coco_primary",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+        })
+    if execution_plan.get("run_ppe_specialist") and ppe_prompts:
+        batch_requests.append({
+            "request_id": "ppe_specialist",
+            "model_key": "ppe_specialist",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": ppe_prompts,
+        })
+    if execution_plan.get("run_yoloe_long_tail") and long_tail_prompts:
+        batch_requests.append({
+            "request_id": "yoloe_long_tail",
+            "model_key": "yoloe_long_tail",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": long_tail_prompts,
+        })
+    record_batches = model_manager.predict_record_batches(frame, batch_requests)
 
     if execution_plan.get("run_coco_primary"):
-        records = model_manager.predict_records(
-            "coco_primary",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-        )
+        records = record_batches["coco_primary"]
         annotated, coco_detections = draw_detection_records(
             annotated,
             records,
@@ -231,16 +255,8 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         detections.extend(_normalize_detection_batch(coco_detections, "coco_primary"))
         visible_detection_count += len(coco_detections)
 
-    if execution_plan.get("run_ppe_specialist") and execution_plan.get("ppe_prompt_terms"):
-        ppe_prompts = execution_plan["ppe_prompt_terms"]
-        records = model_manager.predict_records(
-            "ppe_specialist",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-            classes=ppe_prompts,
-        )
+    if execution_plan.get("run_ppe_specialist") and ppe_prompts:
+        records = record_batches["ppe_specialist"]
         _ppe_annotated, ppe_detections = draw_detection_records(
             annotated,
             records,
@@ -251,16 +267,8 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         )
         detections.extend(_normalize_detection_batch(ppe_detections, "ppe_specialist"))
 
-    if execution_plan.get("run_yoloe_long_tail") and execution_plan.get("yoloe_prompt_terms"):
-        long_tail_prompts = execution_plan["yoloe_prompt_terms"]
-        records = model_manager.predict_records(
-            "yoloe_long_tail",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-            classes=long_tail_prompts,
-        )
+    if execution_plan.get("run_yoloe_long_tail") and long_tail_prompts:
+        records = record_batches["yoloe_long_tail"]
         _long_tail_annotated, long_tail_detections = draw_detection_records(
             annotated,
             records,

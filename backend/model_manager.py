@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import base64
+import json
 import shutil
 import tempfile
 import threading
@@ -168,6 +169,32 @@ def _remote_post_jpeg(
     response = _remote_session().post(
         f"{MODEL_SERVER_URL}{path}",
         params=params,
+        data=frame_jpeg,
+        headers=headers,
+        timeout=MODEL_SERVER_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 404:
+        try:
+            if response.json().get("detail") == "Not Found":
+                return None
+        except (AttributeError, TypeError, ValueError):
+            pass
+    response.raise_for_status()
+    return response.json()
+
+
+def _remote_post_jpeg_batch(
+    path: str,
+    frame_jpeg: bytes,
+    *,
+    batch: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Post one JPEG with bounded model requests, or None on an older server."""
+    headers = _remote_headers()
+    headers["Content-Type"] = "image/jpeg"
+    headers["X-Rakshak-Inference-Batch"] = json.dumps(batch, separators=(",", ":"))
+    response = _remote_session().post(
+        f"{MODEL_SERVER_URL}{path}",
         data=frame_jpeg,
         headers=headers,
         timeout=MODEL_SERVER_TIMEOUT_SECONDS,
@@ -635,6 +662,38 @@ def _records_from_results(results) -> list[dict[str, Any]]:
     return records
 
 
+def _remote_predict_records_jpeg(
+    model_key: ModelKey,
+    frame_jpeg: bytes,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    metadata = {
+        "model_key": model_key,
+        "conf": conf,
+        "device": device,
+        "imgsz": imgsz,
+        "classes": classes or [],
+    }
+    response = _remote_post_jpeg("/api/infer/jpeg", frame_jpeg, params=metadata)
+    if response is not None:
+        return response.get("detections", [])
+
+    # Keep rolling upgrades safe when the edge reaches an older model server.
+    payload = {
+        "model_key": model_key,
+        "frame_jpeg_b64": base64.b64encode(frame_jpeg).decode("ascii"),
+        "conf": conf,
+        "device": device,
+        "imgsz": imgsz,
+        "classes": classes or [],
+    }
+    return _remote_post("/api/infer", payload).get("detections", [])
+
+
 def predict_records(
     model_key: ModelKey,
     frame,
@@ -649,30 +708,97 @@ def predict_records(
         ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             raise RuntimeError("Could not encode frame for remote inference")
-        frame_jpeg = buffer.tobytes()
-        metadata = {
-            "model_key": model_key,
-            "conf": conf,
-            "device": device,
-            "imgsz": imgsz,
-            "classes": classes or [],
-        }
-        response = _remote_post_jpeg("/api/infer/jpeg", frame_jpeg, params=metadata)
-        if response is not None:
-            return response.get("detections", [])
-
-        # Keep rolling upgrades safe when the edge process reaches an older
-        # model server that does not expose the binary transport yet.
-        payload = {
-            "model_key": model_key,
-            "frame_jpeg_b64": base64.b64encode(frame_jpeg).decode("ascii"),
-            "conf": conf,
-            "device": device,
-            "imgsz": imgsz,
-            "classes": classes or [],
-        }
-        return _remote_post("/api/infer", payload).get("detections", [])
+        return _remote_predict_records_jpeg(
+            model_key,
+            buffer.tobytes(),
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+            classes=classes,
+        )
 
     return _records_from_results(
         predict(model_key, frame, conf=conf, device=device, imgsz=imgsz, classes=classes)
     )
+
+
+def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Run multiple record-producing models against one immutable frame."""
+    if not requests:
+        return {}
+    if len(requests) > 8:
+        raise ValueError("At most eight model requests may share one frame")
+
+    normalized = []
+    request_ids = set()
+    for index, request in enumerate(requests):
+        model_key = request.get("model_key")
+        if model_key not in MODEL_DEFINITIONS:
+            raise KeyError(f"Unknown model key: {model_key}")
+        request_id = str(request.get("request_id") or f"{model_key}:{index}")
+        if request_id in request_ids:
+            raise ValueError(f"Duplicate inference request ID: {request_id}")
+        request_ids.add(request_id)
+        normalized.append({
+            "request_id": request_id,
+            "model_key": model_key,
+            "conf": float(request.get("conf", 0.35)),
+            "device": str(request.get("device", "cuda")),
+            "imgsz": int(request.get("imgsz", 960)),
+            "classes": list(request.get("classes") or []),
+        })
+
+    if len(normalized) == 1:
+        item = normalized[0]
+        return {
+            item["request_id"]: predict_records(
+                item["model_key"],
+                frame,
+                conf=item["conf"],
+                device=item["device"],
+                imgsz=item["imgsz"],
+                classes=item["classes"],
+            )
+        }
+
+    if not is_remote_inference_enabled():
+        return {
+            item["request_id"]: predict_records(
+                item["model_key"],
+                frame,
+                conf=item["conf"],
+                device=item["device"],
+                imgsz=item["imgsz"],
+                classes=item["classes"],
+            )
+            for item in normalized
+        }
+
+    import cv2
+
+    ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise RuntimeError("Could not encode frame for remote inference")
+    frame_jpeg = buffer.tobytes()
+    response = _remote_post_jpeg_batch(
+        "/api/infer/jpeg/batch",
+        frame_jpeg,
+        batch=normalized,
+    )
+    if response is not None:
+        results = response.get("results")
+        if not isinstance(results, dict) or set(results) != request_ids:
+            raise RuntimeError("Model server returned an incomplete inference batch")
+        return results
+
+    return {
+        item["request_id"]: _remote_predict_records_jpeg(
+            item["model_key"],
+            frame_jpeg,
+            conf=item["conf"],
+            device=item["device"],
+            imgsz=item["imgsz"],
+            classes=item["classes"],
+        )
+        for item in normalized
+    }

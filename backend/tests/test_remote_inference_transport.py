@@ -1,4 +1,5 @@
 import base64
+import json
 import threading
 
 import cv2
@@ -100,6 +101,57 @@ def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
     assert decoded.shape == frame.shape
 
 
+def test_edge_batches_models_with_one_jpeg_encode(monkeypatch):
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    captured = {}
+    encode_calls = 0
+    real_imencode = cv2.imencode
+
+    def counted_imencode(*args, **kwargs):
+        nonlocal encode_calls
+        encode_calls += 1
+        return real_imencode(*args, **kwargs)
+
+    def fake_remote_batch(path, frame_jpeg, *, batch):
+        captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
+        return {"results": {"coco": [{"class_id": 0}], "ppe": [{"class_id": 1}]}}
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(cv2, "imencode", counted_imencode)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_remote_batch)
+
+    results = model_manager.predict_record_batches(frame, [
+        {"request_id": "coco", "model_key": "coco_primary", "conf": 0.3, "device": "cuda", "imgsz": 960},
+        {"request_id": "ppe", "model_key": "ppe_specialist", "conf": 0.25, "device": "cuda", "imgsz": 960, "classes": ["helmet"]},
+    ])
+
+    assert encode_calls == 1
+    assert captured["path"] == "/api/infer/jpeg/batch"
+    assert [item["request_id"] for item in captured["batch"]] == ["coco", "ppe"]
+    assert results["ppe"] == [{"class_id": 1}]
+
+
+def test_edge_reuses_encoded_jpeg_when_batch_route_is_unavailable(monkeypatch):
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+    jpeg_objects = []
+
+    def fake_single(model_key, frame_jpeg, **_kwargs):
+        jpeg_objects.append(frame_jpeg)
+        return [{"model_key": model_key}]
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
+
+    results = model_manager.predict_record_batches(frame, [
+        {"request_id": "coco", "model_key": "coco_primary"},
+        {"request_id": "ppe", "model_key": "ppe_specialist"},
+    ])
+
+    assert jpeg_objects[0] is jpeg_objects[1]
+    assert results["coco"] == [{"model_key": "coco_primary"}]
+
+
 def test_model_server_accepts_raw_jpeg_and_metadata(monkeypatch):
     captured = {}
 
@@ -156,3 +208,52 @@ def test_model_server_rejects_invalid_raw_jpeg(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Could not decode frame"
+
+
+def test_model_server_batches_models_after_one_decode(monkeypatch):
+    frame_ids = []
+
+    def fake_predict(model_key, frame, *, conf, device, imgsz, classes):
+        frame_ids.append(id(frame))
+        return [{"class_id": 0, "model_key": model_key}]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(model_server.model_manager, "predict_records", fake_predict)
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    batch = [
+        {"request_id": "coco", "model_key": "coco_primary", "conf": 0.3, "imgsz": 960},
+        {"request_id": "ppe", "model_key": "ppe_specialist", "conf": 0.25, "imgsz": 960, "classes": ["helmet"]},
+    ]
+    response = client.post(
+        "/api/infer/jpeg/batch",
+        content=_jpeg_bytes(np.zeros((120, 200, 3), dtype=np.uint8)),
+        headers={
+            "Content-Type": "image/jpeg",
+            "X-Rakshak-Inference-Batch": json.dumps(batch),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"]["ppe"][0]["model_key"] == "ppe_specialist"
+    assert len(frame_ids) == 2
+    assert len(set(frame_ids)) == 1
+
+
+def test_model_server_rejects_duplicate_batch_request_ids(monkeypatch):
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    batch = [
+        {"request_id": "duplicate", "model_key": "coco_primary"},
+        {"request_id": "duplicate", "model_key": "ppe_specialist"},
+    ]
+    response = client.post(
+        "/api/infer/jpeg/batch",
+        content=_jpeg_bytes(np.zeros((20, 20, 3), dtype=np.uint8)),
+        headers={
+            "Content-Type": "image/jpeg",
+            "X-Rakshak-Inference-Batch": json.dumps(batch),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Inference batch request IDs must be unique"

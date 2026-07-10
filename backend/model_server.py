@@ -7,6 +7,7 @@ frames here and keep local streaming, alerting, config, and frontend APIs intact
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import cv2
 import numpy as np
 from fastapi import Body, FastAPI, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 import model_manager
 from logging_config import setup_logging
@@ -37,6 +38,15 @@ class InferenceRequest(BaseModel):
     classes: list[str] = Field(default_factory=list)
 
 
+class InferenceBatchItem(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    model_key: str
+    conf: float = Field(default=0.35, ge=0.0, le=1.0)
+    device: str = "cuda"
+    imgsz: int = Field(default=960, gt=0)
+    classes: list[str] = Field(default_factory=list)
+
+
 class ModelInstallRequest(BaseModel):
     model_keys: list[str] = Field(default_factory=list)
 
@@ -49,18 +59,7 @@ def _require_model_server_token(authorization: str | None):
         raise HTTPException(status_code=401, detail="Invalid model server token")
 
 
-def _run_inference(
-    *,
-    model_key: str,
-    frame_bytes: bytes,
-    conf: float,
-    device: str,
-    imgsz: int,
-    classes: list[str],
-) -> dict[str, Any]:
-    if model_key not in model_manager.MODEL_DEFINITIONS:
-        raise HTTPException(status_code=404, detail=f"Unknown model key: {model_key}")
-
+def _decode_frame(frame_bytes: bytes):
     try:
         arr = np.frombuffer(frame_bytes, np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -68,6 +67,20 @@ def _run_inference(
         raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
     if frame is None:
         raise HTTPException(status_code=400, detail="Could not decode frame")
+    return frame
+
+
+def _run_inference_frame(
+    *,
+    model_key: str,
+    frame,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str],
+) -> dict[str, Any]:
+    if model_key not in model_manager.MODEL_DEFINITIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown model key: {model_key}")
 
     try:
         detections = model_manager.predict_records(
@@ -83,6 +96,25 @@ def _run_inference(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {"detections": detections}
+
+
+def _run_inference(
+    *,
+    model_key: str,
+    frame_bytes: bytes,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str],
+) -> dict[str, Any]:
+    return _run_inference_frame(
+        model_key=model_key,
+        frame=_decode_frame(frame_bytes),
+        conf=conf,
+        device=device,
+        imgsz=imgsz,
+        classes=classes,
+    )
 
 
 @app.on_event("startup")
@@ -177,3 +209,40 @@ def infer_jpeg(
         imgsz=imgsz,
         classes=classes,
     )
+
+
+@app.post("/api/infer/jpeg/batch")
+def infer_jpeg_batch(
+    frame_jpeg: bytes = Body(..., media_type="image/jpeg"),
+    batch_json: str = Header(..., alias="X-Rakshak-Inference-Batch"),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_model_server_token(authorization)
+    if len(batch_json) > 16_384:
+        raise HTTPException(status_code=413, detail="Inference batch metadata is too large")
+    try:
+        payload = json.loads(batch_json)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid inference batch metadata") from exc
+    if not isinstance(payload, list) or not 1 <= len(payload) <= 8:
+        raise HTTPException(status_code=400, detail="Inference batch must contain 1 to 8 requests")
+    try:
+        batch = [InferenceBatchItem(**item) for item in payload]
+    except (TypeError, ValidationError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid inference batch request") from exc
+    request_ids = [item.request_id for item in batch]
+    if len(set(request_ids)) != len(request_ids):
+        raise HTTPException(status_code=400, detail="Inference batch request IDs must be unique")
+
+    frame = _decode_frame(frame_jpeg)
+    results = {}
+    for item in batch:
+        results[item.request_id] = _run_inference_frame(
+            model_key=item.model_key,
+            frame=frame,
+            conf=item.conf,
+            device=item.device,
+            imgsz=item.imgsz,
+            classes=item.classes,
+        )["detections"]
+    return {"results": results}
