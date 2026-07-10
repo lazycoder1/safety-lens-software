@@ -26,9 +26,26 @@ SIMULATED = "simulated"
 SKIPPED = "skipped"
 FAILED = "failed"
 
-_escalation_sent: dict[str, int] = {}
+_CHANNEL_HANDLERS = {
+    "telegram": telegram_notifier,
+    "email": email_notifier,
+    "webhook": webhook_notifier,
+}
+_NOT_IMPLEMENTED = {"whatsapp", "sms", "plc"}
+
+_escalation_sent: dict[str, set[int | str]] = {}
+_escalation_exhausted: dict[str, set[int | str]] = {}
+_escalation_attempts: dict[tuple[str, int | str], int] = {}
 ESCALATION_CHECK_INTERVAL = 60  # seconds
 ESCALATION_MAX_ALERT_AGE_HOURS = 24
+ESCALATION_MAX_ATTEMPTS = 3
+ESCALATION_DELIVERED = "delivered"
+ESCALATION_RETRY = "retry"
+ESCALATION_TERMINAL = "terminal"
+
+
+def _normalize_channel(channel: str) -> str:
+    return str(channel or "").strip().lower()
 
 
 def notify(alert: dict, snapshot_path: str | None = None, output_ids: list[str] | None = None) -> list[dict]:
@@ -67,6 +84,102 @@ def dispatch_alert(alert: dict, snapshot_path: str | None = None, output_ids: li
 
     if results:
         _record_output_results(results)
+    return results
+
+
+def notify_with_results(
+    alert: dict,
+    snapshot_path: str | None = None,
+    *,
+    channels: list[str] | None = None,
+) -> list[dict]:
+    """Compatibility route for legacy channel-matrix clients with truthful outcomes."""
+    cfg = get_config()
+    if channels is None:
+        severity_matrix = cfg.get("alert_routing", {}).get("channel_matrix", {}).get(
+            alert.get("severity", "P4"),
+            {},
+        )
+        channels = [channel for channel, enabled in severity_matrix.items() if enabled]
+
+    requested: list[str] = []
+    for value in channels:
+        channel = _normalize_channel(value)
+        if channel and channel not in requested:
+            requested.append(channel)
+
+    results: list[dict] = []
+    outputs = cfg.get("alert_outputs", [])
+    for channel in requested:
+        result_channel = "inApp" if channel == "inapp" else channel
+        if channel == "inapp":
+            results.append({
+                "channel": result_channel,
+                "success": False,
+                "status": SKIPPED,
+                "message": "In-app delivery is handled by the persisted-alert WebSocket path",
+            })
+            continue
+        if channel in _NOT_IMPLEMENTED:
+            results.append({
+                "channel": result_channel,
+                "success": False,
+                "status": SKIPPED,
+                "message": "Channel is not implemented",
+            })
+            continue
+
+        matching_outputs = [
+            output
+            for output in outputs
+            if _normalize_channel(output.get("type")) == channel
+            or _normalize_channel(output.get("id")) == channel
+        ]
+        channel_results = [
+            _dispatch_one(output, alert, snapshot_path, force=True)
+            for output in matching_outputs
+        ]
+        channel_results = [result for result in channel_results if result]
+        if channel_results:
+            _record_output_results(channel_results, test=True)
+            success = any(result["status"] in {DELIVERED, SIMULATED} for result in channel_results)
+            results.append({
+                "channel": result_channel,
+                "success": success,
+                "status": DELIVERED if success else FAILED,
+                "message": next(
+                    (result["message"] for result in channel_results if result["status"] in {DELIVERED, SIMULATED}),
+                    channel_results[0]["message"],
+                ),
+                "outputResults": channel_results,
+            })
+            continue
+
+        handler = _CHANNEL_HANDLERS.get(channel)
+        if handler is None:
+            results.append({
+                "channel": result_channel,
+                "success": False,
+                "status": SKIPPED,
+                "message": "No channel handler is configured",
+            })
+            continue
+        try:
+            success = bool(handler.send_alert(alert, snapshot_path))
+            results.append({
+                "channel": result_channel,
+                "success": success,
+                "status": DELIVERED if success else FAILED,
+                "message": "Delivered" if success else "Channel did not accept the alert",
+            })
+        except Exception as exc:
+            logger.exception("Failed to send via %s", channel)
+            results.append({
+                "channel": result_channel,
+                "success": False,
+                "status": FAILED,
+                "message": str(exc),
+            })
     return results
 
 
@@ -439,6 +552,9 @@ def _render_template(template: str, alert: dict) -> str:
 def clear_escalation(alert_id: str) -> None:
     """Call when an alert is acknowledged/resolved to stop further escalation."""
     _escalation_sent.pop(alert_id, None)
+    _escalation_exhausted.pop(alert_id, None)
+    for key in [key for key in _escalation_attempts if key[0] == alert_id]:
+        _escalation_attempts.pop(key, None)
 
 
 def _check_escalation() -> None:
@@ -450,12 +566,23 @@ def _check_escalation() -> None:
     steps = routing.get("escalation_steps", [])
 
     if not steps:
+        _escalation_sent.clear()
+        _escalation_exhausted.clear()
+        _escalation_attempts.clear()
         return
 
     steps = sorted(steps, key=lambda s: s.get("afterMinutes", 0))
 
     try:
-        active_alerts = alert_store.get_alerts(status="active", limit=200)
+        active_alerts = []
+        page_size = 200
+        offset = 0
+        while True:
+            page = alert_store.get_alerts(status="active", limit=page_size, offset=offset)
+            active_alerts.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
     except Exception:
         logger.exception("Escalation: failed to query active alerts")
         return
@@ -480,23 +607,53 @@ def _check_escalation() -> None:
         age_minutes = (now - alert_time).total_seconds() / 60
         if age_minutes > ESCALATION_MAX_ALERT_AGE_HOURS * 60:
             continue
-        last_sent_step = _escalation_sent.get(alert_id, 0)
+        sent_steps = _escalation_sent.get(alert_id, set())
+        exhausted_steps = _escalation_exhausted.get(alert_id, set())
 
         for step in steps:
-            step_id = step.get("id", 0)
+            step_id = step.get("id", f"{step.get('afterMinutes', 0)}:{step.get('role', '')}:{step.get('channel', '')}")
             after_min = step.get("afterMinutes", 0)
-            if age_minutes >= after_min and step_id > last_sent_step:
-                _send_escalation(alert, step)
-                _escalation_sent[alert_id] = step_id
+            if age_minutes < after_min or step_id in sent_steps or step_id in exhausted_steps:
+                continue
+
+            outcome = _send_escalation(alert, step)
+            attempt_key = (alert_id, step_id)
+            if outcome == ESCALATION_DELIVERED:
+                _escalation_sent.setdefault(alert_id, set()).add(step_id)
+                sent_steps = _escalation_sent[alert_id]
+                _escalation_attempts.pop(attempt_key, None)
+                continue
+            if outcome == ESCALATION_TERMINAL:
+                _escalation_exhausted.setdefault(alert_id, set()).add(step_id)
+                exhausted_steps = _escalation_exhausted[alert_id]
+                _escalation_attempts.pop(attempt_key, None)
+                continue
+
+            attempts = _escalation_attempts.get(attempt_key, 0) + 1
+            if attempts >= ESCALATION_MAX_ATTEMPTS:
+                _escalation_attempts.pop(attempt_key, None)
+                _escalation_exhausted.setdefault(alert_id, set()).add(step_id)
+                exhausted_steps = _escalation_exhausted[alert_id]
+                logger.error(
+                    "Escalation retry budget exhausted",
+                    extra={"alert_id": alert_id, "step_id": step_id, "attempts": attempts},
+                )
+                continue
+            _escalation_attempts[attempt_key] = attempts
+            break
 
     for aid in [aid for aid in _escalation_sent if aid not in active_ids]:
         del _escalation_sent[aid]
+    for aid in [aid for aid in _escalation_exhausted if aid not in active_ids]:
+        del _escalation_exhausted[aid]
+    for key in [key for key in _escalation_attempts if key[0] not in active_ids]:
+        del _escalation_attempts[key]
 
 
-def _send_escalation(alert: dict, step: dict) -> None:
-    """Send an escalation notification for a specific step."""
+def _send_escalation(alert: dict, step: dict) -> str:
+    """Send one escalation step and classify success, retry, or terminal failure."""
     role = step.get("role", "Manager")
-    channel = str(step.get("channel", "telegram")).lower()
+    channel = _normalize_channel(step.get("channel", "telegram"))
     after_min = step.get("afterMinutes", 0)
     escalated = dict(alert)
     escalated["description"] = f"[ESCALATED to {role} after {after_min}min] {escalated.get('description', '')}"
@@ -504,26 +661,36 @@ def _send_escalation(alert: dict, step: dict) -> None:
         output for output in get_config().get("alert_outputs", [])
         if output.get("type") == channel or output.get("id") == channel
     ]
-    if not outputs:
-        logger.warning("Escalation channel %s not available", channel)
-        return
     try:
         snap_url = alert.get("snapshotUrl")
         snap_path = None
         if snap_url:
             import alert_store
             snap_path = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1])
-        results = dispatch_alert(escalated, snap_path, output_ids=[outputs[0]["id"]])
-        sent_results = [result for result in results if result.get("status") in {DELIVERED, SIMULATED}]
-        if sent_results:
-            logger.info("Escalation sent", extra={"alert_id": alert.get("id"), "role": role, "channel": channel})
-        else:
-            logger.info(
-                "Escalation skipped",
-                extra={"alert_id": alert.get("id"), "role": role, "channel": channel, "reason": "no enabled output"},
+        if outputs:
+            results = dispatch_alert(
+                escalated,
+                snap_path,
+                output_ids=[output["id"] for output in outputs],
             )
+            if any(result.get("status") in {DELIVERED, SIMULATED} for result in results):
+                logger.info("Escalation sent", extra={"alert_id": alert.get("id"), "role": role, "channel": channel})
+                return ESCALATION_DELIVERED
+            if any(result.get("status") == FAILED for result in results):
+                return ESCALATION_RETRY
+            return ESCALATION_TERMINAL
+
+        handler = _CHANNEL_HANDLERS.get(channel)
+        if handler is None:
+            logger.warning("Escalation channel %s not available", channel)
+            return ESCALATION_TERMINAL
+        if not handler.send_alert(escalated, snap_path):
+            return ESCALATION_RETRY
+        logger.info("Escalation sent", extra={"alert_id": alert.get("id"), "role": role, "channel": channel})
+        return ESCALATION_DELIVERED
     except Exception:
         logger.exception("Escalation send failed for step %s", step.get("id"))
+        return ESCALATION_RETRY
 
 
 async def escalation_check_loop() -> None:

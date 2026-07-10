@@ -94,6 +94,7 @@ class TestAlertRequest(BaseModel):
     cameraName: str = "Test Camera"
     zone: str = "Test Zone"
     outputIds: Optional[list[str]] = None
+    channels: Optional[list[str]] = None
 
 
 class AlertOutputRequest(BaseModel):
@@ -574,6 +575,29 @@ async def api_update_alert_routing(body: AlertRoutingUpdate, request: Request):
     if "alert_routing" not in cfg:
         cfg["alert_routing"] = {}
     updates = body.model_dump(exclude_none=True)
+    if "escalation_steps" in updates:
+        supported_channels = {
+            "telegram",
+            "email",
+            "webhook",
+            "pushover",
+            "ip_speaker",
+            "relay",
+            "in_app",
+            "browser_sound",
+        }
+        normalized_steps = []
+        for step in updates["escalation_steps"]:
+            normalized = dict(step)
+            channel = str(normalized.get("channel", "telegram")).strip().lower()
+            if channel not in supported_channels:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unsupported escalation channel: {channel or 'empty'}",
+                )
+            normalized["channel"] = channel
+            normalized_steps.append(normalized)
+        updates["escalation_steps"] = normalized_steps
     cfg["alert_routing"].update(updates)
     save_config(cfg)
     audit_store.log_event(
@@ -606,11 +630,31 @@ async def api_test_alert_routing(body: TestAlertRequest):
         "source": "test",
         "description": "[TEST] This is a test alert from Rakshak Lens.",
     }
-    results = notification_dispatcher.dispatch_alert(test_alert, None, output_ids=body.outputIds)
-    failed = [item for item in results if item.get("status") == "failed"]
+    if body.outputIds is None:
+        channels = body.channels
+        if channels is None:
+            matrix = get_config().get("alert_routing", {}).get("channel_matrix", {})
+            channels = [
+                channel
+                for channel, enabled in matrix.get(body.severity, {}).items()
+                if enabled
+            ]
+        results = notification_dispatcher.notify_with_results(
+            test_alert,
+            None,
+            channels=channels,
+        )
+        ok = bool(results) and all(result.get("success", False) for result in results)
+    else:
+        results = notification_dispatcher.dispatch_alert(test_alert, None, output_ids=body.outputIds)
+        ok = bool(results) and all(item.get("status") in {"delivered", "simulated"} for item in results)
     return {
-        "ok": len(failed) == 0,
-        "message": "Test alert dispatched to configured outputs",
+        "ok": ok,
+        "message": (
+            "Test alert delivered to every requested output"
+            if ok
+            else "One or more requested outputs did not accept the test alert"
+        ),
         "results": results,
     }
 

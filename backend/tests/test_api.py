@@ -600,6 +600,70 @@ def test_telegram_test_endpoint(mock_test):
     assert resp.json()["ok"] is True
 
 
+# ── Alert routing config endpoints ───────────────────────────────────────────
+
+def test_alert_routing_normalizes_supported_escalation_channels():
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={
+            "escalation_steps": [
+                {"id": 7, "afterMinutes": 3, "role": "Manager", "channel": " Telegram "},
+                {"id": 3, "afterMinutes": 8, "role": "Director", "channel": "EMAIL"},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert [step["channel"] for step in resp.json()["escalation_steps"]] == ["telegram", "email"]
+
+
+def test_alert_routing_rejects_unimplemented_escalation_channel():
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={
+            "escalation_steps": [
+                {"id": 1, "afterMinutes": 3, "role": "Manager", "channel": "SMS"},
+            ],
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "Unsupported escalation channel: sms" in resp.json()["detail"]
+
+
+@mock.patch("notification_dispatcher.notify_with_results")
+def test_alert_routing_test_returns_honest_channel_results(mock_notify):
+    mock_notify.return_value = [
+        {"channel": "telegram", "success": True, "status": "delivered", "message": "Delivered"},
+        {"channel": "email", "success": False, "status": "failed", "message": "SMTP unavailable"},
+    ]
+
+    resp = api_post(
+        "/api/config/alert-routing/test",
+        json={"severity": "P1", "channels": ["Telegram", "email"]},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert data["results"] == mock_notify.return_value
+    alert, snapshot_path = mock_notify.call_args.args
+    assert alert["severity"] == "P1"
+    assert snapshot_path is None
+    assert mock_notify.call_args.kwargs["channels"] == ["Telegram", "email"]
+
+
+@mock.patch("notification_dispatcher.notify_with_results")
+def test_alert_routing_test_expands_default_matrix_as_explicit_test_channels(mock_notify):
+    mock_notify.return_value = []
+
+    resp = api_post("/api/config/alert-routing/test", json={"severity": "P1"})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is False
+    assert mock_notify.call_args.kwargs["channels"] == ["inApp", "telegram", "email", "webhook"]
+
+
 # ── GET /api/alert-rules-available ───────────────────────────────────────────
 
 def test_available_alert_rules_endpoint():

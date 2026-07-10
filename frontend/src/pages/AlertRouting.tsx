@@ -235,6 +235,7 @@ export function AlertRouting() {
         rule: "Factory Alert Test",
         cameraName: "Test Camera",
         zone: "Test Zone",
+        outputIds: outputs.filter((output) => output.enabled).map((output) => output.id),
       })
       const results = (response.results || []) as AlertDeliveryResult[]
       setLastResults(results)
