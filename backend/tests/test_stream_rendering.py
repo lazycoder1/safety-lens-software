@@ -6,15 +6,20 @@ import pytest
 
 import state
 import video_processing
+from mjpeg_fanout import MjpegFanout
 
 
 @pytest.fixture(autouse=True)
 def camera_config(monkeypatch):
+    monkeypatch.setattr(video_processing, "stream_fanout", MjpegFanout())
     monkeypatch.setattr(
         video_processing,
         "get_config",
         lambda: {"cameras": {"cam1": {"name": "Camera 1", "zones": []}}},
     )
+    yield
+    state.camera_frames.pop("cam1", None)
+    state.camera_clean_frames.pop("cam1", None)
 
 
 def test_render_stream_views_resizes_source_once_and_preserves_clean_pixels(monkeypatch):
@@ -222,6 +227,11 @@ def test_publish_stream_frame_does_not_publish_a_partial_jpeg_pair(monkeypatch):
 
     monkeypatch.setattr(video_processing, "_render_stream_views", lambda *_args: (frame, frame))
     monkeypatch.setattr(video_processing, "_encode_stream_jpeg", fail_second_encode)
+    monkeypatch.setattr(
+        video_processing.stream_fanout,
+        "publish",
+        lambda *_args, **_kwargs: pytest.fail("partial frame pair must not reach fanout"),
+    )
     monkeypatch.setitem(state.camera_frames, "cam1", b"old-annotated")
     monkeypatch.setitem(state.camera_clean_frames, "cam1", b"old-clean")
 
@@ -230,6 +240,32 @@ def test_publish_stream_frame_does_not_publish_a_partial_jpeg_pair(monkeypatch):
 
     assert state.camera_frames["cam1"] == b"old-annotated"
     assert state.camera_clean_frames["cam1"] == b"old-clean"
+
+
+def test_publish_stream_frame_notifies_fanout_after_both_caches_update(monkeypatch):
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    encoded = iter((b"new-annotated", b"new-clean"))
+    publications = []
+
+    def capture_publication(camera_id, jpeg):
+        publications.append(
+            (
+                camera_id,
+                jpeg,
+                state.camera_frames.get(camera_id),
+                state.camera_clean_frames.get(camera_id),
+            )
+        )
+
+    monkeypatch.setattr(video_processing, "_render_stream_views", lambda *_args: (frame, frame))
+    monkeypatch.setattr(video_processing, "_encode_stream_jpeg", lambda *_args: next(encoded))
+    monkeypatch.setattr(video_processing.stream_fanout, "publish", capture_publication)
+
+    video_processing._publish_stream_frame("cam1", frame, [], jpeg_quality=70)
+
+    assert publications == [
+        ("cam1", b"new-annotated", b"new-annotated", b"new-clean")
+    ]
 
 
 def test_inference_snapshot_renders_large_bbox_frame_when_source_annotation_was_skipped():

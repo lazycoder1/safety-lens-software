@@ -16,7 +16,8 @@ from pydantic import BaseModel
 
 from config_manager import get_config
 from dependencies import require_admin
-from video_processing import mjpeg_generator, broadcast_alert
+from mjpeg_fanout import MjpegSubscriberLimitError, stream_fanout
+from video_processing import broadcast_alert
 import state
 import alert_store
 import auth_store
@@ -26,6 +27,26 @@ logger = logging.getLogger("safetylens")
 router = APIRouter(tags=["stream"])
 
 _rtsp_pool = ThreadPoolExecutor(max_workers=2)
+
+
+class MjpegStreamingResponse(StreamingResponse):
+    """Own the subscription lifetime even when socket send is cancelled."""
+
+    def __del__(self):
+        try:
+            close = getattr(self.body_iterator, "close", None)
+            if close is not None:
+                close()
+        except Exception:
+            pass
+
+    async def stream_response(self, send) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                await close()
 
 
 class RtspTestRequest(BaseModel):
@@ -72,10 +93,38 @@ async def stream(camera_id: str):
     cfg = get_config()
     if camera_id not in cfg["cameras"]:
         raise HTTPException(status_code=404, detail="Camera not found")
-    return StreamingResponse(
-        mjpeg_generator(camera_id),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+    try:
+        subscription = stream_fanout.stream(camera_id)
+    except MjpegSubscriberLimitError as exc:
+        fanout_stats = stream_fanout.operational_stats()
+        logger.warning(
+            "MJPEG stream subscriber rejected",
+            extra={
+                "camera_id": camera_id,
+                "subscribers": fanout_stats["subscribers"],
+                "subscriber_limit_per_camera": fanout_stats["subscriberLimitPerCamera"],
+                "subscriber_limit_total": fanout_stats["subscriberLimitTotal"],
+                "rejected_subscribers": fanout_stats["rejectedSubscribers"],
+            },
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
+    try:
+        return MjpegStreamingResponse(
+            subscription,
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception:
+        await subscription.aclose()
+        raise
 
 
 @router.get("/api/vlm/latest")

@@ -45,6 +45,7 @@ from detection import (
     draw_pose_detections,
     extract_violation_bboxes,
 )
+from mjpeg_fanout import stream_fanout
 
 LICENSE_PAUSE_INTERVAL = 1.0
 _last_pose_results: dict[str, any] = {}  # camera_id -> last YOLO-pose results for fall checking
@@ -224,6 +225,7 @@ def _publish_stream_frame(
     clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
     state.camera_frames[camera_id] = annotated_jpeg
     state.camera_clean_frames[camera_id] = clean_jpeg
+    stream_fanout.publish(camera_id, annotated_jpeg)
 
 
 def _clear_camera_observation(camera_id: str) -> None:
@@ -232,6 +234,7 @@ def _clear_camera_observation(camera_id: str) -> None:
     state.camera_clean_frames[camera_id] = None
     state.camera_detections[camera_id] = []
     _last_pose_results.pop(camera_id, None)
+    stream_fanout.clear(camera_id)
 
 _alert_pipeline: AlertPipeline | None = None
 _alert_pipeline_lock = threading.Lock()
@@ -1060,16 +1063,3 @@ def restart_all_cameras():
     for cam_id in cfg["cameras"]:
         if cam_id not in still_stopping:
             start_camera(cam_id)
-
-
-def mjpeg_generator(camera_id: str):
-    while True:
-        frame_bytes = state.camera_frames.get(camera_id)
-        if frame_bytes is not None:
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-        cfg = get_config()
-        global_config = cfg["global"]
-        camera = cfg["cameras"].get(camera_id, {})
-        target_fps = camera.get("fps", global_config["target_fps"])
-        fps = _configured_stream_fps(camera, global_config, target_fps)
-        time.sleep(1.0 / fps)

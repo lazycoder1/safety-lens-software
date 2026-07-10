@@ -21,6 +21,7 @@ import model_manager
 import state
 from config_manager import get_config, get_redacted_config
 from logging_config import LOGS_DIR
+from mjpeg_fanout import stream_fanout
 
 logger = logging.getLogger("safetylens.diagnostics")
 
@@ -64,6 +65,7 @@ def build_health_snapshot() -> dict:
             enabled = bool(cam.get("enabled", True))
             worker_running = cam_id in state.camera_threads
             frame_available = state.camera_frames.get(cam_id) is not None
+            stream_stats = stream_fanout.stats(cam_id)
             if enabled:
                 enabled_cameras += 1
             if enabled and worker_running:
@@ -77,6 +79,16 @@ def build_health_snapshot() -> dict:
                     "frameAvailable": frame_available,
                     "runtimeStatus": state.camera_runtime_status.get(cam_id, "offline"),
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
+                    "stream": {
+                        "sequence": stream_stats["sequence"],
+                        "subscribers": stream_stats["subscribers"],
+                        "frameAvailable": stream_stats["has_frame"],
+                        "frameAgeSeconds": (
+                            round(stream_stats["frame_age_seconds"], 3)
+                            if stream_stats["frame_age_seconds"] is not None
+                            else None
+                        ),
+                    },
                 }
             )
 
@@ -101,6 +113,7 @@ def build_health_snapshot() -> dict:
             "license": license_status.to_public_dict(),
             "models": model_manager.list_models(),
             "cameras": cameras,
+            "streamFanout": stream_fanout.operational_stats(),
             "storage": {
                 **storage,
                 "freeBytes": free_bytes,

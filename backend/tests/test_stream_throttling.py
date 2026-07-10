@@ -1,8 +1,8 @@
-import pytest
+import asyncio
 
 import config_manager
-import state
 import video_processing
+from mjpeg_fanout import MjpegFanout, build_mjpeg_chunk
 
 
 def test_default_stream_fps_is_lower_than_capture_fps():
@@ -25,25 +25,20 @@ def test_stream_publish_due_uses_monotonic_interval():
     assert video_processing._stream_publish_due(10.0, 10.25, 4)
 
 
-def test_mjpeg_generator_paces_cached_frames_at_stream_fps(monkeypatch):
-    camera_id = "stream_test"
-    state.camera_frames[camera_id] = b"jpeg"
-    sleeps = []
-    monkeypatch.setattr(
-        video_processing,
-        "get_config",
-        lambda: {
-            "global": {"target_fps": 8, "stream_fps": 4},
-            "cameras": {camera_id: {"fps": 8}},
-        },
-    )
-    monkeypatch.setattr(video_processing.time, "sleep", sleeps.append)
+def test_stream_consumer_waits_for_next_published_sequence():
+    async def scenario():
+        hub = MjpegFanout()
+        hub.publish("stream_test", b"jpeg-a")
+        stream = hub.stream("stream_test")
+        try:
+            assert await anext(stream) == build_mjpeg_chunk(b"jpeg-a")
+            pending = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0)
+            assert pending.done() is False
 
-    generator = video_processing.mjpeg_generator(camera_id)
-    try:
-        assert b"jpeg" in next(generator)
-        assert b"jpeg" in next(generator)
-        assert sleeps == [pytest.approx(0.25)]
-    finally:
-        generator.close()
-        state.camera_frames.pop(camera_id, None)
+            hub.publish("stream_test", b"jpeg-b")
+            assert await asyncio.wait_for(pending, 1) == build_mjpeg_chunk(b"jpeg-b")
+        finally:
+            await stream.aclose()
+
+    asyncio.run(scenario())

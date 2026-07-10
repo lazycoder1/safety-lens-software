@@ -25,6 +25,8 @@ services:
       DATABASE_URL: postgresql://safetylens:${POSTGRES_PASSWORD:-safetylens}@db:5432/safetylens
       SAFETYLENS_CONFIG_STORE: postgres
       SAFETYLENS_CONFIG_REFRESH_SECONDS: ${SAFETYLENS_CONFIG_REFRESH_SECONDS:-2.0}
+      MJPEG_MAX_SUBSCRIBERS_PER_CAMERA: ${MJPEG_MAX_SUBSCRIBERS_PER_CAMERA:-16}
+      MJPEG_MAX_SUBSCRIBERS_TOTAL: ${MJPEG_MAX_SUBSCRIBERS_TOTAL:-64}
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/api/generate}
     volumes:
       - snapshots:/app/backend/snapshots

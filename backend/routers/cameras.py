@@ -25,6 +25,7 @@ from camera_planner import build_execution_plan, normalize_camera_record
 from camera_runtime import derive_camera_runtime_status
 from config_manager import get_config, save_config
 from dependencies import require_admin
+from mjpeg_fanout import stream_fanout
 from video_processing import restart_camera, start_camera, stop_camera
 
 router = APIRouter(prefix="/api", tags=["cameras"])
@@ -532,9 +533,14 @@ async def api_delete_camera(cam_id: str, request: Request):
     if cam_id not in cfg["cameras"]:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    stop_camera(cam_id)
+    if not stop_camera(cam_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Camera worker is still stopping; retry deletion",
+        )
     del cfg["cameras"][cam_id]
     save_config(cfg)
+    stream_fanout.retire(cam_id)
     audit_store.log_event(
         "camera.delete",
         target_type="camera",
