@@ -1,4 +1,5 @@
 import base64
+import threading
 
 import cv2
 import numpy as np
@@ -12,6 +13,26 @@ def _jpeg_bytes(frame):
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     assert ok
     return encoded.tobytes()
+
+
+def test_remote_http_session_is_reused_per_thread():
+    main_session = model_manager._remote_session()
+    assert model_manager._remote_session() is main_session
+    assert main_session.get_adapter("http://")._pool_maxsize == 16
+
+    worker_sessions = []
+
+    def capture_worker_session():
+        worker_sessions.extend(
+            [model_manager._remote_session(), model_manager._remote_session()]
+        )
+
+    worker = threading.Thread(target=capture_worker_session)
+    worker.start()
+    worker.join()
+
+    assert worker_sessions[0] is worker_sessions[1]
+    assert worker_sessions[0] is not main_session
 
 
 def test_edge_uses_raw_jpeg_transport(monkeypatch):

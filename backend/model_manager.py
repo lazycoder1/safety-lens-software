@@ -102,6 +102,7 @@ _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
 }
 _INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _ACTIVE_JOB_ID: str | None = None
+_REMOTE_SESSION_LOCAL = threading.local()
 
 
 def is_remote_inference_enabled() -> bool:
@@ -115,9 +116,27 @@ def _remote_headers() -> dict[str, str]:
     return headers
 
 
+def _remote_session():
+    """Return one keep-alive HTTP session per caller thread.
+
+    Camera workers call the model server concurrently, while requests.Session
+    does not promise cross-thread safety. A thread-local session keeps sockets
+    warm without sharing mutable connection-pool state between cameras.
+    """
+    session = getattr(_REMOTE_SESSION_LOCAL, "session", None)
+    if session is None:
+        import requests
+
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _REMOTE_SESSION_LOCAL.session = session
+    return session
+
+
 def _remote_get(path: str) -> dict[str, Any]:
-    import requests
-    response = requests.get(
+    response = _remote_session().get(
         f"{MODEL_SERVER_URL}{path}",
         headers=_remote_headers(),
         timeout=MODEL_SERVER_TIMEOUT_SECONDS,
@@ -127,8 +146,7 @@ def _remote_get(path: str) -> dict[str, Any]:
 
 
 def _remote_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    import requests
-    response = requests.post(
+    response = _remote_session().post(
         f"{MODEL_SERVER_URL}{path}",
         json=payload,
         headers=_remote_headers(),
@@ -145,11 +163,9 @@ def _remote_post_jpeg(
     params: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Post JPEG bytes directly, returning None when the server lacks the route."""
-    import requests
-
     headers = _remote_headers()
     headers["Content-Type"] = "image/jpeg"
-    response = requests.post(
+    response = _remote_session().post(
         f"{MODEL_SERVER_URL}{path}",
         params=params,
         data=frame_jpeg,
