@@ -106,6 +106,7 @@ class _PersistJob:
     payload: dict
     output_ids: list[str] | None
     future: Future
+    enqueued_at: float
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,10 @@ class AlertPipeline:
         self._retry_sequence = 0
         self._pending_retries = 0
         self._stats_lock = threading.Lock()
+        self._active_persist_enqueued_at: float | None = None
+        self._consecutive_persistence_failures = 0
+        self._last_persistence_failure_at: float | None = None
+        self._last_persistence_success_at: float | None = None
         self._running = False
         self._accepting = False
         self._active_submitters = 0
@@ -194,6 +199,7 @@ class AlertPipeline:
             "persistence_failures": 0,
             "callback_failures": 0,
             "delivered": 0,
+            "outbox_handoffs": 0,
             "delivery_failures": 0,
             "partially_delivered": 0,
             "delivery_attempts": 0,
@@ -261,6 +267,7 @@ class AlertPipeline:
             payload=copy.deepcopy(payload),
             output_ids=list(output_ids) if output_ids is not None else None,
             future=future,
+            enqueued_at=time.monotonic(),
         )
         # Register accepted producers before touching the bounded queue.
         # Shutdown closes admission, then waits for these producers to enqueue;
@@ -372,6 +379,15 @@ class AlertPipeline:
         """Return counters and queue depths for diagnostics."""
         with self._stats_lock:
             result = dict(self._counters)
+            active_persist_enqueued_at = self._active_persist_enqueued_at
+            result.update({
+                "consecutive_persistence_failures": (
+                    self._consecutive_persistence_failures
+                ),
+                "last_persistence_failure_at": self._last_persistence_failure_at,
+                "last_persistence_success_at": self._last_persistence_success_at,
+                "persistence_in_flight": active_persist_enqueued_at is not None,
+            })
         with self._lifecycle_lock:
             result["running"] = self._running
             result["accepting"] = self._accepting
@@ -387,8 +403,38 @@ class AlertPipeline:
             )
         with self._retry_condition:
             pending_retries = self._pending_retries
+        # Queue.Queue has no public peek operation. Reading its bounded deque
+        # under the queue's own mutex gives diagnostics a race-free snapshot
+        # without maintaining a second, potentially divergent job registry.
+        with self._persist_queue.mutex:
+            queued_persist_enqueued_at = (
+                self._persist_queue.queue[0].enqueued_at
+                if self._persist_queue.queue
+                else None
+            )
+        oldest_persist_enqueued_at = min(
+            (
+                enqueued_at
+                for enqueued_at in (
+                    active_persist_enqueued_at,
+                    queued_persist_enqueued_at,
+                )
+                if enqueued_at is not None
+            ),
+            default=None,
+        )
+        oldest_persistence_age = (
+            max(0.0, time.monotonic() - oldest_persist_enqueued_at)
+            if oldest_persist_enqueued_at is not None
+            else None
+        )
         result.update({
             "persist_queue_depth": self._persist_queue.qsize(),
+            "oldest_persistence_age_seconds": (
+                round(oldest_persistence_age, 3)
+                if oldest_persistence_age is not None
+                else None
+            ),
             "delivery_queue_depth": self._delivery_queue.qsize(),
             "delivery_retry_queue_depth": pending_retries,
             "delivery_retry_queue_capacity": self._delivery_retry_queue_size,
@@ -401,14 +447,18 @@ class AlertPipeline:
                 job = self._persist_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
+            with self._stats_lock:
+                self._active_persist_enqueued_at = job.enqueued_at
             try:
                 try:
                     self._persist(job)
                 except Exception as exc:
-                    self._increment("persistence_failures")
+                    self._record_persistence_failure()
                     self._set_future_exception(job.future, exc)
                     logger.exception("Unexpected alert persistence worker failure")
             finally:
+                with self._stats_lock:
+                    self._active_persist_enqueued_at = None
                 self._persist_queue.task_done()
 
     def _persist(self, job: _PersistJob) -> None:
@@ -436,7 +486,7 @@ class AlertPipeline:
                         time.sleep(self._retry_delay)
 
         if alert is None:
-            self._increment("persistence_failures")
+            self._record_persistence_failure()
             if last_error is None:
                 last_error = RuntimeError("Alert persistence returned no alert")
             self._set_future_exception(job.future, last_error)
@@ -447,7 +497,7 @@ class AlertPipeline:
             )
             return
 
-        self._increment("persisted")
+        self._record_persistence_success()
         if self._on_persisted is not None:
             try:
                 self._on_persisted(alert)
@@ -522,6 +572,9 @@ class AlertPipeline:
                     failed_output_ids=set(terminal_output_ids),
                     exhausted=False,
                 )
+            elif outcome.handled_output_ids and not delivered_output_ids:
+                if "durable_outbox" in outcome.handled_output_ids:
+                    self._increment("outbox_handoffs")
             else:
                 self._increment("delivered")
             return
@@ -774,3 +827,15 @@ class AlertPipeline:
     def _increment(self, key: str) -> None:
         with self._stats_lock:
             self._counters[key] += 1
+
+    def _record_persistence_failure(self) -> None:
+        with self._stats_lock:
+            self._counters["persistence_failures"] += 1
+            self._consecutive_persistence_failures += 1
+            self._last_persistence_failure_at = time.time()
+
+    def _record_persistence_success(self) -> None:
+        with self._stats_lock:
+            self._counters["persisted"] += 1
+            self._consecutive_persistence_failures = 0
+            self._last_persistence_success_at = time.time()

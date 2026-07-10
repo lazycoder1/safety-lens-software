@@ -111,7 +111,7 @@ def test_send_alert_correct_caption_format(mock_post, mock_cfg):
 
     call_kwargs = mock_post.call_args
     text = call_kwargs[1]["json"]["text"]
-    assert "*P1*" in text
+    assert "P1 —" in text
     assert "No Helmet" in text
     assert "Welding Bay" in text
     assert "Zone A" in text
@@ -155,7 +155,7 @@ def test_test_connection_failure(mock_post):
 
     result = telegram_notifier.test_connection("bad_tok", "chat456")
     assert result["ok"] is False
-    assert "Unauthorized" in result["error"]
+    assert result["error"] == "Telegram HTTP 401: request rejected"
 
 
 @mock.patch("telegram_notifier.requests.post", side_effect=ConnectionError("no network"))
@@ -180,7 +180,7 @@ def test_fetch_groups_reports_http_200_api_rejection(mock_get):
 
     assert result["ok"] is False
     assert result["groups"] == []
-    assert "Unauthorized bot token" in result["error"]
+    assert result["error"] == "Telegram API rejected request"
 
 
 @mock.patch("telegram_notifier.requests.get")

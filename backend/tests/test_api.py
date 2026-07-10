@@ -18,12 +18,14 @@ _test_snapshots = Path(_tmpdir) / "snapshots"
 _test_config = Path(_tmpdir) / "test_config.json"
 
 import alert_store
+import alert_delivery_store
 import audit_store
 alert_store.SNAPSHOTS_DIR = _test_snapshots
 
 import error_store
 import auth_store
 import config_manager
+import notification_dispatcher
 config_manager.CONFIG_PATH = _test_config
 
 # Mock YOLO so server doesn't try to load real models
@@ -56,7 +58,7 @@ def fresh_state():
     # Truncate alerts table
     with alert_store._get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE alerts")
+            cur.execute("TRUNCATE TABLE alert_delivery_outbox, alerts")
             cur.execute("TRUNCATE TABLE error_log")
         conn.commit()
 
@@ -382,6 +384,124 @@ def test_false_positive_not_found():
     assert resp.status_code == 404
 
 
+def test_admin_can_explicitly_replay_recent_ambiguous_terminal_delivery():
+    alert = _create_test_alert(
+        delivery_targets=[
+            {
+                "kind": "initial",
+                "channel": "webhook",
+                "target_key": "initial:webhook:test",
+                "context": {},
+                "priority": 1,
+                "delay_seconds": 0,
+            }
+        ]
+    )
+    claimed = alert_delivery_store.claim_due(worker_id="test", lease_seconds=30)
+    assert alert_delivery_store.mark_terminal(
+        str(claimed["id"]),
+        str(claimed["lease_token"]),
+        error_code="read_timeout",
+        error_message="acceptance unknown",
+        acceptance_unknown=True,
+    )
+    delivery_id = str(claimed["id"])
+
+    refused = api_post(
+        f"/api/alert-deliveries/{delivery_id}/replay",
+        json={"allowAmbiguous": False},
+    )
+    assert refused.status_code == 409
+
+    with mock.patch("routers.alerts.alert_delivery_worker.wake") as wake:
+        replayed = api_post(
+            f"/api/alert-deliveries/{delivery_id}/replay",
+            json={"allowAmbiguous": True},
+        )
+    assert replayed.status_code == 200
+    assert replayed.json()["state"] == "pending"
+    wake.assert_called_once()
+    event = next(
+        item
+        for item in audit_store.get_recent(limit=20)
+        if item["action"] == "alert.delivery_replay"
+    )
+    assert event["targetId"] == delivery_id
+    assert event["details"]["everAcceptanceUnknown"] is True
+
+
+def test_admin_can_discover_terminal_delivery_ids_without_destination_secrets():
+    alert = _create_test_alert(
+        delivery_targets=[
+            {
+                "kind": "initial",
+                "channel": "webhook",
+                "target_key": "initial:webhook:secret-destination",
+                "context": {"url": "https://secret.example/hook", "token": "must-not-leak"},
+                "priority": 1,
+                "delay_seconds": 0,
+            }
+        ]
+    )
+    claimed = alert_delivery_store.claim_due(worker_id="test", lease_seconds=30)
+    assert alert_delivery_store.mark_terminal(
+        str(claimed["id"]),
+        str(claimed["lease_token"]),
+        error_code="invalid_configuration",
+        error_message="secret provider detail",
+    )
+
+    response = api_get(f"/api/alert-deliveries?state=terminal&alertId={alert['id']}")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    assert rows[0]["deliveryId"] == str(claimed["id"])
+    assert rows[0]["alertId"] == alert["id"]
+    assert rows[0]["state"] == "terminal"
+    assert rows[0]["channel"] == "webhook"
+    serialized = json.dumps(rows)
+    assert "secret-destination" not in serialized
+    assert "secret.example" not in serialized
+    assert "must-not-leak" not in serialized
+    assert "secret provider detail" not in serialized
+
+
+def test_replay_audit_failure_leaves_delivery_terminal():
+    alert = _create_test_alert(
+        delivery_targets=[
+            {
+                "kind": "initial",
+                "channel": "webhook",
+                "target_key": "initial:webhook:test",
+                "context": {},
+                "priority": 1,
+                "delay_seconds": 0,
+            }
+        ]
+    )
+    claimed = alert_delivery_store.claim_due(worker_id="test", lease_seconds=30)
+    assert alert_delivery_store.mark_terminal(
+        str(claimed["id"]),
+        str(claimed["lease_token"]),
+        error_code="invalid_configuration",
+        error_message="fix config first",
+    )
+    delivery_id = str(claimed["id"])
+
+    with mock.patch(
+        "routers.alerts.audit_store.log_event",
+        side_effect=RuntimeError("audit database unavailable"),
+    ):
+        response = api_post(
+            f"/api/alert-deliveries/{delivery_id}/replay",
+            json={"allowAmbiguous": False},
+        )
+
+    assert response.status_code == 500
+    assert alert_delivery_store.get_delivery(delivery_id)["state"] == "terminal"
+
+
 # ── GET /api/snapshots/{filename} ────────────────────────────────────────────
 
 def test_serve_snapshot():
@@ -630,6 +750,23 @@ def test_update_vlm_config():
     assert data["interval"] == 60
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"interval": 0},
+        {"temperature": -0.1},
+        {"max_tokens": 1000000},
+    ],
+)
+def test_vlm_config_rejects_resource_abusive_values(payload):
+    before = json.loads(json.dumps(config_manager.get_config()["vlm"]))
+
+    response = api_put("/api/config/vlm", json=payload)
+
+    assert response.status_code == 422
+    assert config_manager.get_config()["vlm"] == before
+
+
 # ── Telegram config endpoints ────────────────────────────────────────────────
 
 def test_telegram_config_endpoint():
@@ -641,10 +778,93 @@ def test_telegram_config_endpoint():
     assert data["chat_id"] == "456"
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "section"),
+    [
+        (
+            "/api/config/telegram",
+            {"enabled": True, "bot_token": "token-without-destination"},
+            "telegram",
+        ),
+        (
+            "/api/config/email",
+            {
+                "enabled": True,
+                "smtp_host": "smtp.example.com",
+                "from_address": "alerts@example.com",
+            },
+            "email",
+        ),
+        ("/api/config/webhook", {"enabled": True}, "webhook"),
+    ],
+)
+def test_notification_provider_rejects_incomplete_enabled_config_without_mutating_cache(
+    endpoint,
+    payload,
+    section,
+):
+    before = json.loads(json.dumps(config_manager.get_config()[section]))
+
+    resp = api_put(endpoint, json=payload)
+
+    assert resp.status_code == 422
+    assert "incomplete configuration" in resp.json()["detail"]
+    assert config_manager.get_config()[section] == before
+
+
+def test_notification_provider_partial_update_validates_merged_config():
+    assert api_put(
+        "/api/config/telegram",
+        json={"enabled": True, "bot_token": "tok123", "chat_id": "456"},
+    ).status_code == 200
+
+    assert api_put(
+        "/api/config/telegram",
+        json={"severities": ["P1", "P2", "P3"]},
+    ).status_code == 200
+
+    rejected = api_put("/api/config/telegram", json={"chat_id": "   "})
+    assert rejected.status_code == 422
+    stored = config_manager.get_config()["telegram"]
+    assert stored["bot_token"] == "tok123"
+    assert stored["chat_id"] == "456"
+    assert stored["severities"] == ["P1", "P2", "P3"]
+
+
+def test_email_rejects_half_configured_authentication_pair():
+    resp = api_put(
+        "/api/config/email",
+        json={
+            "enabled": True,
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "smtp_user": "mailer",
+            "from_address": "alerts@example.com",
+            "to_addresses": ["safety@example.com"],
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "smtp_user/smtp_pass" in resp.json()["detail"]
+
+
 def test_redacted_notification_credentials_are_preserved_on_update():
     cfg = config_manager.get_config()
-    cfg["telegram"]["bot_token"] = "original-telegram-token"
-    cfg["email"]["smtp_pass"] = "original-smtp-password"
+    cfg["telegram"].update(
+        {
+            "bot_token": "original-telegram-token",
+            "chat_id": "original-chat",
+        }
+    )
+    cfg["email"].update(
+        {
+            "smtp_host": "smtp.example.com",
+            "smtp_user": "original-smtp-user",
+            "smtp_pass": "original-smtp-password",
+            "from_address": "alerts@example.com",
+            "to_addresses": ["safety@example.com"],
+        }
+    )
     cfg["webhook"].update({
         "url": "https://hooks.example/original",
         "headers": {"Authorization": "Bearer original", "X-Key": "original-key"},
@@ -691,6 +911,14 @@ def test_redacted_notification_credentials_are_preserved_on_update():
     )
     assert new_webhook_url not in json.dumps(webhook_audit)
     assert webhook_audit["details"]["updates"]["url"] == "***redacted***"
+    webhook_audits = [
+        event
+        for event in audit_store.get_recent(limit=50)
+        if event["action"] == "config.webhook_update"
+    ]
+    serialized_audits = json.dumps(webhook_audits)
+    assert "Bearer original" not in serialized_audits
+    assert "original-key" not in serialized_audits
 
 
 @mock.patch("telegram_notifier.test_connection")
@@ -704,6 +932,24 @@ def test_telegram_test_endpoint(mock_test):
 # ── Alert routing config endpoints ───────────────────────────────────────────
 
 def test_alert_routing_normalizes_supported_escalation_channels():
+    assert api_put(
+        "/api/config/telegram",
+        json={
+            "enabled": True,
+            "bot_token": "123456:telegram-token",
+            "chat_id": "456",
+        },
+    ).status_code == 200
+    assert api_put(
+        "/api/config/email",
+        json={
+            "enabled": True,
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "from_address": "alerts@example.com",
+            "to_addresses": ["safety@example.com"],
+        },
+    ).status_code == 200
     resp = api_put(
         "/api/config/alert-routing",
         json={
@@ -716,6 +962,132 @@ def test_alert_routing_normalizes_supported_escalation_channels():
 
     assert resp.status_code == 200
     assert [step["channel"] for step in resp.json()["escalation_steps"]] == ["telegram", "email"]
+    assert all(step["enabled"] is True for step in resp.json()["escalation_steps"])
+    assert all(step["severities"] == ["P1", "P2"] for step in resp.json()["escalation_steps"])
+
+
+def test_alert_routing_rejects_active_escalation_with_disabled_provider_without_saving():
+    before = json.loads(
+        json.dumps(config_manager.get_config()["alert_routing"]["escalation_steps"])
+    )
+
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={
+            "escalation_steps": [
+                {
+                    "id": 7,
+                    "afterMinutes": 3,
+                    "role": "Manager",
+                    "channel": "telegram",
+                }
+            ],
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "provider" in resp.json()["detail"]
+    assert config_manager.get_config()["alert_routing"]["escalation_steps"] == before
+
+
+def test_alert_routing_rejects_duplicate_enabled_step_identity_without_saving():
+    assert api_put(
+        "/api/config/email",
+        json={
+            "enabled": True,
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "from_address": "alerts@example.com",
+            "to_addresses": ["safety@example.com"],
+        },
+    ).status_code == 200
+    before = json.loads(
+        json.dumps(config_manager.get_config()["alert_routing"]["escalation_steps"])
+    )
+
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={
+            "escalation_steps": [
+                {
+                    "id": 7,
+                    "afterMinutes": 3,
+                    "role": "Manager",
+                    "channel": "email",
+                },
+                {
+                    "id": "7",
+                    "afterMinutes": 10,
+                    "role": "Director",
+                    "channel": "email",
+                },
+            ],
+        },
+    )
+
+    assert resp.status_code == 422
+    assert "unique id per channel" in resp.json()["detail"]
+    assert config_manager.get_config()["alert_routing"]["escalation_steps"] == before
+
+
+def test_disabled_escalation_step_does_not_require_or_create_provider_work():
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={
+            "escalation_steps": [
+                {
+                    "id": 7,
+                    "enabled": False,
+                    "afterMinutes": 3,
+                    "role": "Manager",
+                    "channel": "telegram",
+                }
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    targets = notification_dispatcher.resolve_delivery_targets(
+        config_manager.get_config(),
+        {"id": "alert", "severity": "P1"},
+    )
+    assert targets == []
+
+
+def test_active_escalation_prevents_later_provider_disable_or_scope_removal():
+    assert api_put(
+        "/api/config/telegram",
+        json={
+            "enabled": True,
+            "bot_token": "123456:telegram-token",
+            "chat_id": "456",
+            "severities": ["P1", "P2"],
+        },
+    ).status_code == 200
+    assert api_put(
+        "/api/config/alert-routing",
+        json={
+            "escalation_steps": [
+                {
+                    "id": 7,
+                    "afterMinutes": 3,
+                    "role": "Manager",
+                    "channel": "telegram",
+                    "severities": ["P1", "P2"],
+                }
+            ],
+        },
+    ).status_code == 200
+
+    disabled = api_put("/api/config/telegram", json={"enabled": False})
+    narrowed = api_put("/api/config/telegram", json={"severities": ["P1"]})
+
+    assert disabled.status_code == 422
+    assert narrowed.status_code == 422
+    assert "filters a severity required by the step" in narrowed.json()["detail"]
+    stored = config_manager.get_config()["telegram"]
+    assert stored["enabled"] is True
+    assert stored["severities"] == ["P1", "P2"]
 
 
 def test_alert_routing_rejects_unimplemented_escalation_channel():
@@ -730,6 +1102,76 @@ def test_alert_routing_rejects_unimplemented_escalation_channel():
 
     assert resp.status_code == 422
     assert "Unsupported escalation channel: sms" in resp.json()["detail"]
+
+
+def test_alert_routing_rejects_enabled_unimplemented_matrix_channel_without_saving():
+    before = json.loads(
+        json.dumps(config_manager.get_config()["alert_routing"]["channel_matrix"])
+    )
+
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={"channel_matrix": {"P1": {"inApp": True, "sms": True}}},
+    )
+
+    assert resp.status_code == 422
+    assert "Unsupported enabled alert-routing channel: sms" in resp.json()["detail"]
+    assert config_manager.get_config()["alert_routing"]["channel_matrix"] == before
+
+
+def test_alert_routing_rejects_provider_that_is_not_ready():
+    disabled = api_put(
+        "/api/config/alert-routing",
+        json={"channel_matrix": {"P1": {"telegram": True}}},
+    )
+    assert disabled.status_code == 422
+    assert "provider is disabled" in disabled.json()["detail"]
+
+    cfg = config_manager.get_config()
+    cfg["telegram"].update({"enabled": True, "bot_token": "token", "chat_id": ""})
+    config_manager.save_config(cfg)
+    incomplete = api_put(
+        "/api/config/alert-routing",
+        json={"channel_matrix": {"P1": {"telegram": True}}},
+    )
+    assert incomplete.status_code == 422
+    assert "incomplete provider configuration" in incomplete.json()["detail"]
+
+
+def test_alert_routing_accepts_ready_provider_and_prevents_disabling_it():
+    assert api_put(
+        "/api/config/telegram",
+        json={"enabled": True, "bot_token": "tok123", "chat_id": "456"},
+    ).status_code == 200
+    routed = api_put(
+        "/api/config/alert-routing",
+        json={"channel_matrix": {"P1": {"inApp": True, "telegram": True}}},
+    )
+    assert routed.status_code == 200
+
+    disable = api_put("/api/config/telegram", json={"enabled": False})
+    assert disable.status_code == 422
+    assert "provider is disabled" in disable.json()["detail"]
+    assert config_manager.get_config()["telegram"]["enabled"] is True
+
+
+def test_alert_routing_rejects_provider_severity_filter_conflict():
+    assert api_put(
+        "/api/config/webhook",
+        json={
+            "enabled": True,
+            "url": "https://hooks.example/safety",
+            "severities": ["P2"],
+        },
+    ).status_code == 200
+
+    resp = api_put(
+        "/api/config/alert-routing",
+        json={"channel_matrix": {"P1": {"webhook": True}}},
+    )
+
+    assert resp.status_code == 422
+    assert "provider filters that severity" in resp.json()["detail"]
 
 
 @mock.patch("notification_dispatcher.notify_with_results")

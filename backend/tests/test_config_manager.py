@@ -523,6 +523,16 @@ def test_get_config_returns_cached():
     assert cfg1 is cfg2
 
 
+def test_get_config_snapshot_is_detached_from_cached_generation():
+    cached = config_manager.get_config()
+    snapshot = config_manager.get_config_snapshot()
+
+    assert snapshot == cached
+    assert snapshot is not cached
+    snapshot["webhook"]["url"] = "https://changed.example/hook"
+    assert cached["webhook"]["url"] == ""
+
+
 def test_get_config_refreshes_changed_postgres_record(monkeypatch):
     cached = deepcopy(config_manager.DEFAULT_CONFIG)
     updated = deepcopy(config_manager.DEFAULT_CONFIG)

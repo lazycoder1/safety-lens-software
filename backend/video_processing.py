@@ -5,17 +5,23 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import os
+import re
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import cv2
 import numpy as np
 import requests
 
+import alert_delivery_store
+import alert_delivery_worker
 import alert_store
 import face_analyzer
 import face_store
@@ -37,8 +43,14 @@ from alert_pipeline import AlertPipeline, DeliveryOutcome
 from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan, required_model_keys_for_capabilities
 from capability_registry import CAPABILITY_REGISTRY, CLASS_TERM_TO_CAPABILITY, RULE_ID_TO_CAPABILITY
-from config_manager import get_config
-from constants import COCO_NAMES, OLLAMA_URL, VIDEO_DIR, VIOLATION_THRESHOLD
+from config_manager import get_config, get_config_snapshot
+from constants import (
+    COCO_NAMES,
+    OLLAMA_URL,
+    VIDEO_DIR,
+    VIOLATION_THRESHOLD,
+    VLM_TIMEOUT_SECONDS,
+)
 from detection import (
     apply_camera_overlay,
     check_fall_detections,
@@ -62,6 +74,9 @@ RTSP_BUFFER_DRAIN_BLOCK_SECONDS = 0.012
 logger = logging.getLogger("rakshak_lens")
 
 _camera_watchdog_restart_at: dict[str, float] = {}
+# Compatibility state retained for lifecycle cleanup and older integrations;
+# the feature-rich pipeline passes fresh pose results explicitly.
+_last_pose_results: dict[str, object] = {}
 
 
 def _is_executor_shutdown_error(exc: RuntimeError) -> bool:
@@ -282,46 +297,76 @@ def _clear_camera_observation(camera_id: str) -> None:
 _alert_pipeline: AlertPipeline | None = None
 _alert_pipeline_lock = threading.Lock()
 _alert_event_loop: asyncio.AbstractEventLoop | None = None
+_alert_backfill_task: asyncio.Task | None = None
+_alert_reconciliation_task: asyncio.Task | None = None
 
 
-def _alert_delivery(alert: dict, output_ids: list[str] | None = None) -> DeliveryOutcome:
-    snap_url = alert.get("snapshotUrl")
-    snap_full = str(alert_store.SNAPSHOTS_DIR / snap_url.split("/")[-1]) if snap_url else None
-    results = notification_dispatcher.notify(alert, snap_full, output_ids=output_ids)
+def _outbox_handoff(
+    alert: dict,
+    output_ids: list[str] | None = None,
+) -> DeliveryOutcome:
+    """Wake durable workers and retain feature-only output adapters."""
+    alert_delivery_worker.wake()
+    try:
+        cfg = get_config_snapshot()
+    except Exception:
+        # The durable handoff itself is complete even when optional feature
+        # output discovery is temporarily unavailable.
+        logger.warning("Feature output discovery failed after durable outbox handoff")
+        return DeliveryOutcome(handled_output_ids=("durable_outbox",))
+    requested = None if output_ids is None else {str(value) for value in output_ids}
+    direct_output_ids: list[str] = []
+    handled = ["durable_outbox"]
+    for output in cfg.get("alert_outputs", []):
+        if not isinstance(output, dict):
+            continue
+        output_id = str(output.get("id") or "")
+        if not output_id or (requested is not None and output_id not in requested):
+            continue
+        if requested is None and not output.get("enabled", False):
+            continue
+        output_type = str(output.get("type") or "").strip().lower()
+        if output_type in {"in_app", "inapp", "browser_sound"}:
+            handled.append(output_id)
+        elif output_type not in {"telegram", "email", "webhook"}:
+            direct_output_ids.append(output_id)
+
+    if not direct_output_ids:
+        return DeliveryOutcome(handled_output_ids=tuple(handled))
+
+    results = notification_dispatcher.notify(
+        alert,
+        _alert_snapshot_path(alert),
+        output_ids=direct_output_ids,
+    )
     delivered: list[str] = []
     retry: list[str] = []
     terminal: list[str] = []
-    handled: list[str] = []
     classified: set[str] = set()
     for result in results:
-        target_id = str(result.get("outputId") or "unknown").strip().lower()
-        classified.add(target_id)
-        if result.get("type") == "in_app":
-            # Persistence/WebSocket handling is tracked separately from the
-            # external delivery worker and must not create a false "partial".
-            handled.append(target_id)
-            continue
-        if result.get("status") in {
-            notification_dispatcher.DELIVERED,
-            notification_dispatcher.SIMULATED,
-        }:
-            delivered.append(target_id)
-        elif result.get("status") == notification_dispatcher.FAILED:
-            retry.append(target_id)
+        output_id = str(result.get("outputId") or "unknown")
+        classified.add(output_id)
+        status = result.get("status")
+        if status in {notification_dispatcher.DELIVERED, notification_dispatcher.SIMULATED}:
+            delivered.append(output_id)
+        elif status == notification_dispatcher.FAILED:
+            retry.append(output_id)
         else:
-            terminal.append(target_id)
-    if output_ids is not None:
-        terminal.extend(
-            output_id
-            for output_id in output_ids
-            if output_id.strip().lower() not in classified
-        )
+            terminal.append(output_id)
+    terminal.extend(output_id for output_id in direct_output_ids if output_id not in classified)
     return DeliveryOutcome(
         delivered_output_ids=tuple(delivered),
         retry_output_ids=tuple(retry),
         terminal_output_ids=tuple(terminal),
         handled_output_ids=tuple(handled),
     )
+
+
+def _alert_snapshot_path(alert: dict) -> str | None:
+    snapshot_url = alert.get("snapshotUrl")
+    if not snapshot_url:
+        return None
+    return str(alert_store.SNAPSHOTS_DIR / str(snapshot_url).split("/")[-1])
 
 
 def _broadcast_persisted_alert(alert: dict) -> None:
@@ -352,11 +397,11 @@ def _get_alert_pipeline() -> AlertPipeline:
             if _alert_pipeline is None:
                 _alert_pipeline = AlertPipeline(
                     persist_alert=alert_store.create_alert,
-                    deliver_alert=_alert_delivery,
+                    deliver_alert=_outbox_handoff,
                     on_persisted=_broadcast_persisted_alert,
                     persist_queue_size=int(os.getenv("ALERT_PERSIST_QUEUE_SIZE", "256")),
                     delivery_queue_size=int(os.getenv("ALERT_DELIVERY_QUEUE_SIZE", "256")),
-                    delivery_workers=int(os.getenv("ALERT_DELIVERY_WORKERS", "4")),
+                    delivery_workers=int(os.getenv("ALERT_DELIVERY_WORKERS", "1")),
                     delivery_attempts=int(os.getenv("ALERT_DELIVERY_ATTEMPTS", "3")),
                     delivery_retry_delay=float(
                         os.getenv("ALERT_DELIVERY_RETRY_DELAY_SECONDS", "1.0")
@@ -374,17 +419,140 @@ def start_alert_pipeline() -> None:
         _alert_event_loop = asyncio.get_running_loop()
     except RuntimeError:
         logger.warning("Starting alert pipeline without a websocket event loop")
-    _get_alert_pipeline().start()
+        _alert_event_loop = None
+
+    pipeline = None
+    try:
+        alert_delivery_worker.start()
+        pipeline = _get_alert_pipeline()
+        pipeline.start()
+    except Exception:
+        if pipeline is not None:
+            try:
+                pipeline.shutdown(wait=False, timeout=1.0)
+            except Exception:
+                logger.error("Legacy alert pipeline rollback failed")
+        try:
+            alert_delivery_worker.stop(1.0)
+        except Exception:
+            logger.error("Durable alert worker rollback failed")
+        _alert_event_loop = None
+        raise
+
+
+async def start_alert_delivery_workers() -> None:
+    """Reconcile state, bound startup work, then continue migration online."""
+    global _alert_backfill_task, _alert_reconciliation_task
+    resolved, stale_has_more = await asyncio.to_thread(
+        alert_store.auto_resolve_stale_alerts_batch
+    )
+    if resolved:
+        logger.info(
+            "Reconciled bounded stale-alert startup batch",
+            extra={"alert_count": resolved, "has_more": stale_has_more},
+        )
+    cfg = get_config_snapshot()
+    active_alert_cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=alert_store.AUTO_RESOLVE_MAX_AGE_HOURS)
+    ).isoformat()
+    backfilled, cursor = await asyncio.to_thread(
+        alert_delivery_store.backfill_active_escalations_batch,
+        cfg,
+        notification_dispatcher.resolve_delivery_targets,
+        minimum_timestamp=active_alert_cutoff,
+    )
+    if backfilled:
+        logger.info("Backfilled durable escalation work", extra={"delivery_count": backfilled})
+    start_alert_pipeline()
+    if stale_has_more:
+        _alert_reconciliation_task = asyncio.create_task(
+            _continue_stale_alert_reconciliation(),
+            name="alert-stale-reconciliation",
+        )
+    if cursor is not None:
+        _alert_backfill_task = asyncio.create_task(
+            _continue_alert_delivery_backfill(cfg, cursor, active_alert_cutoff),
+            name="alert-escalation-backfill",
+        )
+
+
+async def _continue_stale_alert_reconciliation() -> None:
+    """Finish stale-alert reconciliation after workers begin serving."""
+    global _alert_reconciliation_task
+    try:
+        resolved = await alert_store.reconcile_stale_alerts()
+        if resolved:
+            logger.info(
+                "Completed background stale-alert reconciliation",
+                extra={"alert_count": resolved},
+            )
+    except Exception as exc:
+        logger.error(
+            "Background stale-alert reconciliation stopped; periodic scan will retry",
+            extra={"error_type": type(exc).__name__},
+        )
+    finally:
+        _alert_reconciliation_task = None
+
+
+async def _continue_alert_delivery_backfill(
+    cfg: dict,
+    cursor: str,
+    minimum_timestamp: str,
+) -> None:
+    """Finish an upgrade scan in bounded transactions after serving starts."""
+    global _alert_backfill_task
+    total = 0
+    try:
+        while cursor is not None:
+            inserted, cursor = await asyncio.to_thread(
+                alert_delivery_store.backfill_active_escalations_batch,
+                cfg,
+                notification_dispatcher.resolve_delivery_targets,
+                after_id=cursor,
+                minimum_timestamp=minimum_timestamp,
+            )
+            total += inserted
+            await asyncio.sleep(0)
+        if total:
+            logger.info(
+                "Completed background escalation backfill",
+                extra={"delivery_count": total},
+            )
+    except Exception as exc:
+        logger.error(
+            "Background escalation backfill stopped; restart will resume idempotently",
+            extra={"error_type": type(exc).__name__},
+        )
+    finally:
+        _alert_backfill_task = None
 
 
 def stop_alert_pipeline(timeout: float = 10.0) -> bool:
     global _alert_event_loop
-    if _alert_pipeline is None:
+    deadline = time.monotonic() + max(0.0, timeout)
+    drained = True
+    outbox_stopped = False
+    try:
+        if _alert_pipeline is not None:
+            try:
+                drained = _alert_pipeline.shutdown(
+                    wait=True,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+            except Exception:
+                drained = False
+                logger.error("Legacy alert pipeline shutdown failed")
+    finally:
+        try:
+            outbox_stopped = alert_delivery_worker.stop(
+                max(0.0, deadline - time.monotonic())
+            )
+        except Exception:
+            logger.error("Durable alert worker shutdown failed")
         _alert_event_loop = None
-        return True
-    drained = _alert_pipeline.shutdown(wait=True, timeout=timeout)
-    _alert_event_loop = None
-    return drained
+    return drained and outbox_stopped
 
 
 def get_alert_pipeline_stats() -> dict:
@@ -393,8 +561,14 @@ def get_alert_pipeline_stats() -> dict:
             "submitted": 0,
             "persisted": 0,
             "persistence_failures": 0,
+            "consecutive_persistence_failures": 0,
+            "last_persistence_failure_at": None,
+            "last_persistence_success_at": None,
+            "persistence_in_flight": False,
+            "oldest_persistence_age_seconds": None,
             "callback_failures": 0,
             "delivered": 0,
+            "outbox_handoffs": 0,
             "delivery_failures": 0,
             "partially_delivered": 0,
             "delivery_attempts": 0,
@@ -413,8 +587,34 @@ def get_alert_pipeline_stats() -> dict:
             "persist_worker_alive": False,
             "retry_worker_alive": False,
             "delivery_workers_alive": 0,
+            "outbox": {
+                "pending": 0,
+                "due": 0,
+                "scheduled": 0,
+                "leased": 0,
+                "expired_leases": 0,
+                "delivered": 0,
+                "terminal": 0,
+                "cancelled": 0,
+                "ambiguous_history": 0,
+                "oldest_due_age_seconds": None,
+                "oldest_pending_age_seconds": None,
+                "running": False,
+                "workers_alive": 0,
+                "claimer_alive": False,
+                "renewer_alive": False,
+                "active_sends": 0,
+                "channel_inflight": {},
+                "claim_errors": 0,
+                "renewal_failures": 0,
+                "fencing_failures": 0,
+                "last_claim_at": None,
+                "last_delivery_at": None,
+            },
         }
-    return _alert_pipeline.stats()
+    stats = _alert_pipeline.stats()
+    stats["outbox"] = alert_delivery_worker.stats()
+    return stats
 
 
 def _encode_alert_snapshot_pair(
@@ -832,7 +1032,7 @@ def create_alert(
     snapshot_jpeg: bytes | None = None,
     clean_snapshot_jpeg: bytes | None = None,
 ):
-    cfg = get_config()
+    cfg = get_config_snapshot()
     cam = cfg["cameras"].get(camera_id, {})
     if snapshot_jpeg is None:
         snapshot_jpeg = state.camera_frames.get(camera_id)
@@ -840,8 +1040,34 @@ def create_alert(
     if not snapshot_jpeg:
         logger.debug("Skipping alert — no frame captured yet", extra={"camera_id": camera_id, "rule": rule})
         return None
+    alert_id = str(uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    try:
+        delivery_targets = notification_dispatcher.resolve_delivery_targets(
+            cfg,
+            {
+                "id": alert_id,
+                "severity": severity,
+                "timestamp": timestamp,
+                "cameraId": camera_id,
+            },
+            output_ids=output_ids,
+        )
+        if not isinstance(delivery_targets, list) or any(
+            not isinstance(target, dict) for target in delivery_targets
+        ):
+            raise TypeError("Delivery target resolver returned an invalid value")
+    except Exception:
+        delivery_targets = []
+        logger.error(
+            "Notification routing is invalid; persisting alert without external targets",
+            extra={"alert_id": alert_id, "camera_id": camera_id},
+        )
     return _get_alert_pipeline().submit(
         {
+            "alert_id": alert_id,
+            "timestamp": timestamp,
+            "delivery_targets": delivery_targets,
             "camera_id": camera_id,
             "camera_name": cam.get("name", camera_id),
             "zone": cam.get("zone", "Unknown"),
@@ -885,7 +1111,10 @@ def call_vlm(frame: np.ndarray) -> str:
             OLLAMA_URL,
             json={
                 "model": vlm_cfg["model"],
-                "prompt": vlm_cfg["prompt"],
+                "prompt": (
+                    f"{vlm_cfg['prompt']}\n\n"
+                    "End your response with exactly STATUS: SAFE or STATUS: VIOLATION."
+                ),
                 "images": [img_b64],
                 "stream": False,
                 "options": {
@@ -893,26 +1122,119 @@ def call_vlm(frame: np.ndarray) -> str:
                     "num_predict": vlm_cfg["max_tokens"],
                 },
             },
-            timeout=120,
+            timeout=(5.0, VLM_TIMEOUT_SECONDS),
         )
 
         if resp.status_code == 200:
             return resp.json().get("response", "No response from VLM")
         return f"VLM error: {resp.status_code}"
     except Exception as exc:
-        return f"VLM unavailable: {exc}"
+        logger.warning(
+            "VLM request failed",
+            extra={"error_phase": "vlm_request", "error_type": type(exc).__name__},
+        )
+        return "VLM unavailable"
 
 
-def vlm_worker(camera_id: str, stop_event: threading.Event):
+_VLM_EXPLICIT_VIOLATION_PHRASES = {
+    "not wearing",
+    "no helmet",
+    "no vest",
+    "too close",
+}
+_VLM_CONTEXT_ONLY_TERMS = {"forklift", "proximity", "clearance"}
+
+
+def _vlm_result_verdict(result: str, keywords: list[str]) -> str:
+    """Return ``safe``, ``violation``, or ``unknown`` for one VLM response."""
+    normalized = str(result or "").lower()
+    if not normalized or normalized.startswith(
+        ("vlm error:", "vlm unavailable", "no response from vlm")
+    ):
+        return "unknown"
+    verdicts = re.findall(r"\bstatus\s*:\s*(safe|violation)\b", normalized)
+    if verdicts:
+        return verdicts[-1]
+
+    for raw_keyword in keywords:
+        keyword = str(raw_keyword or "").strip().lower()
+        if not keyword or keyword in _VLM_CONTEXT_ONLY_TERMS:
+            continue
+        pattern = re.compile(rf"(?<!\w){re.escape(keyword)}(?!\w)")
+        for match in pattern.finditer(normalized):
+            if keyword in _VLM_EXPLICIT_VIOLATION_PHRASES:
+                return "violation"
+            prefix = normalized[max(0, match.start() - 40):match.start()]
+            negated = re.search(
+                r"\b(?:no|not|without|none|zero|free\s+of)\b"
+                r"(?:\W+\w+){0,2}\W*$",
+                prefix,
+            )
+            if not negated:
+                return "violation"
+    return "safe"
+
+
+def _vlm_result_is_violation(result: str, keywords: list[str]) -> bool:
+    return _vlm_result_verdict(result, keywords) == "violation"
+
+
+def _vlm_interval_seconds(value: object) -> float:
+    try:
+        interval = float(value)
+    except (TypeError, ValueError):
+        interval = 45.0
+    if not math.isfinite(interval):
+        interval = 45.0
+    return min(24 * 60 * 60, max(5.0, interval))
+
+
+def _vlm_worker_loop(camera_id: str, stop_event: threading.Event):
+    pending_submission = None
+    pending_generation = 0
+    analysis_generation = 0
+    last_safe_generation = 0
+    violation_active = False
+
     while not stop_event.is_set():
+        if pending_submission is not None:
+            persisted_alert = None
+            submission_complete = isinstance(pending_submission, Mapping)
+            if submission_complete:
+                persisted_alert = pending_submission
+            else:
+                is_done = getattr(pending_submission, "done", None)
+                get_result = getattr(pending_submission, "result", None)
+                if not callable(is_done) or not callable(get_result):
+                    submission_complete = True
+                    logger.error(
+                        "VLM alert persistence returned an invalid result",
+                        extra={"camera_id": camera_id},
+                    )
+                elif is_done():
+                    submission_complete = True
+                    try:
+                        persisted_alert = get_result()
+                    except Exception:
+                        logger.warning(
+                            "VLM alert persistence failed; incident remains retryable",
+                            extra={"camera_id": camera_id},
+                        )
+            if submission_complete:
+                pending_submission = None
+                if isinstance(persisted_alert, Mapping):
+                    if pending_generation > last_safe_generation:
+                        violation_active = True
+                elif persisted_alert is not None:
+                    logger.error(
+                        "VLM alert persistence completed without a persisted alert",
+                        extra={"camera_id": camera_id},
+                    )
+
         cfg = get_config()
         vlm_cfg = cfg["vlm"]
-        interval = vlm_cfg["interval"]
-
-        for _ in range(int(interval)):
-            if stop_event.is_set():
-                return
-            time.sleep(1)
+        if stop_event.wait(_vlm_interval_seconds(vlm_cfg.get("interval", 45))):
+            return
 
         if not vlm_cfg.get("enabled", True) or not licensing.is_inference_allowed():
             continue
@@ -928,6 +1250,9 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
         logger.info("VLM analysis started", extra={"camera_id": camera_id})
         started = time.time()
         result = call_vlm(frame)
+        if stop_event.is_set():
+            logger.debug("Discarding VLM result after camera stop", extra={"camera_id": camera_id})
+            return
         elapsed = time.time() - started
         logger.info("VLM analysis done", extra={"camera_id": camera_id, "elapsed": round(elapsed, 1)})
 
@@ -938,19 +1263,51 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
                 "elapsed": round(elapsed, 1),
             }
 
+        analysis_generation += 1
         keywords = vlm_cfg.get("violation_keywords", [])
-        is_violation = any(keyword in result.lower() for keyword in keywords)
-        alert = create_alert(
-            camera_id=camera_id,
-            rule="VLM Scene Analysis",
-            severity="P2" if is_violation else "P4",
-            confidence=0.92,
-            description=result[:200],
-            source=f"VLM ({vlm_cfg['model']})",
-            snapshot_jpeg=frame_bytes,
-        )
-        if alert:
-            logger.debug("VLM alert queued", extra={"camera_id": camera_id})
+        verdict = _vlm_result_verdict(result, keywords)
+        if verdict == "safe":
+            last_safe_generation = analysis_generation
+            violation_active = False
+            continue
+        if verdict != "violation" or violation_active or pending_submission is not None:
+            continue
+        if stop_event.is_set():
+            return
+        try:
+            submission = create_alert(
+                camera_id=camera_id,
+                rule="VLM Scene Analysis",
+                severity="P2",
+                confidence=0.92,
+                description=result[:200],
+                source=f"VLM ({vlm_cfg['model']})",
+                snapshot_jpeg=frame_bytes,
+            )
+        except Exception:
+            submission = None
+            logger.error(
+                "VLM alert persistence submission failed; incident remains retryable",
+                extra={"camera_id": camera_id},
+            )
+        if isinstance(submission, Mapping):
+            violation_active = True
+        elif submission is not None:
+            pending_submission = submission
+            pending_generation = analysis_generation
+        if submission is not None:
+            logger.debug("VLM alert submitted for persistence", extra={"camera_id": camera_id})
+
+
+def vlm_worker(camera_id: str, stop_event: threading.Event):
+    """Run one VLM companion and relinquish only its own registration."""
+    try:
+        _vlm_worker_loop(camera_id, stop_event)
+    except Exception:
+        logger.exception("VLM worker exited unexpectedly", extra={"camera_id": camera_id})
+        raise
+    finally:
+        _deregister_worker_on_exit(state.vlm_threads, camera_id, stop_event)
 
 
 def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: dict, *, conf: float, device: str, imgsz: int):
@@ -1696,7 +2053,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
         logger.exception("Camera worker exited unexpectedly", extra={"camera_id": camera_id})
         raise
     finally:
-        _clear_camera_observation(camera_id)
+        _finalize_camera_worker_exit(camera_id, stop_event)
 
 
 def _video_processor_loop(camera_id: str, stop_event: threading.Event):
@@ -1970,168 +2327,306 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             logger.debug("Video loop restarting", extra={"camera_id": camera_id})
 
 
-def start_camera(cam_id: str):
-    cfg = get_config()
-    cam = cfg["cameras"].get(cam_id)
-    if not cam or not cam.get("enabled", True):
-        return
-    if cam_id in state.camera_threads:
-        thread, _stop_evt = state.camera_threads[cam_id]
+_camera_lifecycle_locks_guard = threading.Lock()
+_camera_lifecycle_locks: dict[str, threading.RLock] = {}
+_camera_worker_registry_lock = threading.RLock()
+_camera_lifecycle_fence_lock = threading.Lock()
+_camera_lifecycle_shutdown = threading.Event()
+CAMERA_WORKER_HEAL_INTERVAL_SECONDS = 10.0
+
+
+def _camera_lifecycle_lock(cam_id: str) -> threading.RLock:
+    with _camera_lifecycle_locks_guard:
+        return _camera_lifecycle_locks.setdefault(cam_id, threading.RLock())
+
+
+def begin_camera_lifecycle_shutdown() -> None:
+    with _camera_lifecycle_fence_lock:
+        _camera_lifecycle_shutdown.set()
+
+
+def resume_camera_lifecycle() -> None:
+    with _camera_lifecycle_fence_lock:
+        _camera_lifecycle_shutdown.clear()
+
+
+def camera_lifecycle_shutting_down() -> bool:
+    return _camera_lifecycle_shutdown.is_set()
+
+
+def _remove_worker_if_owned(
+    workers: dict[str, tuple[threading.Thread, threading.Event]],
+    cam_id: str,
+    ownership: tuple[threading.Thread, threading.Event],
+) -> None:
+    with _camera_worker_registry_lock:
+        if workers.get(cam_id) is ownership:
+            del workers[cam_id]
+
+
+def _deregister_worker_on_exit(
+    workers: dict[str, tuple[threading.Thread, threading.Event]],
+    cam_id: str,
+    stop_event: threading.Event,
+) -> bool:
+    current_thread = threading.current_thread()
+    with _camera_worker_registry_lock:
+        ownership = workers.get(cam_id)
+        if ownership is None:
+            return True
+        registered_thread, registered_stop_event = ownership
+        if registered_thread is current_thread and registered_stop_event is stop_event:
+            del workers[cam_id]
+            return True
+        return False
+
+
+def _finalize_camera_worker_exit(cam_id: str, stop_event: threading.Event) -> None:
+    current_thread = threading.current_thread()
+    with _camera_worker_registry_lock:
+        ownership = state.camera_threads.get(cam_id)
+        if ownership is not None:
+            registered_thread, registered_stop_event = ownership
+            if registered_thread is not current_thread or registered_stop_event is not stop_event:
+                return
+            del state.camera_threads[cam_id]
+        _clear_camera_observation(cam_id)
+        state.camera_runtime_status[cam_id] = "offline" if stop_event.is_set() else "error"
+
+
+def _worker_registration_active(
+    workers: dict[str, tuple[threading.Thread, threading.Event]],
+    cam_id: str,
+) -> bool:
+    with _camera_worker_registry_lock:
+        ownership = workers.get(cam_id)
+    if ownership is None:
+        return False
+    thread, stop_event = ownership
+    return thread.is_alive() and not stop_event.is_set()
+
+
+def start_camera(cam_id: str) -> bool:
+    with _camera_lifecycle_lock(cam_id):
+        if _camera_lifecycle_shutdown.is_set():
+            logger.debug("Camera start rejected during lifecycle shutdown", extra={"camera_id": cam_id})
+            return False
+        cfg = get_config()
+        cam = cfg.get("cameras", {}).get(cam_id)
+        if not cam or not cam.get("enabled", True):
+            return False
+
+        with _camera_worker_registry_lock:
+            existing = state.camera_threads.get(cam_id)
+        if existing is not None:
+            existing_thread, existing_stop_event = existing
+            if existing_thread.is_alive():
+                if cam.get("demo") == "yolo+vlm" and not existing_stop_event.is_set():
+                    start_vlm_for_camera(cam_id)
+                return False
+            _remove_worker_if_owned(state.camera_threads, cam_id, existing)
+
+        execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
+        schedule_state = _capability_schedule_state(cam, cfg, execution_plan)
+        scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
+        missing_model_keys = model_manager.missing_model_keys(scheduled_plan["required_model_keys"])
+        _clear_camera_observation(cam_id)
+        state.camera_detection_history[cam_id] = []
+        state.camera_frame_updated_at.pop(cam_id, None)
+        state.camera_schedule_telemetry.pop(cam_id, None)
+        if missing_model_keys:
+            state.camera_runtime_status[cam_id] = "awaiting_model_install"
+            logger.warning("Skipping camera start until models are ready", extra={"camera_id": cam_id, "missing_models": missing_model_keys})
+            return False
+
+        with _camera_lifecycle_fence_lock:
+            if _camera_lifecycle_shutdown.is_set():
+                return False
+            stop_evt = threading.Event()
+            thread = threading.Thread(target=video_processor, args=(cam_id, stop_evt), daemon=True)
+            ownership = (thread, stop_evt)
+            with _camera_worker_registry_lock:
+                state.camera_threads[cam_id] = ownership
+            state.camera_worker_started_at[cam_id] = time.time()
+            state.camera_runtime_status[cam_id] = "starting"
+            try:
+                thread.start()
+            except Exception:
+                stop_evt.set()
+                _remove_worker_if_owned(state.camera_threads, cam_id, ownership)
+                state.camera_runtime_status[cam_id] = "error"
+                logger.exception("Failed to start video processor", extra={"camera_id": cam_id})
+                raise
+        logger.info("Started video processor", extra={"camera_id": cam_id})
+        if cam.get("demo") == "yolo+vlm":
+            start_vlm_for_camera(cam_id)
+        return True
+
+
+def start_vlm_for_camera(cam_id: str) -> bool:
+    with _camera_lifecycle_lock(cam_id):
+        if _camera_lifecycle_shutdown.is_set():
+            return False
+        cfg = get_config_snapshot("cameras")
+        cam = cfg.get("cameras", {}).get(cam_id)
+        if not cam or not cam.get("enabled", True) or cam.get("demo") != "yolo+vlm":
+            return False
+        with _camera_worker_registry_lock:
+            camera_ownership = state.camera_threads.get(cam_id)
+        if camera_ownership is None:
+            return False
+        camera_thread, camera_stop_event = camera_ownership
+        if not camera_thread.is_alive() or camera_stop_event.is_set():
+            return False
+        with _camera_worker_registry_lock:
+            existing = state.vlm_threads.get(cam_id)
+        if existing is not None:
+            if existing[0].is_alive():
+                return False
+            _remove_worker_if_owned(state.vlm_threads, cam_id, existing)
+        with _camera_lifecycle_fence_lock:
+            if _camera_lifecycle_shutdown.is_set():
+                return False
+            stop_evt = threading.Event()
+            thread = threading.Thread(target=vlm_worker, args=(cam_id, stop_evt), daemon=True)
+            ownership = (thread, stop_evt)
+            with _camera_worker_registry_lock:
+                state.vlm_threads[cam_id] = ownership
+            try:
+                thread.start()
+            except Exception:
+                stop_evt.set()
+                _remove_worker_if_owned(state.vlm_threads, cam_id, ownership)
+                logger.exception("Failed to start VLM worker", extra={"camera_id": cam_id})
+                return False
+        logger.info("Started VLM worker", extra={"camera_id": cam_id})
+        return True
+
+
+def stop_vlm_for_camera(cam_id: str) -> bool:
+    with _camera_lifecycle_lock(cam_id):
+        with _camera_worker_registry_lock:
+            ownership = state.vlm_threads.get(cam_id)
+        if ownership is None:
+            return True
+        thread, stop_event = ownership
+        stop_event.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=5)
         if thread.is_alive():
+            return False
+        _remove_worker_if_owned(state.vlm_threads, cam_id, ownership)
+        return True
+
+
+def heal_camera_workers_once() -> None:
+    cfg = get_config_snapshot("cameras")
+    with _camera_worker_registry_lock:
+        registered_vlm_ids = set(state.vlm_threads)
+    for cam_id in set(cfg.get("cameras", {})) | registered_vlm_ids:
+        if _camera_lifecycle_shutdown.is_set():
             return
-        state.camera_threads.pop(cam_id, None)
-
-    execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
-    schedule_state = _capability_schedule_state(cam, cfg, execution_plan)
-    scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
-    missing_model_keys = model_manager.missing_model_keys(scheduled_plan["required_model_keys"])
-    _clear_camera_observation(cam_id)
-    state.camera_detection_history[cam_id] = []
-    state.camera_frame_updated_at.pop(cam_id, None)
-    state.camera_schedule_telemetry.pop(cam_id, None)
-    if missing_model_keys:
-        state.camera_runtime_status[cam_id] = "awaiting_model_install"
-        logger.warning("Skipping camera start until models are ready", extra={"camera_id": cam_id, "missing_models": missing_model_keys})
-        return
-
-    stop_evt = threading.Event()
-    thread = threading.Thread(target=video_processor, args=(cam_id, stop_evt), daemon=True)
-    thread.start()
-    state.camera_threads[cam_id] = (thread, stop_evt)
-    state.camera_worker_started_at[cam_id] = time.time()
-    state.camera_runtime_status[cam_id] = "starting"
-    logger.info("Started video processor", extra={"camera_id": cam_id})
-
-    if cam.get("demo") == "yolo+vlm":
-        start_vlm_for_camera(cam_id)
+        try:
+            with _camera_lifecycle_lock(cam_id):
+                if _camera_lifecycle_shutdown.is_set():
+                    return
+                current_cfg = get_config_snapshot("cameras")
+                cam = current_cfg.get("cameras", {}).get(cam_id)
+                enabled = bool(cam and cam.get("enabled", True))
+                vlm_expected = bool(enabled and cam.get("demo") == "yolo+vlm")
+                if not vlm_expected and cam_id in state.vlm_threads:
+                    stop_vlm_for_camera(cam_id)
+                if not enabled:
+                    continue
+                if not _worker_registration_active(state.camera_threads, cam_id):
+                    start_camera(cam_id)
+                    continue
+                if vlm_expected and not _worker_registration_active(state.vlm_threads, cam_id):
+                    start_vlm_for_camera(cam_id)
+        except Exception:
+            logger.exception("Camera lifecycle healing failed; later cameras will still be checked", extra={"camera_id": cam_id})
 
 
-def start_vlm_for_camera(cam_id: str):
-    stop_evt = threading.Event()
-    thread = threading.Thread(target=vlm_worker, args=(cam_id, stop_evt), daemon=True)
-    thread.start()
-    state.vlm_threads[cam_id] = (thread, stop_evt)
-    logger.info("Started VLM worker", extra={"camera_id": cam_id})
+async def camera_worker_healing_loop(*, interval_seconds: float = CAMERA_WORKER_HEAL_INTERVAL_SECONDS) -> None:
+    try:
+        interval = float(interval_seconds)
+    except (TypeError, ValueError):
+        interval = CAMERA_WORKER_HEAL_INTERVAL_SECONDS
+    if not math.isfinite(interval):
+        interval = CAMERA_WORKER_HEAL_INTERVAL_SECONDS
+    interval = min(300.0, max(1.0, interval))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(heal_camera_workers_once)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Camera lifecycle healing pass failed")
 
 
 def stop_camera(cam_id: str) -> bool:
-    camera_stopped = True
-    if cam_id in state.camera_threads:
-        thread, stop_evt = state.camera_threads[cam_id]
-        stop_evt.set()
-        state.camera_runtime_status[cam_id] = "stopping"
-        thread.join(timeout=CAMERA_STOP_TIMEOUT_SECONDS)
-        if thread.is_alive():
-            camera_stopped = False
-            logger.warning(
-                "Camera worker still stopping; retaining worker reference",
-                extra={"camera_id": cam_id, "timeout_seconds": CAMERA_STOP_TIMEOUT_SECONDS},
-            )
-        else:
-            del state.camera_threads[cam_id]
-    if cam_id in state.vlm_threads:
-        thread, stop_evt = state.vlm_threads[cam_id]
-        stop_evt.set()
-        thread.join(timeout=5)
-        if not thread.is_alive():
-            del state.vlm_threads[cam_id]
-    if not camera_stopped:
-        return False
-    state.camera_frames.pop(cam_id, None)
-    state.camera_clean_frames.pop(cam_id, None)
-    state.camera_frame_updated_at.pop(cam_id, None)
-    state.camera_worker_started_at.pop(cam_id, None)
-    state.camera_detections.pop(cam_id, None)
-    state.camera_detection_history.pop(cam_id, None)
-    state.camera_schedule_telemetry.pop(cam_id, None)
-    state.camera_runtime_status[cam_id] = "offline"
-    return True
+    with _camera_lifecycle_lock(cam_id):
+        camera_stopped = True
+        vlm_stopped = True
+        with _camera_worker_registry_lock:
+            camera_ownership = state.camera_threads.get(cam_id)
+        if camera_ownership is not None:
+            thread, stop_evt = camera_ownership
+            stop_evt.set()
+            state.camera_runtime_status[cam_id] = "stopping"
+            if thread is not threading.current_thread():
+                thread.join(timeout=CAMERA_STOP_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                camera_stopped = False
+            else:
+                _remove_worker_if_owned(state.camera_threads, cam_id, camera_ownership)
+        with _camera_worker_registry_lock:
+            vlm_ownership = state.vlm_threads.get(cam_id)
+        if vlm_ownership is not None:
+            thread, stop_evt = vlm_ownership
+            stop_evt.set()
+            state.camera_runtime_status[cam_id] = "stopping"
+            if thread is not threading.current_thread():
+                thread.join(timeout=5)
+            if thread.is_alive():
+                vlm_stopped = False
+            else:
+                _remove_worker_if_owned(state.vlm_threads, cam_id, vlm_ownership)
+        if not camera_stopped or not vlm_stopped:
+            return False
+        state.camera_frames.pop(cam_id, None)
+        state.camera_clean_frames.pop(cam_id, None)
+        state.camera_frame_updated_at.pop(cam_id, None)
+        state.camera_worker_started_at.pop(cam_id, None)
+        state.camera_detections.pop(cam_id, None)
+        state.camera_detection_history.pop(cam_id, None)
+        state.camera_schedule_telemetry.pop(cam_id, None)
+        _last_pose_results.pop(cam_id, None)
+        state.camera_runtime_status[cam_id] = "offline"
+        return True
+
+
+def stop_all_camera_workers() -> bool:
+    with _camera_worker_registry_lock:
+        camera_ids = set(state.camera_threads) | set(state.vlm_threads)
+    return all(stop_camera(cam_id) for cam_id in camera_ids)
 
 
 def restart_camera(cam_id: str) -> bool:
-    if not stop_camera(cam_id):
-        logger.warning("Camera restart deferred until existing worker exits", extra={"camera_id": cam_id})
-        return False
-    start_camera(cam_id)
-    return True
+    with _camera_lifecycle_lock(cam_id):
+        if not stop_camera(cam_id):
+            return False
+        return start_camera(cam_id)
 
 
 def restart_all_cameras():
     cfg = get_config()
-    still_stopping = set()
-    for cam_id in list(state.camera_threads):
-        if not stop_camera(cam_id):
-            still_stopping.add(cam_id)
-    for cam_id in cfg["cameras"]:
-        if cam_id not in still_stopping:
-            start_camera(cam_id)
-
-
-async def camera_start_retry_loop(interval_seconds: float = CAMERA_START_RETRY_INTERVAL_SECONDS):
-    """Retry cameras that were skipped because the model server was unavailable."""
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            cfg = get_config()
-            for cam_id, cam in cfg.get("cameras", {}).items():
-                if not cam.get("enabled", True):
-                    continue
-                if cam_id in state.camera_threads:
-                    continue
-                if state.camera_runtime_status.get(cam_id) != "awaiting_model_install":
-                    continue
-                execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
-                schedule_state = _capability_schedule_state(cam, cfg, execution_plan)
-                scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
-                missing_model_keys = model_manager.missing_model_keys(scheduled_plan["required_model_keys"])
-                if missing_model_keys:
-                    continue
-                logger.info("Retrying camera start after model readiness recovered", extra={"camera_id": cam_id})
-                start_camera(cam_id)
-        except Exception:
-            logger.exception("Camera start retry loop failed")
-
-
-async def camera_frame_watchdog_loop(
-    interval_seconds: float = CAMERA_FRAME_WATCHDOG_INTERVAL_SECONDS,
-    restart_after_seconds: float = CAMERA_STALE_RESTART_SECONDS,
-):
-    """Restart enabled camera workers that stop publishing fresh frames."""
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            cfg = get_config()
-            now = time.time()
-            for cam_id, cam in cfg.get("cameras", {}).items():
-                if not cam.get("enabled", True):
-                    continue
-                thread_info = state.camera_threads.get(cam_id)
-                if not thread_info:
-                    continue
-                thread, _stop_event = thread_info
-                if not thread.is_alive():
-                    continue
-                age = _frame_age_seconds(cam_id)
-                worker_age = now - state.camera_worker_started_at.get(cam_id, now)
-                status = state.camera_runtime_status.get(cam_id, "starting")
-                if age is not None and age <= restart_after_seconds and status == "running":
-                    continue
-                if status == "starting" and worker_age < restart_after_seconds:
-                    continue
-                if status not in {"reconnecting", "starting", "stale"} and age is not None and age <= restart_after_seconds:
-                    continue
-                last_restart = _camera_watchdog_restart_at.get(cam_id, 0.0)
-                if now - last_restart < restart_after_seconds:
-                    continue
-                _camera_watchdog_restart_at[cam_id] = now
-                logger.warning(
-                    "Restarting stale camera worker",
-                    extra={
-                        "camera_id": cam_id,
-                        "runtime_status": status,
-                        "last_frame_age_seconds": None if age is None else round(age, 1),
-                    },
-                )
-                await asyncio.to_thread(restart_camera, cam_id)
-        except Exception:
-            logger.exception("Camera frame watchdog failed")
+    configured = set(cfg.get("cameras", {}))
+    with _camera_worker_registry_lock:
+        existing = set(state.camera_threads) | set(state.vlm_threads)
+    for cam_id in configured | existing:
+        if cam_id in configured:
+            restart_camera(cam_id)
+        else:
+            stop_camera(cam_id)

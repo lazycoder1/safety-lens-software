@@ -137,6 +137,13 @@ def test_email_reports_partial_recipient_refusal_as_failure(monkeypatch):
 
 def test_webhook_reports_http_acceptance_and_rejection(monkeypatch):
     monkeypatch.setattr(
+        webhook_notifier.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (webhook_notifier.socket.AF_INET, webhook_notifier.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))
+        ],
+    )
+    monkeypatch.setattr(
         webhook_notifier,
         "get_config",
         lambda: {
@@ -148,7 +155,7 @@ def test_webhook_reports_http_acceptance_and_rejection(monkeypatch):
         },
     )
     responses = [SimpleNamespace(status_code=500), SimpleNamespace(status_code=204)]
-    monkeypatch.setattr(webhook_notifier.requests, "post", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(webhook_notifier, "_post_pinned", lambda *_args, **_kwargs: responses.pop(0))
 
     assert webhook_notifier.send_alert(_alert()) is False
     assert webhook_notifier.send_alert(_alert()) is True

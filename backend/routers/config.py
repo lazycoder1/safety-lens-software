@@ -2,17 +2,19 @@
 Rakshak Lens config endpoints — global, VLM, telegram, email, webhook, alert routing settings.
 """
 
+import asyncio
+import math
 from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from urllib.parse import urlparse
 
 import audit_store
-from config_manager import get_config, get_public_config, load_config, redact_alert_outputs, save_config
+from config_manager import get_config, get_config_snapshot, get_public_config, load_config, redact_alert_outputs, save_config
 from dependencies import require_admin
-from secret_redaction import REDACTED_VALUE, is_redacted
+from secret_redaction import REDACTED_VALUE, is_redacted, redact_sensitive_data
 from video_processing import restart_all_cameras
 import telegram_notifier
 import email_notifier
@@ -20,15 +22,19 @@ import webhook_notifier
 
 router = APIRouter(prefix="/api", tags=["config"])
 
+_ROUTING_CHANNELS = {"inapp", "telegram", "email", "webhook"}
+_PROVIDER_CHANNELS = {"telegram", "email", "webhook"}
+_ALERT_SEVERITIES = ("P1", "P2", "P3", "P4")
+
 
 class GlobalConfigUpdate(BaseModel):
-    target_fps: Optional[int] = None
-    inference_fps: Optional[float] = None
-    yolo_conf: Optional[float] = None
-    jpeg_quality: Optional[int] = None
-    inference_width: Optional[int] = None
+    target_fps: Optional[int] = Field(None, ge=1, le=60)
+    inference_fps: Optional[float] = Field(None, gt=0, le=60)
+    yolo_conf: Optional[float] = Field(None, ge=0, le=1)
+    jpeg_quality: Optional[int] = Field(None, ge=20, le=100)
+    inference_width: Optional[int] = Field(None, ge=160, le=1920)
     device: Optional[str] = None
-    alert_cooldown: Optional[int] = None
+    alert_cooldown: Optional[int] = Field(None, ge=0, le=86400)
 
 
 class ModelServerConfigUpdate(BaseModel):
@@ -40,11 +46,11 @@ class ModelServerConfigUpdate(BaseModel):
 
 class VlmConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
-    interval: Optional[int] = None
+    interval: Optional[int] = Field(None, ge=5, le=86400)
     model: Optional[str] = None
     prompt: Optional[str] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
+    temperature: Optional[float] = Field(None, ge=0, le=2)
+    max_tokens: Optional[int] = Field(None, ge=1, le=4096)
     violation_keywords: Optional[list[str]] = None
 
 
@@ -69,6 +75,7 @@ class EmailConfigUpdate(BaseModel):
 class WebhookConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     url: Optional[str] = None
+    account_id: Optional[str] = None
     headers: Optional[dict] = None
     severities: Optional[list[str]] = None
     include_snapshot: Optional[bool] = None
@@ -210,6 +217,311 @@ def _preserve_redacted_headers(updates: dict, current: dict) -> dict:
     return updates
 
 
+def _is_configured_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _provider_configuration_errors(channel: str, section: object) -> list[str]:
+    """Return safe field names that keep an enabled provider from delivering."""
+    if not isinstance(section, dict):
+        return ["configuration"]
+
+    if channel == "telegram":
+        return [
+            field
+            for field in ("bot_token", "chat_id")
+            if not _is_configured_text(section.get(field))
+        ]
+
+    if channel == "webhook":
+        return [] if _is_configured_text(section.get("url")) else ["url"]
+
+    if channel == "email":
+        errors = []
+        if not _is_configured_text(section.get("smtp_host")):
+            errors.append("smtp_host")
+        smtp_port = section.get("smtp_port")
+        if (
+            not isinstance(smtp_port, int)
+            or isinstance(smtp_port, bool)
+            or not 1 <= smtp_port <= 65535
+        ):
+            errors.append("smtp_port")
+        if not _is_configured_text(section.get("from_address")):
+            errors.append("from_address")
+        recipients = section.get("to_addresses")
+        if not isinstance(recipients, list) or not any(
+            _is_configured_text(address) for address in recipients
+        ):
+            errors.append("to_addresses")
+
+        # Anonymous SMTP is valid, but a half-configured authentication pair is
+        # never usable: the notifier only logs in when both values are present.
+        has_user = _is_configured_text(section.get("smtp_user"))
+        has_password = _is_configured_text(section.get("smtp_pass"))
+        if has_user != has_password:
+            errors.append("smtp_user/smtp_pass")
+        return errors
+
+    return ["configuration"]
+
+
+def _validate_enabled_provider(channel: str, section: object) -> None:
+    if not isinstance(section, dict) or not section.get("enabled", False):
+        return
+    errors = _provider_configuration_errors(channel, section)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot enable {channel}: incomplete configuration "
+                f"({', '.join(errors)})"
+            ),
+        )
+
+
+def _validate_channel_matrix(config: dict) -> None:
+    routing = config.get("alert_routing", {})
+    matrix = routing.get("channel_matrix", {}) if isinstance(routing, dict) else {}
+    if not isinstance(matrix, dict):
+        raise HTTPException(status_code=422, detail="channel_matrix must be an object")
+
+    for severity, channels in matrix.items():
+        if not isinstance(channels, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"channel_matrix.{severity} must be an object",
+            )
+        for raw_channel, enabled in channels.items():
+            if not isinstance(enabled, bool):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"channel_matrix.{severity}.{raw_channel} must be a boolean",
+                )
+            if not enabled:
+                continue
+            channel = str(raw_channel or "").strip().lower()
+            if channel not in _ROUTING_CHANNELS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Unsupported enabled alert-routing channel: "
+                        f"{channel or 'empty'} ({severity})"
+                    ),
+                )
+            if channel not in _PROVIDER_CHANNELS:
+                continue
+
+            provider = config.get(channel, {})
+            if not isinstance(provider, dict) or not provider.get("enabled", False):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Cannot enable {channel} routing for {severity}: "
+                        "the provider is disabled"
+                    ),
+                )
+            errors = _provider_configuration_errors(channel, provider)
+            if errors:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Cannot enable {channel} routing for {severity}: "
+                        f"incomplete provider configuration ({', '.join(errors)})"
+                    ),
+                )
+            severities = provider.get("severities", [])
+            if not isinstance(severities, list) or severity not in severities:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Cannot enable {channel} routing for {severity}: "
+                        "the provider filters that severity"
+                    ),
+                )
+
+
+def _normalized_severity_scope(raw: object, *, field: str) -> list[str]:
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=422, detail=f"{field} must be an array")
+    normalized = []
+    for item in raw:
+        severity = str(item or "").strip().upper()
+        if severity not in _ALERT_SEVERITIES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{field} contains unsupported severity: {severity or 'empty'}",
+            )
+        if severity not in normalized:
+            normalized.append(severity)
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{field} cannot be empty")
+    return normalized
+
+
+def _escalation_step_identity(step: dict, *, index: int) -> tuple[str, str]:
+    """Return the exact identity fields used by durable escalation keys."""
+    channel = str(step.get("channel") or "").strip().lower()
+    raw_id = step.get("id")
+    if raw_id in (None, ""):
+        raw_id = (
+            f"{step.get('afterMinutes', 0)}:"
+            f"{step.get('role', '')}:"
+            f"{channel}"
+        )
+    if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int, float)):
+        raise HTTPException(
+            status_code=422,
+            detail=f"escalation_steps[{index}].id must be a string or number",
+        )
+    if isinstance(raw_id, float) and not math.isfinite(raw_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"escalation_steps[{index}].id must be finite",
+        )
+    canonical_id = str(raw_id)
+    if not canonical_id.strip() or len(canonical_id) > 160:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"escalation_steps[{index}].id must contain 1 to 160 characters"
+            ),
+        )
+    return channel, canonical_id
+
+
+def _validate_explicit_escalations(config: dict) -> None:
+    """Protect active API-declared escalation steps from provider invalidation."""
+    routing = config.get("alert_routing", {})
+    steps = routing.get("escalation_steps", []) if isinstance(routing, dict) else []
+    if not isinstance(steps, list):
+        raise HTTPException(status_code=422, detail="escalation_steps must be an array")
+
+    active_identities: set[tuple[str, str]] = set()
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or step.get("enabled") is not True:
+            # Unmarked steps are legacy/default data. They are handled by the
+            # resolver's migration policy, not silently promoted by an update
+            # to an unrelated provider field.
+            continue
+        identity = _escalation_step_identity(step, index=index)
+        if identity in active_identities:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Enabled escalation steps must have a unique id per channel: "
+                    f"{identity[1]} ({identity[0]})"
+                ),
+            )
+        active_identities.add(identity)
+        channel = str(step.get("channel") or "").strip().lower()
+        if channel not in _PROVIDER_CHANNELS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported escalation channel: {channel or 'empty'}",
+            )
+        provider = config.get(channel, {})
+        if not isinstance(provider, dict) or not provider.get("enabled", False):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Cannot activate escalation step {index + 1} ({channel}): "
+                    "the provider is disabled"
+                ),
+            )
+        errors = _provider_configuration_errors(channel, provider)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Cannot activate escalation step {index + 1} ({channel}): "
+                    f"incomplete provider configuration ({', '.join(errors)})"
+                ),
+            )
+
+        scope = _normalized_severity_scope(
+            step.get("severities", list(_ALERT_SEVERITIES)),
+            field=f"escalation_steps[{index}].severities",
+        )
+        provider_scope = provider.get("severities", [])
+        if not isinstance(provider_scope, list) or any(
+            severity not in provider_scope for severity in scope
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Cannot activate escalation step {index + 1} ({channel}): "
+                    "the provider filters a severity required by the step"
+                ),
+            )
+
+
+def _normalize_escalation_steps(config: dict, raw_steps: object) -> list[dict]:
+    if not isinstance(raw_steps, list):
+        raise HTTPException(status_code=422, detail="escalation_steps must be an array")
+    normalized_steps = []
+    active_identities: set[tuple[str, str]] = set()
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"escalation_steps[{index}] must be an object",
+            )
+        normalized = dict(raw_step)
+        channel = str(normalized.get("channel", "telegram")).strip().lower()
+        if channel not in _PROVIDER_CHANNELS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported escalation channel: {channel or 'empty'}",
+            )
+        enabled = normalized.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise HTTPException(
+                status_code=422,
+                detail=f"escalation_steps[{index}].enabled must be a boolean",
+            )
+        try:
+            delay = float(normalized.get("afterMinutes", 0))
+        except (TypeError, ValueError):
+            delay = math.nan
+        if not math.isfinite(delay) or delay < 0:
+            raise HTTPException(
+                status_code=422,
+                detail=f"escalation_steps[{index}].afterMinutes must be non-negative",
+            )
+
+        normalized["channel"] = channel
+        normalized["enabled"] = enabled
+        if enabled:
+            identity = _escalation_step_identity(normalized, index=index)
+            if identity in active_identities:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Enabled escalation steps must have a unique id per channel: "
+                        f"{identity[1]} ({identity[0]})"
+                    ),
+                )
+            active_identities.add(identity)
+            provider = config.get(channel, {})
+            default_scope = (
+                provider.get("severities", [])
+                if isinstance(provider, dict)
+                else []
+            )
+            normalized["severities"] = _normalized_severity_scope(
+                normalized.get("severities", default_scope),
+                field=f"escalation_steps[{index}].severities",
+            )
+        elif "severities" in normalized:
+            normalized["severities"] = _normalized_severity_scope(
+                normalized["severities"],
+                field=f"escalation_steps[{index}].severities",
+            )
+        normalized_steps.append(normalized)
+    return normalized_steps
+
+
 @router.get("/config")
 async def api_get_config(request: Request):
     config = get_public_config()
@@ -336,11 +648,11 @@ async def api_test_alert_output(output_id: str):
 
 @router.put("/config/global", dependencies=[Depends(require_admin)])
 async def api_update_global(body: GlobalConfigUpdate, request: Request):
-    cfg = get_config()
+    cfg = get_config_snapshot()
     updates = body.model_dump(exclude_none=True)
     cfg["global"].update(updates)
     save_config(cfg)
-    restart_all_cameras()
+    await asyncio.to_thread(restart_all_cameras)
     audit_store.log_event(
         "config.global_update",
         target_type="config",
@@ -427,7 +739,7 @@ async def api_test_model_server(body: Optional[ModelServerConfigUpdate] = None):
 
 @router.put("/config/vlm", dependencies=[Depends(require_admin)])
 async def api_update_vlm(body: VlmConfigUpdate, request: Request):
-    cfg = get_config()
+    cfg = get_config_snapshot()
     updates = body.model_dump(exclude_none=True)
     cfg["vlm"].update(updates)
     save_config(cfg)
@@ -443,8 +755,8 @@ async def api_update_vlm(body: VlmConfigUpdate, request: Request):
 
 @router.put("/config/telegram", dependencies=[Depends(require_admin)])
 async def api_update_telegram(body: TelegramConfigUpdate, request: Request):
-    cfg = get_config()
-    if "telegram" not in cfg:
+    cfg = get_config_snapshot()
+    if not isinstance(cfg.get("telegram"), dict):
         cfg["telegram"] = {"enabled": False, "bot_token": "", "chat_id": "", "severities": ["P1", "P2"]}
     updates = _drop_redacted(body.model_dump(exclude_none=True), "bot_token")
     cfg["telegram"].update(updates)
@@ -456,6 +768,9 @@ async def api_update_telegram(body: TelegramConfigUpdate, request: Request):
                 "bot_token": cfg["telegram"].get("bot_token", ""),
                 "chat_id": cfg["telegram"].get("chat_id", ""),
             })
+    _validate_enabled_provider("telegram", cfg["telegram"])
+    _validate_channel_matrix(cfg)
+    _validate_explicit_escalations(cfg)
     save_config(cfg)
     safe_updates = dict(updates)
     if "bot_token" in safe_updates:
@@ -472,9 +787,13 @@ async def api_update_telegram(body: TelegramConfigUpdate, request: Request):
 
 @router.post("/config/telegram/test", dependencies=[Depends(require_admin)])
 async def api_test_telegram():
-    cfg = get_config()
+    cfg = get_config_snapshot()
     tg = cfg.get("telegram", {})
-    result = telegram_notifier.test_connection(tg.get("bot_token", ""), tg.get("chat_id", ""))
+    result = await asyncio.to_thread(
+        telegram_notifier.test_connection,
+        tg.get("bot_token", ""),
+        tg.get("chat_id", ""),
+    )
     return result
 
 
@@ -483,10 +802,10 @@ async def api_telegram_groups(body: TelegramConfigUpdate):
     """Fetch groups/chats the bot has been added to via getUpdates."""
     bot_token = body.bot_token
     if is_redacted(bot_token):
-        bot_token = get_config().get("telegram", {}).get("bot_token")
+        bot_token = get_config_snapshot("telegram").get("telegram", {}).get("bot_token")
     if not bot_token:
         return {"ok": False, "error": "Bot token is required", "groups": []}
-    groups = telegram_notifier.fetch_groups(bot_token)
+    groups = await asyncio.to_thread(telegram_notifier.fetch_groups, bot_token)
     return groups
 
 
@@ -496,8 +815,8 @@ async def api_telegram_groups(body: TelegramConfigUpdate):
 
 @router.put("/config/email", dependencies=[Depends(require_admin)])
 async def api_update_email(body: EmailConfigUpdate, request: Request):
-    cfg = get_config()
-    if "email" not in cfg:
+    cfg = get_config_snapshot()
+    if not isinstance(cfg.get("email"), dict):
         cfg["email"] = {"enabled": False, "smtp_host": "", "smtp_port": 587, "smtp_user": "", "smtp_pass": "", "from_address": "", "to_addresses": [], "severities": ["P1", "P2"]}
     updates = _drop_redacted(body.model_dump(exclude_none=True), "smtp_pass")
     cfg["email"].update(updates)
@@ -514,6 +833,9 @@ async def api_update_email(body: EmailConfigUpdate, request: Request):
                 "from_address": cfg["email"].get("from_address", ""),
                 "to_addresses": cfg["email"].get("to_addresses", []),
             })
+    _validate_enabled_provider("email", cfg["email"])
+    _validate_channel_matrix(cfg)
+    _validate_explicit_escalations(cfg)
     save_config(cfg)
     safe_updates = dict(updates)
     if "smtp_pass" in safe_updates:
@@ -530,12 +852,13 @@ async def api_update_email(body: EmailConfigUpdate, request: Request):
 
 @router.post("/config/email/test", dependencies=[Depends(require_admin)])
 async def api_test_email():
-    cfg = get_config()
+    cfg = get_config_snapshot()
     em = cfg.get("email", {})
     to_addrs = em.get("to_addresses", [])
     if not to_addrs:
         return {"ok": False, "error": "No recipient addresses configured"}
-    result = email_notifier.test_connection(
+    result = await asyncio.to_thread(
+        email_notifier.test_connection,
         em.get("smtp_host", ""),
         em.get("smtp_port", 587),
         em.get("smtp_user", ""),
@@ -552,8 +875,8 @@ async def api_test_email():
 
 @router.put("/config/webhook", dependencies=[Depends(require_admin)])
 async def api_update_webhook(body: WebhookConfigUpdate, request: Request):
-    cfg = get_config()
-    if "webhook" not in cfg:
+    cfg = get_config_snapshot()
+    if not isinstance(cfg.get("webhook"), dict):
         cfg["webhook"] = {"enabled": False, "url": "", "headers": {}, "severities": ["P1", "P2"], "include_snapshot": False}
     updates = _drop_redacted(body.model_dump(exclude_none=True), "url")
     updates = _preserve_redacted_headers(updates, cfg["webhook"])
@@ -567,8 +890,11 @@ async def api_update_webhook(body: WebhookConfigUpdate, request: Request):
                 "headers": cfg["webhook"].get("headers", {}),
                 "include_snapshot": cfg["webhook"].get("include_snapshot", False),
             })
+    _validate_enabled_provider("webhook", cfg["webhook"])
+    _validate_channel_matrix(cfg)
+    _validate_explicit_escalations(cfg)
     save_config(cfg)
-    safe_updates = dict(updates)
+    safe_updates = redact_sensitive_data(updates)
     if safe_updates.get("url"):
         safe_updates["url"] = REDACTED_VALUE
     audit_store.log_event(
@@ -583,12 +909,16 @@ async def api_update_webhook(body: WebhookConfigUpdate, request: Request):
 
 @router.post("/config/webhook/test", dependencies=[Depends(require_admin)])
 async def api_test_webhook():
-    cfg = get_config()
+    cfg = get_config_snapshot()
     wh = cfg.get("webhook", {})
     url = wh.get("url", "")
     if not url:
         return {"ok": False, "error": "No webhook URL configured"}
-    result = webhook_notifier.test_connection(url, wh.get("headers"))
+    result = await asyncio.to_thread(
+        webhook_notifier.test_connection,
+        url,
+        wh.get("headers"),
+    )
     return result
 
 
@@ -598,34 +928,18 @@ async def api_test_webhook():
 
 @router.put("/config/alert-routing", dependencies=[Depends(require_admin)])
 async def api_update_alert_routing(body: AlertRoutingUpdate, request: Request):
-    cfg = get_config()
-    if "alert_routing" not in cfg:
+    cfg = get_config_snapshot()
+    if not isinstance(cfg.get("alert_routing"), dict):
         cfg["alert_routing"] = {}
     updates = body.model_dump(exclude_none=True)
     if "escalation_steps" in updates:
-        supported_channels = {
-            "telegram",
-            "email",
-            "webhook",
-            "pushover",
-            "ip_speaker",
-            "relay",
-            "in_app",
-            "browser_sound",
-        }
-        normalized_steps = []
-        for step in updates["escalation_steps"]:
-            normalized = dict(step)
-            channel = str(normalized.get("channel", "telegram")).strip().lower()
-            if channel not in supported_channels:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Unsupported escalation channel: {channel or 'empty'}",
-                )
-            normalized["channel"] = channel
-            normalized_steps.append(normalized)
-        updates["escalation_steps"] = normalized_steps
+        updates["escalation_steps"] = _normalize_escalation_steps(
+            cfg,
+            updates["escalation_steps"],
+        )
     cfg["alert_routing"].update(updates)
+    _validate_channel_matrix(cfg)
+    _validate_explicit_escalations(cfg)
     save_config(cfg)
     audit_store.log_event(
         "config.alert_routing_update",
@@ -666,7 +980,8 @@ async def api_test_alert_routing(body: TestAlertRequest):
                 for channel, enabled in matrix.get(body.severity, {}).items()
                 if enabled
             ]
-        results = notification_dispatcher.notify_with_results(
+        results = await asyncio.to_thread(
+            notification_dispatcher.notify_with_results,
             test_alert,
             None,
             channels=channels,
@@ -674,7 +989,12 @@ async def api_test_alert_routing(body: TestAlertRequest):
         )
         ok = bool(results) and all(result.get("success", False) for result in results)
     else:
-        results = notification_dispatcher.dispatch_alert(test_alert, None, output_ids=body.outputIds)
+        results = await asyncio.to_thread(
+            notification_dispatcher.dispatch_alert,
+            test_alert,
+            None,
+            output_ids=body.outputIds,
+        )
         ok = bool(results) and all(item.get("status") in {"delivered", "simulated"} for item in results)
     return {
         "ok": ok,
@@ -699,7 +1019,7 @@ async def api_get_scheduled_reports():
 
 @router.put("/config/scheduled-reports", dependencies=[Depends(require_admin)])
 async def api_update_scheduled_reports(body: ScheduledReportsUpdate, request: Request):
-    cfg = get_config()
+    cfg = get_config_snapshot()
     if "scheduled_reports" not in cfg:
         cfg["scheduled_reports"] = {"enabled": False, "schedule": "weekly", "day_of_week": 1, "hour": 6, "recipients": []}
     updates = body.model_dump(exclude_none=True)

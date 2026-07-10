@@ -243,6 +243,7 @@ DEFAULT_CONFIG = {
     "webhook": {
         "enabled": False,
         "url": "",
+        "account_id": "",
         "headers": {},
         "severities": ["P1", "P2"],
         "include_snapshot": False,
@@ -264,8 +265,8 @@ DEFAULT_CONFIG = {
             "Mobile Phone": {"dedupWindow": 60, "maxAlertsPerHr": 20, "autoResolve": 600, "toastDuration": 10},
         },
         "escalation_steps": [
-            {"id": 1, "afterMinutes": 3, "role": "Floor Manager", "channel": "telegram"},
-            {"id": 2, "afterMinutes": 10, "role": "Plant Manager", "channel": "email"},
+            {"id": 1, "enabled": False, "afterMinutes": 3, "role": "Floor Manager", "channel": "telegram"},
+            {"id": 2, "enabled": False, "afterMinutes": 10, "role": "Plant Manager", "channel": "email"},
         ],
         "templates": {
             "email_subject": "[Rakshak Lens {severity}] {violation_type} detected at {zone}",
@@ -532,6 +533,28 @@ def get_config() -> dict:
         _refresh_postgres_config_if_stale()
     with _lock:
         return _config
+
+
+def get_config_snapshot(section: str | None = None) -> dict:
+    """Return one deep-copied config generation for an atomic operation.
+
+    Unlike ``get_config()``, callers cannot observe a later cache replacement
+    or mutate the process-wide cached object through the returned value. Pass
+    a section name to avoid copying unrelated camera state. This is important
+    for external delivery: destination validation, credentials, and the actual
+    send must all use the same configuration generation.
+    """
+    global _config
+    if _config is None:
+        load_config()
+    if _resolve_config_store() == "postgres":
+        _refresh_postgres_config_if_stale()
+    with _lock:
+        current = _config or {}
+        if section is None:
+            return deepcopy(current)
+        value = current.get(section, {})
+        return {section: deepcopy(value)}
 
 
 def update_config(path: str, value) -> dict:

@@ -300,8 +300,12 @@ def test_notify_with_results_normalizes_requested_channel_casing(monkeypatch):
         notification_dispatcher,
         "_CHANNEL_HANDLERS",
         {
-            "telegram": SimpleNamespace(send_alert=lambda *_args: calls.append("telegram") or True),
-            "email": SimpleNamespace(send_alert=lambda *_args: calls.append("email") or False),
+            "telegram": SimpleNamespace(
+                send_alert=lambda *_args: calls.append("telegram") or True
+            ),
+            "email": SimpleNamespace(
+                send_alert=lambda *_args: calls.append("email") or False
+            ),
         },
     )
 
@@ -312,10 +316,13 @@ def test_notify_with_results_normalizes_requested_channel_casing(monkeypatch):
     )
 
     assert calls == ["telegram", "email"]
-    assert [(result["channel"], result["success"], result["status"]) for result in results] == [
+    assert [
+        (result["channel"], result["success"], result["status"])
+        for result in results
+    ] == [
         ("telegram", True, "delivered"),
-        ("email", False, "failed"),
-        ("sms", False, "skipped"),
+        ("email", False, "retryable"),
+        ("sms", False, "terminal"),
         ("inApp", False, "skipped"),
     ]
 
@@ -376,9 +383,12 @@ def test_disabled_incomplete_and_filtered_channels_are_terminal_without_send(mon
     )
 
     assert calls == []
-    assert [(result["channel"], result["status"], result["message"]) for result in results] == [
+    assert [
+        (result["channel"], result["status"], result["message"])
+        for result in results
+    ] == [
         ("telegram", "skipped", "Channel is disabled"),
-        ("email", "skipped", "Channel configuration is incomplete"),
+        ("email", "terminal", "Channel configuration is incomplete"),
         ("webhook", "skipped", "Severity P1 is filtered"),
     ]
 

@@ -5,13 +5,15 @@ Alert persistence with PostgreSQL for Rakshak Lens backend.
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from psycopg2.extras import RealDictCursor
 
 from db import get_conn
+import alert_delivery_store
 
 logger = logging.getLogger("rakshak_lens.alerts")
 
@@ -59,7 +61,12 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_camera ON alerts(camera_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_bboxes_gin ON alerts USING gin(bboxes)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alerts_active_stale "
+                "ON alerts(timestamp, id) WHERE status = 'active'"
+            )
         conn.commit()
+    alert_delivery_store.init_db()
     logger.info("Database initialized")
 
 
@@ -81,18 +88,30 @@ def create_alert(
     priority: int | None = None,
     message: str | None = None,
     metadata: dict | None = None,
+    alert_id: str | None = None,
+    timestamp: str | None = None,
+    delivery_targets: list[dict] | None = None,
 ) -> dict:
-    alert_id = str(uuid4())[:8]
-    timestamp = datetime.now(timezone.utc).isoformat()
+    if alert_id is None:
+        alert_id = str(uuid4())
+    else:
+        try:
+            alert_id = str(UUID(str(alert_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("alert_id must be a UUID") from exc
+    timestamp = timestamp or datetime.now(timezone.utc).isoformat()
     snapshot_path = None
     clean_snapshot_path = None
+    created_snapshot_paths: list[Path] = []
     bboxes = bboxes or []
 
     if snapshot_jpeg:
         try:
             SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
             snapshot_filename = f"{alert_id}.jpg"
-            (SNAPSHOTS_DIR / snapshot_filename).write_bytes(snapshot_jpeg)
+            snapshot_file = SNAPSHOTS_DIR / snapshot_filename
+            if _write_snapshot_once(snapshot_file, snapshot_jpeg):
+                created_snapshot_paths.append(snapshot_file)
             snapshot_path = snapshot_filename
         except Exception:
             logger.exception("Failed to write snapshot")
@@ -100,25 +119,82 @@ def create_alert(
     if clean_snapshot_jpeg:
         try:
             clean_filename = f"{alert_id}_clean.jpg"
-            (SNAPSHOTS_DIR / clean_filename).write_bytes(clean_snapshot_jpeg)
+            clean_snapshot_file = SNAPSHOTS_DIR / clean_filename
+            if _write_snapshot_once(clean_snapshot_file, clean_snapshot_jpeg):
+                created_snapshot_paths.append(clean_snapshot_file)
             clean_snapshot_path = clean_filename
         except Exception:
             logger.exception("Failed to write clean snapshot")
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO alerts
-                   (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path, policy_id, priority, message, metadata)
-                   VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    alert_id, severity, rule, camera_id, camera_name, zone,
-                    round(confidence, 2), timestamp, source, description,
-                    snapshot_path, json.dumps(bboxes), clean_snapshot_path,
-                    policy_id, priority, message, json.dumps(metadata or {}),
-                ),
-            )
-        conn.commit()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO alerts
+                       (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path, policy_id, priority, message, metadata)
+                       VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (id) DO NOTHING
+                       RETURNING id""",
+                    (
+                        alert_id, severity, rule, camera_id, camera_name, zone,
+                        round(confidence, 2), timestamp, source, description,
+                        snapshot_path, json.dumps(bboxes), clean_snapshot_path,
+                        policy_id, priority, message, json.dumps(metadata or {}),
+                    ),
+                )
+                inserted = cur.fetchone() is not None
+                if inserted:
+                    alert_delivery_store.insert_targets(
+                        cur,
+                        alert_id=alert_id,
+                        alert_timestamp=timestamp,
+                        targets=delivery_targets,
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT camera_id, rule, severity, timestamp
+                        FROM alerts WHERE id = %s
+                        """,
+                        (alert_id,),
+                    )
+                    existing = cur.fetchone()
+                    expected = (camera_id, rule, severity, timestamp)
+                    if existing is None or tuple(existing) != expected:
+                        raise RuntimeError("Alert identity collision with different payload")
+            conn.commit()
+    except Exception as persistence_error:
+        # A commit failure is ambiguous: PostgreSQL may have committed before
+        # the connection failed. Resolve that outcome on a fresh connection
+        # before deleting evidence that a durable row may already reference.
+        try:
+            persisted = get_alert(alert_id)
+        except Exception:
+            # Retain the files for orphan cleanup rather than risk deleting
+            # evidence referenced by an ambiguously committed alert.
+            raise persistence_error
+        same_identity = persisted is not None and _same_alert_identity(
+            persisted,
+            camera_id=camera_id,
+            rule=rule,
+            severity=severity,
+            timestamp=timestamp,
+        )
+        if same_identity:
+            _remove_unreferenced_created_snapshots(created_snapshot_paths, persisted)
+            return persisted
+        # A confirmed different/no row cannot legitimately reference evidence
+        # created for this attempted alert identity.
+        for path in created_snapshot_paths:
+            path.unlink(missing_ok=True)
+        raise
+
+    if not inserted:
+        persisted = get_alert(alert_id)
+        if persisted is None:
+            raise RuntimeError("Persisted alert disappeared during idempotent replay")
+        _remove_unreferenced_created_snapshots(created_snapshot_paths, persisted)
+        return persisted
 
     logger.debug("Alert created", extra={"alert_id": alert_id, "camera_id": camera_id})
 
@@ -128,6 +204,54 @@ def create_alert(
         bboxes=bboxes, clean_snapshot_path=clean_snapshot_path,
         policy_id=policy_id, priority=priority, message=message, metadata=metadata or {},
     )
+
+
+def _write_snapshot_once(path: Path, content: bytes) -> bool:
+    """Create evidence once; persistence retries must never overwrite it."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return True
+
+
+def _same_alert_identity(
+    alert: dict,
+    *,
+    camera_id: str,
+    rule: str,
+    severity: str,
+    timestamp: str,
+) -> bool:
+    return (
+        alert.get("cameraId"),
+        alert.get("rule"),
+        alert.get("severity"),
+        alert.get("timestamp"),
+    ) == (camera_id, rule, severity, timestamp)
+
+
+def _remove_unreferenced_created_snapshots(
+    created_paths: list[Path],
+    persisted: dict | None,
+) -> None:
+    referenced_names = set()
+    if persisted is not None:
+        for key in ("snapshotUrl", "cleanSnapshotUrl"):
+            value = persisted.get(key)
+            if value:
+                referenced_names.add(Path(str(value)).name)
+    for path in created_paths:
+        if path.name not in referenced_names:
+            path.unlink(missing_ok=True)
 
 
 def get_alerts(
@@ -175,6 +299,8 @@ def acknowledge_alert(alert_id: str, by: str = "Admin") -> dict | None:
                 "UPDATE alerts SET status = 'acknowledged', acknowledged_by = %s, acknowledged_at = %s WHERE id = %s AND status = 'active'",
                 (by, now, alert_id),
             )
+            if cur.rowcount:
+                alert_delivery_store.cancel_escalations(alert_id, cursor=cur)
         conn.commit()
     return get_alert(alert_id)
 
@@ -187,6 +313,8 @@ def resolve_alert(alert_id: str) -> dict | None:
                 "UPDATE alerts SET status = 'resolved', resolved_at = %s WHERE id = %s AND status IN ('active', 'acknowledged')",
                 (now, alert_id),
             )
+            if cur.rowcount:
+                alert_delivery_store.cancel_escalations(alert_id, cursor=cur)
         conn.commit()
     return get_alert(alert_id)
 
@@ -199,6 +327,8 @@ def snooze_alert(alert_id: str, minutes: int = 15) -> dict | None:
                 "UPDATE alerts SET status = 'snoozed', snoozed_until = %s WHERE id = %s AND status IN ('active', 'acknowledged')",
                 (until, alert_id),
             )
+            if cur.rowcount:
+                alert_delivery_store.cancel_escalations(alert_id, cursor=cur)
         conn.commit()
     return get_alert(alert_id)
 
@@ -211,6 +341,8 @@ def mark_false_positive(alert_id: str) -> dict | None:
                 "UPDATE alerts SET status = 'resolved', resolved_at = %s, false_positive = TRUE WHERE id = %s",
                 (now, alert_id),
             )
+            if cur.rowcount:
+                alert_delivery_store.cancel_escalations(alert_id, cursor=cur)
         conn.commit()
     return get_alert(alert_id)
 
@@ -924,32 +1056,110 @@ def get_spatial_heatmap(
 
 AUTO_RESOLVE_MAX_AGE_HOURS = 24
 AUTO_RESOLVE_INTERVAL_HOURS = 1
+AUTO_RESOLVE_BATCH_SIZE = 250
 
 
-def auto_resolve_stale_alerts(max_age_hours: int = AUTO_RESOLVE_MAX_AGE_HOURS) -> int:
-    """Resolve active alerts older than max_age_hours. Returns count resolved."""
+def auto_resolve_stale_alerts_batch(
+    max_age_hours: int = AUTO_RESOLVE_MAX_AGE_HOURS,
+    *,
+    batch_size: int = AUTO_RESOLVE_BATCH_SIZE,
+) -> tuple[int, bool]:
+    """Resolve and fence one bounded batch, returning ``(count, has_more)``."""
+    batch_size = max(1, min(int(batch_size), 2000))
     now = datetime.now(timezone.utc).isoformat()
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE alerts SET status = 'resolved', resolved_at = %s "
-                "WHERE status = 'active' AND timestamp < %s",
-                (now, cutoff),
+                """
+                SELECT id
+                FROM alerts
+                WHERE status = 'active' AND timestamp < %s
+                ORDER BY timestamp, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+                """,
+                (cutoff, batch_size + 1),
             )
-            count = cur.rowcount
+            candidates = [str(row[0]) for row in cur.fetchall()]
+            alert_ids = candidates[:batch_size]
+            resolved_ids: list[str] = []
+            if alert_ids:
+                cur.execute(
+                    """
+                    UPDATE alerts
+                    SET status = 'resolved', resolved_at = %s
+                    WHERE id = ANY(%s) AND status = 'active'
+                    RETURNING id
+                    """,
+                    (now, alert_ids),
+                )
+                resolved_ids = [str(row[0]) for row in cur.fetchall()]
+                # Fence every resolved alert's escalation obligations in the
+                # same transaction and one bounded set-based update.
+                alert_delivery_store.cancel_escalations_many(
+                    resolved_ids,
+                    cursor=cur,
+                )
         conn.commit()
+    count = len(resolved_ids)
+    has_more = len(candidates) > batch_size
     if count:
-        logger.info("Auto-resolved %d stale alerts older than %dh", count, max_age_hours)
+        logger.info(
+            "Auto-resolved bounded stale alert batch",
+            extra={
+                "alert_count": count,
+                "max_age_hours": max_age_hours,
+                "has_more": has_more,
+            },
+        )
+    return count, has_more
+
+
+def auto_resolve_stale_alerts(
+    max_age_hours: int = AUTO_RESOLVE_MAX_AGE_HOURS,
+    *,
+    batch_size: int = AUTO_RESOLVE_BATCH_SIZE,
+) -> int:
+    """Resolve one bounded stale-alert batch and prune one bounded history batch."""
+    count, _has_more = auto_resolve_stale_alerts_batch(
+        max_age_hours,
+        batch_size=batch_size,
+    )
+    alert_delivery_store.cleanup_completed(batch_size=batch_size)
     return count
+
+
+async def reconcile_stale_alerts(
+    max_age_hours: int = AUTO_RESOLVE_MAX_AGE_HOURS,
+    *,
+    batch_size: int = AUTO_RESOLVE_BATCH_SIZE,
+) -> int:
+    """Drain stale alerts in bounded transactions without blocking the event loop."""
+    total = 0
+    while True:
+        count, has_more = await asyncio.to_thread(
+            auto_resolve_stale_alerts_batch,
+            max_age_hours,
+            batch_size=batch_size,
+        )
+        total += count
+        if not has_more:
+            break
+        # Let request handling and the delivery workers run between batches.
+        await asyncio.sleep(0)
+    await asyncio.to_thread(
+        alert_delivery_store.cleanup_completed,
+        batch_size=batch_size,
+    )
+    return total
 
 
 async def auto_resolve_loop() -> None:
     """Background loop that auto-resolves stale alerts every hour."""
-    await asyncio.to_thread(auto_resolve_stale_alerts)  # Run once at startup
     while True:
         await asyncio.sleep(AUTO_RESOLVE_INTERVAL_HOURS * 60 * 60)
         try:
-            await asyncio.to_thread(auto_resolve_stale_alerts)
+            await reconcile_stale_alerts()
         except Exception:
             logger.exception("Auto-resolve loop failed")

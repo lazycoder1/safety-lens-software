@@ -38,6 +38,20 @@ _HEALTH_CACHE_TTL = 5.0
 _health_cache_lock = __import__("threading").Lock()
 
 
+def _registered_worker_is_alive(
+    workers: dict,
+    camera_id: str,
+) -> bool:
+    """Return actual thread liveness, not mere registry membership."""
+    ownership = workers.get(camera_id)
+    if ownership is None:
+        return False
+    try:
+        return bool(ownership[0].is_alive())
+    except (AttributeError, IndexError, TypeError):
+        return False
+
+
 def _diagnostic_secret_values(config: dict) -> list[str]:
     values = [
         config.get("database", {}).get("url"),
@@ -81,9 +95,12 @@ def build_health_snapshot() -> dict:
         enabled_cameras = 0
         running_cameras = 0
         now = time.time()
+        missing_vlm_companions = 0
         for cam_id, cam in cfg.get("cameras", {}).items():
             enabled = bool(cam.get("enabled", True))
-            worker_running = cam_id in state.camera_threads
+            worker_running = _registered_worker_is_alive(state.camera_threads, cam_id)
+            vlm_expected = cam.get("demo") == "yolo+vlm"
+            vlm_worker_running = _registered_worker_is_alive(state.vlm_threads, cam_id)
             last_frame_at = state.camera_frame_updated_at.get(cam_id)
             last_frame_age = None if last_frame_at is None else now - last_frame_at
             frame_available = (
@@ -99,12 +116,16 @@ def build_health_snapshot() -> dict:
                 enabled_cameras += 1
             if enabled and worker_running:
                 running_cameras += 1
+            if enabled and vlm_expected and not vlm_worker_running:
+                missing_vlm_companions += 1
             cameras.append(
                 {
                     "id": cam_id,
                     "name": cam.get("name", cam_id),
                     "enabled": enabled,
                     "workerRunning": worker_running,
+                    "vlmExpected": vlm_expected,
+                    "vlmWorkerRunning": vlm_worker_running,
                     "frameAvailable": frame_available,
                     "frameFresh": frame_available,
                     "lastFrameAgeSeconds": None if last_frame_age is None else round(last_frame_age, 1),
@@ -136,9 +157,14 @@ def build_health_snapshot() -> dict:
         if any(model.get("status") == "remote_unavailable" for model in models) and status == "ok":
             status = "degraded"
             reasons.append("model server unavailable")
-        if enabled_cameras and running_cameras < enabled_cameras and status == "ok":
-            status = "degraded"
+        if enabled_cameras and running_cameras < enabled_cameras:
+            if status == "ok":
+                status = "degraded"
             reasons.append("one or more enabled cameras are not running")
+        if missing_vlm_companions:
+            if status == "ok":
+                status = "degraded"
+            reasons.append("one or more enabled VLM camera companions are not running")
 
         result = {
             "status": status,

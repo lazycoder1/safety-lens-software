@@ -43,6 +43,17 @@ router = APIRouter(prefix="/api", tags=["cameras"])
 
 
 def _camera_runtime_status(cam_id: str, camera: dict, cfg: dict, ready_model_keys: set[str] | None = None) -> str:
+    frame_updated_at = state.camera_frame_updated_at.get(cam_id)
+    if (
+        camera.get("enabled", True)
+        and cam_id in state.camera_threads
+        and state.camera_frames.get(cam_id) is not None
+        and frame_updated_at is not None
+        and time.time() - frame_updated_at <= state.CAMERA_FRAME_STALE_SECONDS
+    ):
+        # The producer is demonstrably live. Avoid turning a read-only status
+        # request into a potentially blocking model-server readiness probe.
+        return "running"
     execution_plan = camera.get("execution_plan", build_execution_plan(camera, cfg))
     schedule_state = _capability_schedule_state(camera, cfg, execution_plan)
     scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
