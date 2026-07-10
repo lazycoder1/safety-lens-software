@@ -20,6 +20,7 @@ def lifecycle_state(monkeypatch):
     monkeypatch.setattr(state, "camera_frames", {})
     monkeypatch.setattr(state, "camera_clean_frames", {})
     monkeypatch.setattr(state, "camera_detections", {})
+    monkeypatch.setattr(state, "camera_connection_health", {})
     monkeypatch.setattr(video_processing, "_camera_lifecycle_locks", {})
     monkeypatch.setattr(
         video_processing,
@@ -303,6 +304,16 @@ def test_old_camera_and_vlm_exits_cannot_remove_new_owners(
     new_camera_ownership = (object(), threading.Event())
     state.camera_threads["cam-1"] = new_camera_ownership
     state.camera_frames["cam-1"] = b"new-owner-frame"
+    state.update_camera_connection_health(
+        "cam-1",
+        outage_active=True,
+        outage_started_monotonic=1,
+        outage_failure_count=2,
+        total_failure_count=2,
+        suppressed_failure_count=1,
+        last_transition="outage",
+        last_transition_monotonic=1,
+    )
     monkeypatch.setattr(
         video_processing.threading,
         "current_thread",
@@ -314,6 +325,7 @@ def test_old_camera_and_vlm_exits_cannot_remove_new_owners(
 
     assert state.camera_threads["cam-1"] is new_camera_ownership
     assert state.camera_frames["cam-1"] == b"new-owner-frame"
+    assert state.get_camera_connection_health("cam-1")["outageActive"] is True
 
     old_vlm_thread = object()
     old_vlm_stop = threading.Event()
@@ -329,6 +341,32 @@ def test_old_camera_and_vlm_exits_cannot_remove_new_owners(
     video_processing.vlm_worker("cam-1", old_vlm_stop)
 
     assert state.vlm_threads["cam-1"] is new_vlm_ownership
+
+
+def test_exact_camera_owner_exit_clears_stale_connection_outage(
+    monkeypatch,
+    lifecycle_state,
+):
+    owner = object()
+    stop_event = threading.Event()
+    state.camera_threads["cam-1"] = (owner, stop_event)
+    state.update_camera_connection_health(
+        "cam-1",
+        outage_active=True,
+        outage_started_monotonic=1,
+        outage_failure_count=3,
+        total_failure_count=3,
+        suppressed_failure_count=2,
+        last_transition="outage",
+        last_transition_monotonic=1,
+    )
+    monkeypatch.setattr(video_processing.threading, "current_thread", lambda: owner)
+
+    video_processing._finalize_camera_worker_exit("cam-1", stop_event)
+
+    assert "cam-1" not in state.camera_threads
+    assert state.get_camera_connection_health("cam-1")["outageActive"] is False
+    assert state.camera_runtime_status["cam-1"] == "error"
 
 
 def test_health_degrades_for_dead_camera_and_vlm_threads(monkeypatch):
