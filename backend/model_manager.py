@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import base64
+import gc
 import shutil
 import tempfile
 import threading
@@ -18,6 +19,7 @@ import numpy as np
 
 from capability_registry import ALL_PPE_PROMPT_TERMS, ModelKey
 from constants import PROJECT_ROOT
+from tensorrt_engine import validate_engine
 
 logger = logging.getLogger("rakshak_lens.models")
 
@@ -157,8 +159,14 @@ def _new_model_runtime() -> dict[str, Any]:
         "handle": None,
         "lock": threading.Lock(),
         "loaded_path": None,
+        "runtime_path": None,
+        "runtime_backend": None,
+        "runtime_fallback_error": None,
+        "fallback_path": None,
+        "fixed_imgsz": None,
         "current_classes": [],
         "class_embeddings": {},
+        "warmed": False,
     }
 
 
@@ -411,6 +419,7 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
     definition = MODEL_DEFINITIONS[model_key]
     state = deepcopy(_MODEL_STATES[model_key])
     active_path = state.get("active_path")
+    runtime = _MODEL_RUNTIMES[model_key]
     return {
         "model_key": model_key,
         "display_name": definition["display_name"],
@@ -425,6 +434,10 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
         "shared_asset_key": definition["shared_asset_key"],
         "is_ready": state["status"] == "ready",
         "is_downloaded": bool(active_path),
+        "runtime_backend": runtime.get("runtime_backend"),
+        "runtime_path": runtime.get("runtime_path"),
+        "runtime_fallback_error": runtime.get("runtime_fallback_error"),
+        "runtime_fixed_imgsz": runtime.get("fixed_imgsz"),
     }
 
 
@@ -685,9 +698,57 @@ def _apply_open_vocab_classes(
     runtime["current_classes"] = classes
 
 
+def _configured_runtime_path(
+    model_key: ModelKey,
+    source_path: Path,
+) -> tuple[Path, str, int | None, str | None]:
+    if model_key != "coco_primary":
+        return source_path, "pytorch", None, None
+    configured = os.environ.get("SAFETYLENS_COCO_TENSORRT_ENGINE", "").strip()
+    if not configured:
+        return source_path, "pytorch", None, None
+    engine_path = Path(configured).expanduser()
+    if not engine_path.is_absolute():
+        engine_path = source_path.parent / engine_path
+    manifest, error = validate_engine(
+        source_path=source_path,
+        engine_path=engine_path,
+        expected_task="detect",
+    )
+    if error:
+        logger.warning(
+            "TensorRT engine rejected; using PyTorch",
+            extra={"model_key": model_key, "engine_path": str(engine_path), "reason": error},
+        )
+        return source_path, "pytorch", None, error
+    return engine_path, "tensorrt", int(manifest["imgsz"]), None
+
+
+def _set_runtime_metadata(
+    runtime: dict[str, Any],
+    *,
+    source_path: Path,
+    runtime_path: Path,
+    backend: str,
+    fixed_imgsz: int | None,
+    fallback_error: str | None,
+) -> None:
+    runtime["loaded_path"] = str(source_path)
+    runtime["runtime_path"] = str(runtime_path)
+    runtime["runtime_backend"] = backend
+    runtime["runtime_fallback_error"] = fallback_error
+    runtime["fallback_path"] = str(source_path) if backend == "tensorrt" else None
+    runtime["fixed_imgsz"] = fixed_imgsz
+
+
 def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     runtime = _MODEL_RUNTIMES[model_key]
-    if runtime["handle"] is not None and runtime["loaded_path"] == str(source_path):
+    runtime_path, backend, fixed_imgsz, fallback_error = _configured_runtime_path(model_key, source_path)
+    if (
+        runtime["handle"] is not None
+        and runtime["loaded_path"] == str(source_path)
+        and runtime.get("runtime_path") == str(runtime_path)
+    ):
         if model_key in _OPEN_VOCAB_MODEL_KEYS:
             from config_manager import get_config
 
@@ -706,16 +767,49 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
         # InsightFace owns its own runtime and lazy-loads in face_recognition.py.
         # The model manager only tracks whether the expected model directory exists.
         runtime["handle"] = "insightface"
-        runtime["loaded_path"] = str(source_path)
+        _set_runtime_metadata(
+            runtime,
+            source_path=source_path,
+            runtime_path=source_path,
+            backend="insightface",
+            fixed_imgsz=None,
+            fallback_error=None,
+        )
         runtime["current_classes"] = []
         return
 
     from ultralytics import YOLO
 
+    device = _runtime_device(_configured_local_device())
+
     if model_key not in _OPEN_VOCAB_MODEL_KEYS:
-        handle = YOLO(str(source_path))
+        try:
+            handle = (
+                YOLO(str(runtime_path), task="detect")
+                if backend == "tensorrt"
+                else YOLO(str(runtime_path))
+            )
+        except Exception as exc:
+            if backend != "tensorrt":
+                raise
+            logger.exception(
+                "TensorRT model load failed; using PyTorch",
+                extra={"model_key": model_key, "runtime_path": str(runtime_path)},
+            )
+            runtime_path = source_path
+            backend = "pytorch_fallback"
+            fixed_imgsz = None
+            fallback_error = f"TensorRT load failed: {exc}"
+            handle = YOLO(str(source_path))
         runtime["handle"] = handle
-        runtime["loaded_path"] = str(source_path)
+        _set_runtime_metadata(
+            runtime,
+            source_path=source_path,
+            runtime_path=runtime_path,
+            backend=backend,
+            fixed_imgsz=fixed_imgsz,
+            fallback_error=fallback_error,
+        )
         runtime["current_classes"] = []
         runtime["warmed"] = False
         return
@@ -726,7 +820,14 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
 
     device = _runtime_device(_configured_local_device())
     runtime["handle"] = handle
-    runtime["loaded_path"] = str(source_path)
+    _set_runtime_metadata(
+        runtime,
+        source_path=source_path,
+        runtime_path=source_path,
+        backend="pytorch",
+        fixed_imgsz=None,
+        fallback_error=None,
+    )
     runtime["current_classes"] = []
     runtime["class_embeddings"] = {}
     runtime["warmed"] = False
@@ -934,6 +1035,59 @@ def _run_install_job(job_id: str):
                 _ACTIVE_JOB_ID = None
 
 
+def _predict_with_runtime(
+    model_key: ModelKey,
+    runtime: dict[str, Any],
+    frame,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str] | None = None,
+):
+    handle = runtime["handle"]
+    if handle is None:
+        raise RuntimeError(f"Model {model_key} is not loaded")
+    effective_imgsz = runtime.get("fixed_imgsz") or imgsz
+
+    if not runtime.get("warmed"):
+        dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+        handle.predict(dummy, verbose=False, device=device, imgsz=effective_imgsz)
+        runtime["warmed"] = True
+    if model_key in _OPEN_VOCAB_MODEL_KEYS:
+        requested = classes if classes is not None else _default_open_vocab_classes(model_key)
+        requested_classes = [value for value in requested if isinstance(value, str) and value]
+        if runtime["current_classes"] != requested_classes:
+            _apply_open_vocab_classes(runtime, handle, requested_classes, device=device)
+    return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=effective_imgsz)
+
+
+def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> None:
+    fallback_path = runtime.get("fallback_path")
+    if not fallback_path:
+        raise error
+    old_handle = runtime.get("handle")
+    runtime["handle"] = None
+    del old_handle
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        logger.debug("CUDA cache cleanup skipped during TensorRT fallback", exc_info=True)
+    from ultralytics import YOLO
+
+    runtime["handle"] = YOLO(str(fallback_path))
+    runtime["runtime_path"] = str(fallback_path)
+    runtime["runtime_backend"] = "pytorch_fallback"
+    runtime["runtime_fallback_error"] = str(error)
+    runtime["fallback_path"] = None
+    runtime["fixed_imgsz"] = None
+    runtime["warmed"] = False
+
+
 def predict(
     model_key: ModelKey,
     frame,
@@ -945,21 +1099,35 @@ def predict(
 ):
     runtime_device = _runtime_device(device)
     runtime = _MODEL_RUNTIMES[model_key]
-    handle = runtime["handle"]
-    if handle is None:
-        raise RuntimeError(f"Model {model_key} is not loaded")
 
     with runtime["lock"]:
-        if not runtime.get("warmed"):
-            dummy = np.zeros((320, 320, 3), dtype=np.uint8)
-            handle.predict(dummy, verbose=False, device=runtime_device, imgsz=imgsz)
-            runtime["warmed"] = True
-        if model_key in _OPEN_VOCAB_MODEL_KEYS:
-            requested = classes if classes is not None else _default_open_vocab_classes(model_key)
-            requested_classes = [value for value in requested if isinstance(value, str) and value]
-            if runtime["current_classes"] != requested_classes:
-                _apply_open_vocab_classes(runtime, handle, requested_classes, device=runtime_device)
-        return handle.predict(frame, conf=conf, verbose=False, device=runtime_device, imgsz=imgsz)
+        try:
+            return _predict_with_runtime(
+                model_key,
+                runtime,
+                frame,
+                conf=conf,
+                device=runtime_device,
+                imgsz=imgsz,
+                classes=classes,
+            )
+        except Exception as exc:
+            if runtime.get("runtime_backend") != "tensorrt":
+                raise
+            logger.exception(
+                "TensorRT inference failed; activating PyTorch fallback",
+                extra={"model_key": model_key, "runtime_path": runtime.get("runtime_path")},
+            )
+            _activate_pytorch_fallback(runtime, exc)
+            return _predict_with_runtime(
+                model_key,
+                runtime,
+                frame,
+                conf=conf,
+                device=runtime_device,
+                imgsz=imgsz,
+                classes=classes,
+            )
 
 
 def _records_from_results(results) -> list[dict[str, Any]]:
