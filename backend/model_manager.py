@@ -344,10 +344,15 @@ def _remote_headers(token: str) -> dict[str, str]:
 
 
 def _remote_session():
-    import requests
+    """Return one keep-alive HTTP session per caller thread.
 
+    Camera workers call the model server concurrently, while requests.Session
+    does not promise cross-thread safety. A thread-local session keeps sockets
+    warm without sharing mutable connection-pool state between cameras.
+    """
     session = getattr(_REMOTE_SESSION_LOCAL, "session", None)
     if session is None:
+        import requests
         session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
         session.mount("http://", adapter)
@@ -387,16 +392,15 @@ def _remote_post_jpeg(
     params: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Post JPEG bytes directly, returning None when the server lacks the route."""
-    import requests
-
-    headers = _remote_headers()
+    settings = _remote_settings()
+    headers = _remote_headers(settings["token"])
     headers["Content-Type"] = "image/jpeg"
-    response = requests.post(
-        f"{MODEL_SERVER_URL}{path}",
+    response = _remote_session().post(
+        f"{settings['url']}{path}",
         params=params,
         data=frame_jpeg,
         headers=headers,
-        timeout=MODEL_SERVER_TIMEOUT_SECONDS,
+        timeout=settings["timeout_seconds"],
     )
     if response.status_code == 404:
         try:
