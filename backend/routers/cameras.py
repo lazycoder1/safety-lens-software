@@ -22,6 +22,7 @@ from camera_connection import (
 from camera_config_utils import sync_camera_rule_fields
 from camera_discovery import discover_cameras, resolve_scan_networks, test_camera_connection
 from camera_planner import build_execution_plan, normalize_camera_record
+from camera_runtime import derive_camera_runtime_status
 from config_manager import get_config, save_config
 from dependencies import require_admin
 from video_processing import restart_camera, start_camera, stop_camera
@@ -31,13 +32,11 @@ router = APIRouter(prefix="/api", tags=["cameras"])
 
 def _camera_runtime_status(cam_id: str, camera: dict) -> str:
     required_model_keys = camera.get("execution_plan", {}).get("required_model_keys", [])
-    if model_manager.missing_model_keys(required_model_keys):
-        return "awaiting_model_install"
-    if not camera.get("enabled", True):
-        return "offline"
-    if cam_id in state.camera_threads:
-        return "running" if state.camera_frames.get(cam_id) is not None else "starting"
-    return "offline"
+    return derive_camera_runtime_status(
+        cam_id,
+        camera,
+        missing_models=bool(model_manager.missing_model_keys(required_model_keys)),
+    )
 
 
 def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
@@ -71,7 +70,7 @@ def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
         "ppe_rule_ids": cam.get("ppe_rule_ids", []),
         "safety_rule_ids": cam.get("safety_rule_ids", []),
         "custom_long_tail_terms": cam.get("custom_long_tail_terms", []),
-        "status": "online" if cam_id in state.camera_threads else "offline",
+        "status": "online" if runtime_status == "running" else "offline",
         "detectionsCount": len(state.camera_detections.get(cam_id, [])),
     }
     payload.update(public_camera_connection_fields(cam))

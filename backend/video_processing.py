@@ -63,6 +63,14 @@ _COCO_CLASS_TO_CAPABILITIES = {
 FACE_LOG_COOLDOWN_SECONDS = 10.0
 
 
+def _clear_camera_observation(camera_id: str) -> None:
+    """Discard current-frame state that is invalid once a source disconnects."""
+    state.camera_frames[camera_id] = None
+    state.camera_clean_frames[camera_id] = None
+    state.camera_detections[camera_id] = []
+    _last_pose_results.pop(camera_id, None)
+
+
 def _normalize_text(value: str) -> str:
     return value.lower().replace("_", " ").replace("-", " ").strip()
 
@@ -363,6 +371,17 @@ def _run_face_recognition(
 
 
 def video_processor(camera_id: str, stop_event: threading.Event):
+    """Run one camera worker and never publish observations after it exits."""
+    try:
+        _video_processor_loop(camera_id, stop_event)
+    except Exception:
+        logger.exception("Camera worker exited unexpectedly", extra={"camera_id": camera_id})
+        raise
+    finally:
+        _clear_camera_observation(camera_id)
+
+
+def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     cfg = get_config()
     cam = cfg["cameras"][camera_id]
     stream_type = cam.get("stream_type", "file")
@@ -389,8 +408,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
     if missing_model_keys:
         state.camera_runtime_status[camera_id] = "awaiting_model_install"
-        state.camera_frames[camera_id] = None
-        state.camera_detections[camera_id] = []
+        _clear_camera_observation(camera_id)
         logger.warning("Camera waiting on missing models", extra={"camera_id": camera_id, "missing_models": missing_model_keys})
         return
 
@@ -401,6 +419,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
         cap = open_video_capture(video_source, stream_type=stream_type)
         if not cap.isOpened():
             cap.release()
+            _clear_camera_observation(camera_id)
+            active_violations.clear()
+            violation_window.clear()
+            last_annotated = None
             delay = reconnect_delay_seconds(reconnect_failures, camera_id) if stream_type == "rtsp" else 5.0
             reconnect_failures += 1
             state.camera_runtime_status[camera_id] = "reconnecting"
@@ -426,6 +448,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             started = time.time()
             ok, frame = cap.read()
             if not ok:
+                _clear_camera_observation(camera_id)
+                active_violations.clear()
+                violation_window.clear()
+                last_annotated = None
                 break
             if not received_frame:
                 received_frame = True
@@ -565,6 +591,10 @@ def video_processor(camera_id: str, stop_event: threading.Event):
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+        _clear_camera_observation(camera_id)
+        active_violations.clear()
+        violation_window.clear()
+        last_annotated = None
         cap.release()
         if stop_event.is_set():
             return
@@ -596,8 +626,7 @@ def start_camera(cam_id: str):
 
     execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
-    state.camera_frames[cam_id] = None
-    state.camera_detections[cam_id] = []
+    _clear_camera_observation(cam_id)
     if missing_model_keys:
         state.camera_runtime_status[cam_id] = "awaiting_model_install"
         logger.warning("Skipping camera start until models are ready", extra={"camera_id": cam_id, "missing_models": missing_model_keys})
@@ -646,7 +675,9 @@ def stop_camera(cam_id: str) -> bool:
     if not camera_stopped:
         return False
     state.camera_frames.pop(cam_id, None)
+    state.camera_clean_frames.pop(cam_id, None)
     state.camera_detections.pop(cam_id, None)
+    _last_pose_results.pop(cam_id, None)
     state.camera_runtime_status[cam_id] = "offline"
     return True
 
