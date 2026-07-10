@@ -50,7 +50,7 @@ The long-lived license. Issued once at deployment, valid for the contract durati
 | `issued_by_partner` | string | Partner slug from License Hub. Audit trail. |
 | `max_cameras` | int | Hard cap enforced when adding cameras. |
 | `features` | string[] | V1 only supports `["base"]`. Future: `anpr`, `face`, `ai_search`. Edge ignores unknown values. |
-| `issued_at` | ISO 8601 UTC | Informational. |
+| `issued_at` | ISO 8601 UTC | Signed start of the initial heartbeat window. Until the first heartbeat is stored, enforcement uses `issued_at + 35 days`. |
 | `expires_at` | ISO 8601 UTC | Hard expiry. After this + grace period, inference suspends. |
 | `heartbeat_url` | string | Where the edge fetches refresh tokens. Lets us migrate Hub URLs without re-issuing licenses. |
 | `signature` | string (base64) | Ed25519 signature over the canonical payload with `signature` field removed. |
@@ -129,9 +129,9 @@ The edge computes a single `LicenseState` from the combination of (`.lic` expiry
 
 | State | Trigger | Inference | UI Banner | Admin UI |
 |---|---|---|---|---|
-| `valid` | Both license and heartbeat are within their validity windows | runs | none | reachable |
-| `warning` | Heartbeat is past `valid_until` but within grace, OR license is within 14 days of expiry | runs | yellow: "License check overdue" or "License expires in N days" | reachable |
-| `grace` | License is past `expires_at` but within 14-day grace, OR heartbeat is past `valid_until` + 14 days | runs | red: "License expired N days ago — N days until suspension" | reachable |
+| `valid` | Both license and heartbeat windows are valid and license expiry is more than 14 days away | runs | none | reachable |
+| `warning` | License is within 14 days of expiry, while neither license nor heartbeat is overdue | runs | yellow: "License expires in N days" | reachable |
+| `grace` | License is past `expires_at` but within its 14-day grace, OR heartbeat is past `valid_until` but within its 14-day grace | runs | red: "N days until suspension" | reachable |
 | `suspended` | Past grace period on either license or heartbeat | **stopped** | red: "License suspended — please upload a new license" | **still reachable** |
 
 ### Transitions
@@ -150,6 +150,10 @@ The edge computes a single `LicenseState` from the combination of (`.lic` expiry
 
 The `valid_until` is set 35 days after issuance, so a healthy edge with a working refresh job will never enter the warning state. The grace period only matters if the refresh job fails.
 
+Before the first heartbeat exists, the edge derives `valid_until` from the
+signed license as `license.issued_at + 35 days`. The following 14-day grace is
+the final deadline. Removing a heartbeat file therefore cannot reset the clock.
+
 ## Heartbeat Refresh Loop (edge side)
 
 - Background asyncio task started by FastAPI
@@ -162,16 +166,17 @@ The `valid_until` is set 35 days after issuance, so a healthy edge with a workin
 ## File Layout on Edge
 
 ```
-backend/
-  keys/
-    license_pub.pem          # Ed25519 public key, committed to repo
-  license/
-    current.lic              # The active license file (gitignored)
-  heartbeat/
-    current.json             # The active heartbeat token (gitignored)
+/app/backend/keys/
+  license_pub.pem                    # Ed25519 public key, baked into image
+/var/lib/safetylens/license/
+  current.lic                        # Active license in persistent volume
+/var/lib/safetylens/heartbeat/
+  current.json                       # Active heartbeat in persistent volume
 ```
 
-`backend/license/` and `backend/heartbeat/` are mounted as a Docker volume in production so license state survives container restarts.
+`/var/lib/safetylens` is a stable named Docker volume in production so license
+and heartbeat state survive container recreation and image upgrades. See
+[`runtime-state.md`](runtime-state.md) for the migration and verification gate.
 
 ## Versioning
 

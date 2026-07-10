@@ -10,6 +10,7 @@ from uuid import uuid4
 from psycopg2.extras import RealDictCursor
 
 from db import get_conn
+from secret_redaction import redact_sensitive_data
 
 logger = logging.getLogger("rakshak_lens.audit")
 
@@ -54,7 +55,7 @@ def log_event(
 ) -> dict:
     entry_id = str(uuid4())[:8]
     timestamp = datetime.now(timezone.utc).isoformat()
-    payload = details or {}
+    payload = redact_sensitive_data(details or {})
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -131,6 +132,7 @@ def _row_to_dict(row: dict) -> dict:
         details = json.loads(raw_details)
     else:
         details = raw_details or {}
+    details = redact_sensitive_data(details)
     return {
         "id": row["id"],
         "timestamp": row["timestamp"],

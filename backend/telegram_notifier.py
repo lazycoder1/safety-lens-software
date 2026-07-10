@@ -10,6 +10,7 @@ import logging
 import requests
 
 from config_manager import get_config
+from secret_redaction import redact_text_secrets
 
 logger = logging.getLogger("rakshak_lens.telegram")
 
@@ -18,6 +19,7 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
 def send_alert(alert: dict, snapshot_path: str | None = None) -> bool:
     """Send an alert to Telegram and return whether Telegram accepted it."""
+    bot_token = ""
     try:
         cfg = get_config()
         tg = cfg.get("telegram", {})
@@ -44,8 +46,9 @@ def send_alert(alert: dict, snapshot_path: str | None = None) -> bool:
 
         logger.info("Telegram alert sent", extra={"alert_id": alert.get("id"), "camera_id": alert.get("cameraId")})
         return True
-    except Exception:
-        logger.exception("Telegram notification failed")
+    except Exception as exc:
+        safe_error = redact_text_secrets(str(exc), [bot_token])
+        logger.error("Telegram notification failed: %s", safe_error)
         return False
 
 
@@ -65,7 +68,7 @@ def test_connection(bot_token: str, chat_id: str) -> dict:
         _validate_response(resp)
         return {"ok": True}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": redact_text_secrets(str(e), [bot_token])}
 
 
 def _format_caption(alert: dict) -> str:
@@ -151,4 +154,4 @@ def fetch_groups(bot_token: str) -> dict:
                     }
         return {"ok": True, "groups": list(seen.values())}
     except Exception as e:
-        return {"ok": False, "error": str(e), "groups": []}
+        return {"ok": False, "error": redact_text_secrets(str(e), [bot_token]), "groups": []}

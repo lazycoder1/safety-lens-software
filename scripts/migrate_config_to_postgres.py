@@ -19,6 +19,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from camera_config_utils import normalize_config  # noqa: E402
 from config_manager import PG_CONFIG_ID  # noqa: E402
+from runtime_storage import atomic_write_private  # noqa: E402
 
 
 APP_CONFIG_TABLE_SQL = """
@@ -99,8 +100,7 @@ def upsert_config(conn, config_id: str, config: dict) -> None:
 
 
 def write_backup(path: Path, config: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2))
+    atomic_write_private(path, (json.dumps(config, indent=2) + "\n").encode("utf-8"))
 
 
 def main() -> int:

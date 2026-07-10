@@ -159,17 +159,17 @@ export function LicenseGate() {
               <span className="font-semibold text-amber-700">
                 {status.days_until_suspension} days
               </span>
-              . Please upload a renewed license.
+              . Refresh the heartbeat or upload a renewed license as indicated above.
             </p>
           )}
 
           {status.state === "warning" && status.days_until_suspension !== null && (
             <p className="text-sm text-gray-600">
-              Your license expires in{" "}
+              The system will suspend in{" "}
               <span className="font-semibold text-amber-700">
                 {status.days_until_suspension} days
               </span>
-              . Contact your implementation partner for renewal.
+              if the license is not renewed.
             </p>
           )}
 
@@ -177,7 +177,7 @@ export function LicenseGate() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".lic,.json"
+            accept=".lic,.json,application/json"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]
@@ -217,7 +217,10 @@ export function LicenseGate() {
         {/* Footer */}
         <div className="px-6 py-4 bg-gray-50 border-t flex items-center justify-between">
           <button
-            onClick={() => navigate("/system/license")}
+            onClick={() => {
+              setDismissed(true)
+              navigate("/system/license")
+            }}
             className="text-sm text-blue-600 hover:text-blue-800 font-medium"
           >
             Go to License page

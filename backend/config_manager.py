@@ -6,7 +6,6 @@ Thread-safe config loading, saving, and updating with atomic writes.
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
 from copy import deepcopy
@@ -17,6 +16,8 @@ from psycopg2.extras import Json
 
 from camera_connection import redact_camera_secrets
 from camera_config_utils import normalize_config
+from runtime_storage import atomic_write_file
+from secret_redaction import REDACTED_VALUE, redact_sensitive_data
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 CONFIG_STORE_ENV = "SAFETYLENS_CONFIG_STORE"
@@ -449,7 +450,8 @@ def load_config() -> dict:
             _config["cameras"] = deepcopy(loaded["cameras"])
         _config, outputs_normalized = normalize_alert_outputs(_config)
         _config, normalized = normalize_config(_config)
-        if normalized or outputs_normalized or _config != loaded:
+        needs_postgres_seed = _resolve_config_store() == "postgres" and _config_version is None
+        if needs_postgres_seed or normalized or outputs_normalized or _config != loaded:
             _save_unlocked(_config)
         return _config
 
@@ -544,26 +546,43 @@ def update_config(path: str, value) -> dict:
     return config
 
 
+def remove_legacy_jwt_secret(expected_secret: str) -> bool:
+    """Delete only a matching legacy JWT field without overwriting other config."""
+    global _config, _config_checked_at, _config_version
+    with _lock:
+        if _resolve_config_store() == "postgres":
+            removed, version = _remove_legacy_jwt_secret_from_postgres(expected_secret)
+            if not removed:
+                return False
+            _config_version = version
+        else:
+            current = _config
+            if current is None:
+                current, _version = _load_raw_config_with_version_unlocked()
+            auth = current.get("auth", {})
+            if not isinstance(auth, dict) or auth.get("jwt_secret") != expected_secret:
+                return False
+            current = deepcopy(current)
+            current["auth"].pop("jwt_secret", None)
+            if not current["auth"]:
+                current.pop("auth")
+            _save_to_disk(current)
+
+        if _config is not None:
+            refreshed = deepcopy(_config)
+            auth = refreshed.get("auth", {})
+            if isinstance(auth, dict) and auth.get("jwt_secret") == expected_secret:
+                auth.pop("jwt_secret", None)
+                if not auth:
+                    refreshed.pop("auth", None)
+            _config = refreshed
+        _config_checked_at = time.monotonic()
+        return True
+
+
 def get_redacted_config() -> dict:
     """Return a copy of config with secrets and credentials masked."""
     config = json.loads(json.dumps(get_config()))
-
-    telegram = config.get("telegram", {})
-    if telegram.get("bot_token"):
-        telegram["bot_token"] = "***redacted***"
-
-    email = config.get("email", {})
-    if email.get("smtp_pass"):
-        email["smtp_pass"] = "***redacted***"
-
-    webhook = config.get("webhook", {})
-    for header_key in list(webhook.get("headers", {}).keys()):
-        if "auth" in header_key.lower() or "token" in header_key.lower():
-            webhook["headers"][header_key] = "***redacted***"
-
-    auth = config.get("auth", {})
-    if auth.get("jwt_secret"):
-        auth["jwt_secret"] = "***redacted***"
 
     database = config.get("database", {})
     db_url = database.get("url")
@@ -580,21 +599,22 @@ def get_redacted_config() -> dict:
     for camera_id, camera in list(cameras.items()):
         cameras[camera_id] = redact_camera_secrets(camera)
 
-    return config
+    webhook = config.get("webhook", {})
+    if webhook.get("url"):
+        webhook["url"] = REDACTED_VALUE
+
+    return redact_sensitive_data(config)
 
 
 def get_public_config() -> dict:
     """Return config data safe for normal API responses."""
-    config = json.loads(json.dumps(get_config()))
+    source = get_config()
+    config = get_redacted_config()
     model_server = config.get("model_server")
     if isinstance(model_server, dict):
-        token = model_server.get("token")
-        model_server["token_configured"] = bool(token)
+        source_model_server = source.get("model_server", {})
+        model_server["token_configured"] = bool(source_model_server.get("token"))
         model_server.pop("token", None)
-    config["alert_outputs"] = redact_alert_outputs(config.get("alert_outputs", []))
-    cameras = config.get("cameras", {})
-    for camera_id, camera in list(cameras.items()):
-        cameras[camera_id] = redact_camera_secrets(camera)
     return config
 
 
@@ -628,22 +648,8 @@ def _load_raw_config_with_version_unlocked() -> tuple[dict, object | None]:
 
 
 def _save_to_disk(config: dict) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=f"{CONFIG_PATH.name}.",
-        suffix=".tmp",
-        dir=CONFIG_PATH.parent,
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(config, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, CONFIG_PATH)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+    payload = (json.dumps(config, indent=2) + "\n").encode("utf-8")
+    atomic_write_file(CONFIG_PATH, payload, file_mode=0o600)
 
 
 def _get_postgres_dsn() -> str:
@@ -712,3 +718,23 @@ def _save_to_postgres(config: dict):
             row = cur.fetchone()
         conn.commit()
         return row[0]
+
+
+def _remove_legacy_jwt_secret_from_postgres(expected_secret: str) -> tuple[bool, object | None]:
+    with psycopg2.connect(_get_postgres_dsn()) as conn:
+        _ensure_pg_config_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE app_config
+                SET config = config #- '{auth,jwt_secret}',
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND config #>> '{auth,jwt_secret}' = %s
+                RETURNING updated_at
+                """,
+                (PG_CONFIG_ID, expected_secret),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return row is not None, row[0] if row else None

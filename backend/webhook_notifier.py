@@ -12,12 +12,14 @@ from pathlib import Path
 import requests
 
 from config_manager import get_config
+from secret_redaction import REDACTED_VALUE, redact_text_secrets
 
 logger = logging.getLogger("rakshak_lens.webhook")
 
 
 def send_alert(alert: dict, snapshot_path: str | None = None) -> bool:
     """POST an alert and return whether the endpoint accepted it."""
+    url = ""
     try:
         cfg = get_config()
         wh = cfg.get("webhook", {})
@@ -40,15 +42,17 @@ def send_alert(alert: dict, snapshot_path: str | None = None) -> bool:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         if not 200 <= response.status_code < 300:
             logger.error(
-                "Webhook rejected alert",
-                extra={"alert_id": alert.get("id"), "url": url, "http_status": response.status_code},
+                "Webhook rejected alert (HTTP %s)",
+                response.status_code,
+                extra={"alert_id": alert.get("id"), "url": REDACTED_VALUE},
             )
             return False
 
-        logger.info("Webhook alert sent", extra={"alert_id": alert.get("id"), "url": url})
+        logger.info("Webhook alert sent", extra={"alert_id": alert.get("id"), "url": REDACTED_VALUE})
         return True
-    except Exception:
-        logger.exception("Webhook notification failed")
+    except Exception as exc:
+        safe_error = redact_text_secrets(str(exc), [url])
+        logger.error("Webhook notification failed: %s", safe_error)
         return False
 
 
@@ -70,7 +74,7 @@ def test_connection(url: str, headers: dict | None = None) -> dict:
             return {"ok": True}
         return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": redact_text_secrets(str(e), [url])}
 
 
 def _build_payload(alert: dict, snapshot_path: str | None, include_snapshot: bool) -> dict:

@@ -4,12 +4,16 @@ The COCO detector can use an explicitly configured, fixed-shape TensorRT engine 
 
 ## Build the engine
 
-Build on the target Jetson, outside the live model-server process. TensorRT engines are coupled to the target GPU and software stack and should not be committed to Git.
+Build on the target Jetson in a one-off model-server container. It mounts the
+same persistent `/app/models` volume but does not compete with the live server
+process. TensorRT engines are coupled to the target GPU and software stack and
+must not be committed to Git.
 
 ```bash
-python3 scripts/export_tensorrt_engine.py \
-  --source /models/coco_primary/yolo26s.pt \
-  --output /models/coco_primary/yolo26s.engine \
+docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
+  python /app/scripts/export_tensorrt_engine.py \
+  --source /app/models/coco_primary/yolo26s.pt \
+  --output /app/models/coco_primary/yolo26s.engine \
   --imgsz 960 \
   --workspace 2
 ```
@@ -19,10 +23,11 @@ The export writes `yolo26s.engine` and `yolo26s.engine.json`. The sidecar record
 For a fixed-prompt YOLOE PPE engine, repeat `--class` in the exact order the camera plan uses and provide the MobileCLIP encoder:
 
 ```bash
-python3 scripts/export_tensorrt_engine.py \
-  --source /models/yoloe_open_vocab/yoloe-26s-seg.pt \
-  --output /models/yoloe_open_vocab/yoloe-26s-seg-helmet.engine \
-  --text-encoder /models/mobileclip2_b.ts \
+docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
+  python /app/scripts/export_tensorrt_engine.py \
+  --source /app/models/yoloe_open_vocab/yoloe-26s-seg.pt \
+  --output /app/models/yoloe_open_vocab/yoloe-26s-seg-helmet.engine \
+  --text-encoder /app/models/mobileclip2_b.ts \
   --class "motorcycle helmet" --class-group rider_helmet_required \
   --class "rider helmet" --class-group rider_helmet_required \
   --class "helmet" --class-group rider_helmet_required
@@ -35,7 +40,7 @@ Set `SAFETYLENS_PPE_TENSORRT_ENGINE` to enable it. PPE and dynamic long-tail YOL
 Set the absolute engine path for the model-server service and recreate that service:
 
 ```bash
-SAFETYLENS_COCO_TENSORRT_ENGINE=/models/coco_primary/yolo26s.engine
+export SAFETYLENS_COCO_TENSORRT_ENGINE=/app/models/coco_primary/yolo26s.engine
 docker compose -f docker-compose.split.yml up -d --force-recreate model-server
 ```
 

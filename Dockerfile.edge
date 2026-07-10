@@ -9,7 +9,9 @@ RUN npm run build
 # ── Stage 2: Lightweight edge backend + frontend ────────────────────────────
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SAFETYLENS_STATE_DIR=/var/lib/safetylens
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 \

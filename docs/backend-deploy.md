@@ -7,6 +7,11 @@ cd /path/to/video-analytics
 ./scripts/deploy_backend.sh --install-systemd
 ```
 
+This helper is for a direct host/systemd installation and retains JSON config
+compatibility. The checked-in Docker Compose deployments use PostgreSQL as the
+only authoritative config store, do not bind-mount `backend/config.json`, and
+persist runtime files as described in [runtime-state.md](runtime-state.md).
+
 What it does:
 
 - creates or reuses `.venv`
@@ -23,7 +28,8 @@ For the hosted demo setup:
 - `license-hub` deploys to Vercel from GitHub
 - `video-analytics/frontend` deploys to Vercel from GitHub
 - `video-analytics/backend` deploys to Vast over SSH from GitHub Actions
-- demo videos, model weights, and `backend/config.json` are synced separately because they are intentionally not stored in git
+- demo videos and model weights are synced separately because they are intentionally not stored in git
+- `backend/config.json` is synced only for direct host/JSON deployments; Compose uses PostgreSQL
 
 ## Backend Topology
 
@@ -97,7 +103,8 @@ The backend GitHub deploy intentionally does not ship:
 
 - `test-videos/`
 - `models/`
-- `backend/config.json`
+- root-level model weights such as `yolo26n.pt`
+- `backend/config.json` (direct host/JSON deployments only)
 
 Those files are gitignored and should stay out of the repo.
 
@@ -110,7 +117,7 @@ cd /path/to/video-analytics
 
 By default it uploads:
 
-- `backend/config.json`
+- `backend/config.json` when targeting a direct host/JSON deployment
 - `test-videos/`
 - `models/`
 

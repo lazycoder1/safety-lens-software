@@ -18,6 +18,7 @@ _test_snapshots = Path(_tmpdir) / "snapshots"
 _test_config = Path(_tmpdir) / "test_config.json"
 
 import alert_store
+import audit_store
 alert_store.SNAPSHOTS_DIR = _test_snapshots
 
 import error_store
@@ -530,6 +531,42 @@ def test_alert_routing_test_returns_output_results():
     assert {result["outputId"] for result in data["results"]} == {"in_app", "browser_sound"}
 
 
+def test_get_config_never_returns_runtime_secrets():
+    cfg = config_manager.get_config()
+    cfg["auth"] = {"jwt_secret": "jwt-secret-sentinel"}
+    cfg["database"] = {"url": "postgresql://user:db-secret-sentinel@db:5432/safetylens"}
+    cfg["telegram"].update({"bot_token": "telegram-secret-sentinel"})
+    cfg["email"].update({"smtp_pass": "smtp-secret-sentinel"})
+    cfg["webhook"].update({
+        "url": "https://hooks.example/secret-sentinel",
+        "headers": {
+            "Authorization": "Bearer header-secret-sentinel",
+            "X-Custom-Key": "custom-header-secret-sentinel",
+        },
+    })
+    config_manager.save_config(cfg)
+
+    token = auth_store.create_token("viewer-test", "viewer", "viewer")
+    resp = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 200
+    payload = json.dumps(resp.json())
+    for sentinel in (
+        "jwt-secret-sentinel",
+        "db-secret-sentinel",
+        "telegram-secret-sentinel",
+        "smtp-secret-sentinel",
+        "secret-sentinel",
+        "header-secret-sentinel",
+        "custom-header-secret-sentinel",
+    ):
+        assert sentinel not in payload
+    assert resp.json()["telegram"]["bot_token"] == "***redacted***"
+    assert resp.json()["email"]["smtp_pass"] == "***redacted***"
+    assert resp.json()["webhook"]["url"] == "***redacted***"
+    assert set(resp.json()["webhook"]["headers"].values()) == {"***redacted***"}
+
+
 # ── PUT /api/config/global ───────────────────────────────────────────────────
 
 @mock.patch("routers.config.restart_all_cameras")
@@ -600,8 +637,60 @@ def test_telegram_config_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert data["enabled"] is True
-    assert data["bot_token"] == "tok123"
+    assert data["bot_token"] == "***redacted***"
     assert data["chat_id"] == "456"
+
+
+def test_redacted_notification_credentials_are_preserved_on_update():
+    cfg = config_manager.get_config()
+    cfg["telegram"]["bot_token"] = "original-telegram-token"
+    cfg["email"]["smtp_pass"] = "original-smtp-password"
+    cfg["webhook"].update({
+        "url": "https://hooks.example/original",
+        "headers": {"Authorization": "Bearer original", "X-Key": "original-key"},
+    })
+    config_manager.save_config(cfg)
+
+    assert api_put(
+        "/api/config/telegram",
+        json={"enabled": True, "bot_token": "***redacted***"},
+    ).status_code == 200
+    assert api_put(
+        "/api/config/email",
+        json={"enabled": True, "smtp_pass": "***redacted***"},
+    ).status_code == 200
+    assert api_put(
+        "/api/config/webhook",
+        json={
+            "enabled": True,
+            "url": "***redacted***",
+            "headers": {
+                "Authorization": "***redacted***",
+                "X-Key": "***redacted***",
+            },
+        },
+    ).status_code == 200
+
+    stored = config_manager.get_config()
+    assert stored["telegram"]["bot_token"] == "original-telegram-token"
+    assert stored["email"]["smtp_pass"] == "original-smtp-password"
+    assert stored["webhook"]["url"] == "https://hooks.example/original"
+    assert stored["webhook"]["headers"] == {
+        "Authorization": "Bearer original",
+        "X-Key": "original-key",
+    }
+    new_webhook_url = "https://hooks.example/services/new-secret-path"
+    assert api_put(
+        "/api/config/webhook",
+        json={"url": new_webhook_url},
+    ).status_code == 200
+    webhook_audit = next(
+        event
+        for event in audit_store.get_recent(limit=50)
+        if event["action"] == "config.webhook_update"
+    )
+    assert new_webhook_url not in json.dumps(webhook_audit)
+    assert webhook_audit["details"]["updates"]["url"] == "***redacted***"
 
 
 @mock.patch("telegram_notifier.test_connection")

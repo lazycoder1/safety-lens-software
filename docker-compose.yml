@@ -24,6 +24,8 @@ services:
     environment:
       DATABASE_URL: postgresql://rakshak_lens:${POSTGRES_PASSWORD:-rakshak_lens}@db:5432/rakshak_lens
       SAFETYLENS_CONFIG_STORE: postgres
+      SAFETYLENS_STATE_DIR: /var/lib/safetylens
+      JWT_SECRET: ${JWT_SECRET:-}
       SAFETYLENS_CONFIG_REFRESH_SECONDS: ${SAFETYLENS_CONFIG_REFRESH_SECONDS:-2.0}
       MJPEG_MAX_SUBSCRIBERS_PER_CAMERA: ${MJPEG_MAX_SUBSCRIBERS_PER_CAMERA:-16}
       MJPEG_MAX_SUBSCRIBERS_TOTAL: ${MJPEG_MAX_SUBSCRIBERS_TOTAL:-64}
@@ -38,9 +40,10 @@ services:
       - snapshots:/app/backend/snapshots
       - face_photos:/app/backend/face_photos
       - face_snapshots:/app/backend/face_snapshots
+      - runtime_state:/var/lib/safetylens
+      - models:/app/models
       - ./logs:/app/backend/logs
       - ./test-videos:/app/test-videos:ro
-      - ./backend/config.json:/app/backend/config.json
     depends_on:
       db:
         condition: service_healthy
@@ -57,3 +60,5 @@ volumes:
   snapshots:
   face_photos:
   face_snapshots:
+  runtime_state:
+  models:

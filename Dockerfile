@@ -10,7 +10,9 @@ RUN npm run build
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SAFETYLENS_STATE_DIR=/var/lib/safetylens
 
 # System deps: Python, OpenCV needs libgl
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,9 +29,6 @@ WORKDIR /app
 # Install Python deps
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
-
-# Copy structured model packs
-COPY models/ ./models/
 
 # Copy backend code
 COPY backend/ ./backend/
