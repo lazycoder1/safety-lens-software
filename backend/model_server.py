@@ -14,6 +14,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
@@ -37,6 +38,10 @@ _DECODE_CACHE_LOCK = threading.Lock()
 _DECODE_CACHE = OrderedDict()
 _DECODE_INFLIGHT: Dict[bytes, threading.Event] = {}
 _DECODE_SLOTS = threading.BoundedSemaphore(2)
+_BATCH_INFERENCE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="model-batch",
+)
 # The model-server process must always use local model runtimes, even if it
 # inherits edge-backend environment variables from a shared shell or container.
 model_manager.force_local_inference()
@@ -343,14 +348,20 @@ def infer_jpeg_batch(
         raise HTTPException(status_code=400, detail="Inference batch request IDs must be unique")
 
     frame = _decode_frame(frame_jpeg)
-    results = {}
-    for item in batch:
-        results[item.request_id] = _run_inference_frame(
+    futures = {
+        item.request_id: _BATCH_INFERENCE_EXECUTOR.submit(
+            _run_inference_frame,
             model_key=item.model_key,
             frame=frame,
             conf=item.conf,
             device=item.device,
             imgsz=item.imgsz,
             classes=item.classes,
-        )["detections"]
+        )
+        for item in batch
+    }
+    results = {
+        request_id: future.result()["detections"]
+        for request_id, future in futures.items()
+    }
     return {"results": results}

@@ -2069,7 +2069,26 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
                 else _REMOTE_JPEG_QUALITY
             ),
         )
+        response = _remote_post_jpeg_batch(
+            "/api/infer/jpeg/batch",
+            frame_jpeg,
+            batch=normalized,
+        )
+        if response is not None:
+            results = response.get("results")
+            if not isinstance(results, dict) or set(results) != request_ids:
+                raise RuntimeError("Model server returned an incomplete inference batch")
+            return {
+                request_id: _scale_remote_records_to_source(
+                    records,
+                    frame.shape,
+                    inference_shape,
+                )
+                for request_id, records in results.items()
+            }
+
         if paired_request:
+            # Rolling-upgrade fallback for a model server without the batch route.
             futures = [
                 _REMOTE_PAIR_EXECUTOR.submit(
                     _remote_predict_records_jpeg,
@@ -2093,23 +2112,6 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
     finally:
         if paired_request:
             _REMOTE_PAIR_ADMISSION.release()
-    response = _remote_post_jpeg_batch(
-        "/api/infer/jpeg/batch",
-        frame_jpeg,
-        batch=normalized,
-    )
-    if response is not None:
-        results = response.get("results")
-        if not isinstance(results, dict) or set(results) != request_ids:
-            raise RuntimeError("Model server returned an incomplete inference batch")
-        return {
-            request_id: _scale_remote_records_to_source(
-                records,
-                frame.shape,
-                inference_shape,
-            )
-            for request_id, records in results.items()
-        }
 
     return {
         item["request_id"]: _scale_remote_records_to_source(

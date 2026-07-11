@@ -136,12 +136,11 @@ def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
     assert decoded.shape == frame.shape
 
 
-def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
+def test_edge_sends_model_pairs_as_one_jpeg_batch(monkeypatch):
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    jpeg_objects = []
     encode_parameters = []
     encode_calls = 0
-    barrier = threading.Barrier(2)
+    captured = {}
     real_imencode = cv2.imencode
 
     def counted_imencode(*args, **kwargs):
@@ -150,14 +149,23 @@ def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
         encode_parameters.append(args[2])
         return real_imencode(*args, **kwargs)
 
-    def fake_single(model_key, frame_jpeg, **_kwargs):
-        jpeg_objects.append(frame_jpeg)
-        barrier.wait(timeout=1.0)
-        return [{"model_key": model_key}]
+    def fake_batch(path, frame_jpeg, *, batch):
+        captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
+        return {
+            "results": {
+                item["request_id"]: [{"model_key": item["model_key"]}]
+                for item in batch
+            }
+        }
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
     monkeypatch.setattr(cv2, "imencode", counted_imencode)
-    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_batch)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_predict_records_jpeg",
+        lambda *_args, **_kwargs: pytest.fail("batch-capable pair used fallback transport"),
+    )
 
     results = model_manager.predict_record_batches(frame, [
         {"request_id": "coco", "model_key": "coco_primary", "conf": 0.3, "device": "cuda", "imgsz": 960},
@@ -166,7 +174,8 @@ def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
 
     assert encode_calls == 1
     assert encode_parameters == [[cv2.IMWRITE_JPEG_QUALITY, 85]]
-    assert jpeg_objects[0] is jpeg_objects[1]
+    assert captured["path"] == "/api/infer/jpeg/batch"
+    assert [item["request_id"] for item in captured["batch"]] == ["coco", "ppe"]
     assert results == {
         "coco": [{"model_key": "coco_primary"}],
         "ppe": [{"model_key": "ppe_specialist"}],
@@ -205,6 +214,34 @@ def test_edge_rejects_stale_pair_before_model_request_queue(monkeypatch):
                 {"request_id": "ppe", "model_key": "ppe_specialist"},
             ],
         )
+
+
+def test_edge_pair_uses_parallel_fallback_for_older_model_server(monkeypatch):
+    barrier = threading.Barrier(2)
+    calls = []
+
+    def fake_single(model_key, _frame_jpeg, **_kwargs):
+        calls.append(model_key)
+        barrier.wait(timeout=1.0)
+        return [{"model_key": model_key}]
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
+
+    results = model_manager.predict_record_batches(
+        np.zeros((180, 320, 3), dtype=np.uint8),
+        [
+            {"request_id": "coco", "model_key": "coco_primary"},
+            {"request_id": "ppe", "model_key": "ppe_specialist"},
+        ],
+    )
+
+    assert set(calls) == {"coco_primary", "ppe_specialist"}
+    assert results == {
+        "coco": [{"model_key": "coco_primary"}],
+        "ppe": [{"model_key": "ppe_specialist"}],
+    }
 
 
 def test_long_tail_runtime_loads_on_first_prediction(monkeypatch, tmp_path):
@@ -266,17 +303,24 @@ def test_edge_bounds_grouped_transport_and_restores_source_coordinates(monkeypat
         encode_parameters.append(args[2])
         return real_imencode(*args, **kwargs)
 
-    def fake_single(model_key, frame_jpeg, **_kwargs):
+    def fake_batch(_path, frame_jpeg, *, batch):
         decoded = cv2.imdecode(
             np.frombuffer(frame_jpeg, np.uint8),
             cv2.IMREAD_COLOR,
         )
         decoded_shapes.append(decoded.shape)
-        return [{"model_key": model_key, "bbox": [100, 50, 900, 500]}]
+        return {
+            "results": {
+                item["request_id"]: [
+                    {"model_key": item["model_key"], "bbox": [100, 50, 900, 500]}
+                ]
+                for item in batch
+            }
+        }
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
     monkeypatch.setattr(cv2, "imencode", capture_imencode)
-    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_batch)
 
     results = model_manager.predict_record_batches(frame, [
         {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
@@ -284,7 +328,7 @@ def test_edge_bounds_grouped_transport_and_restores_source_coordinates(monkeypat
     ])
 
     assert encode_parameters == [[cv2.IMWRITE_JPEG_QUALITY, 90]]
-    assert decoded_shapes == [(540, 960, 3), (540, 960, 3)]
+    assert decoded_shapes == [(540, 960, 3)]
     assert results["coco"][0]["bbox"] == [200, 100, 1800, 1000]
     assert results["ppe"][0]["bbox"] == [200, 100, 1800, 1000]
 
@@ -472,9 +516,13 @@ def test_model_server_rejects_invalid_raw_jpeg(monkeypatch):
 
 def test_model_server_batches_models_after_one_decode(monkeypatch):
     frame_ids = []
+    worker_threads = []
+    both_models_entered = threading.Barrier(2)
 
     def fake_predict(model_key, frame, *, conf, device, imgsz, classes):
         frame_ids.append(id(frame))
+        worker_threads.append(threading.get_ident())
+        both_models_entered.wait(timeout=1.0)
         return [{"class_id": 0, "model_key": model_key}]
 
     monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
@@ -497,6 +545,7 @@ def test_model_server_batches_models_after_one_decode(monkeypatch):
     assert response.json()["results"]["ppe"][0]["model_key"] == "ppe_specialist"
     assert len(frame_ids) == 2
     assert len(set(frame_ids)) == 1
+    assert len(set(worker_threads)) == 2
 
 
 def test_model_server_rejects_duplicate_batch_request_ids(monkeypatch):
