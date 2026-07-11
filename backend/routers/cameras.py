@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Optional
 
@@ -42,7 +43,12 @@ from video_processing import (
 router = APIRouter(prefix="/api", tags=["cameras"])
 
 
-def _camera_runtime_status(cam_id: str, camera: dict, cfg: dict, ready_model_keys: set[str] | None = None) -> str:
+def _camera_runtime_status(
+    cam_id: str,
+    camera: dict,
+    cfg: dict,
+    readiness: dict[str, bool] | None = None,
+) -> str:
     frame_updated_at = state.camera_frame_updated_at.get(cam_id)
     if (
         camera.get("enabled", True)
@@ -58,10 +64,9 @@ def _camera_runtime_status(cam_id: str, camera: dict, cfg: dict, ready_model_key
     schedule_state = _capability_schedule_state(camera, cfg, execution_plan)
     scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
     required_model_keys = scheduled_plan.get("required_model_keys", [])
-    if ready_model_keys is not None:
-        missing_models = any(model_key not in ready_model_keys for model_key in required_model_keys)
-    else:
-        missing_models = bool(model_manager.missing_model_keys(required_model_keys))
+    missing_models = bool(
+        model_manager.missing_model_keys(required_model_keys, readiness=readiness)
+    )
     runtime_status = derive_camera_runtime_status(
         cam_id,
         camera,
@@ -88,8 +93,13 @@ def _recent_detection_class_counts_max(history: list[dict[str, Any]]) -> dict[st
     return max_counts
 
 
-def _camera_public_payload(cam_id: str, cam: dict, cfg: dict, ready_model_keys: set[str] | None = None) -> dict[str, Any]:
-    runtime_status = _camera_runtime_status(cam_id, cam, cfg, ready_model_keys)
+def _camera_public_payload(
+    cam_id: str,
+    cam: dict,
+    cfg: dict,
+    readiness: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    runtime_status = _camera_runtime_status(cam_id, cam, cfg, readiness)
     state.camera_runtime_status[cam_id] = runtime_status
     from routers.safety_rules import _ensure_safety_rules
 
@@ -392,14 +402,8 @@ class DiscoveryImportRequest(BaseModel):
 @router.get("/cameras")
 async def get_cameras():
     cfg = get_config()
-    ready_model_keys = None
-    if model_manager.is_remote_inference_enabled():
-        ready_model_keys = {
-            model.get("model_key")
-            for model in model_manager.list_models_for_status()
-            if model.get("is_ready")
-        }
-    result = []
+    normalized_cameras: list[tuple[str, dict[str, Any]]] = []
+    required_model_keys: set[str] = set()
     changed_any = False
     for cam_id, cam in cfg["cameras"].items():
         normalized_camera, changed = normalize_camera_record(cam, cfg)
@@ -407,10 +411,20 @@ async def get_cameras():
             cfg["cameras"][cam_id] = normalized_camera
             cam = normalized_camera
             changed_any = True
-        result.append(_camera_public_payload(cam_id, cam, cfg, ready_model_keys))
+        normalized_cameras.append((cam_id, cam))
+        required_model_keys.update(
+            cam.get("execution_plan", {}).get("required_model_keys", [])
+        )
     if changed_any:
         save_config(cfg)
-    return result
+    readiness = await asyncio.to_thread(
+        model_manager.model_readiness_snapshot,
+        sorted(required_model_keys),
+    )
+    return [
+        _camera_public_payload(cam_id, cam, cfg, readiness)
+        for cam_id, cam in normalized_cameras
+    ]
 
 
 @router.get("/cameras/{camera_id}/occupancy")
@@ -463,9 +477,16 @@ async def get_camera_object_lifecycle(camera_id: str):
 @router.post("/cameras/discover", dependencies=[Depends(require_admin)])
 async def api_discover_cameras(body: DiscoveryScanRequest):
     cfg = get_config()
-    discovery = discover_cameras(body.cidrs or None, timeout_seconds=body.timeout_seconds)
+    discovery = await asyncio.to_thread(
+        discover_cameras,
+        body.cidrs or None,
+        timeout_seconds=body.timeout_seconds,
+    )
     devices = [_annotate_duplicate_state(device, cfg) for device in discovery["devices"]]
-    resolved_cidrs, cidr_warnings = resolve_scan_networks(body.cidrs or None)
+    resolved_cidrs, cidr_warnings = await asyncio.to_thread(
+        resolve_scan_networks,
+        body.cidrs or None,
+    )
     return {
         "cidrs": discovery.get("cidrs") or resolved_cidrs,
         "warnings": [*discovery.get("warnings", []), *cidr_warnings],
@@ -476,7 +497,7 @@ async def api_discover_cameras(body: DiscoveryScanRequest):
 @router.post("/cameras/discover/test", dependencies=[Depends(require_admin)])
 async def api_test_discovered_camera(body: DiscoveryTestRequest):
     cfg = get_config()
-    result = test_camera_connection(body.model_dump())
+    result = await asyncio.to_thread(test_camera_connection, body.model_dump())
     return _annotate_duplicate_state(result, cfg)
 
 
@@ -503,7 +524,7 @@ async def api_import_discovered_cameras(body: DiscoveryImportRequest, request: R
             })
             continue
 
-        test_result = test_camera_connection(row_payload)
+        test_result = await asyncio.to_thread(test_camera_connection, row_payload)
         if not test_result.get("ok"):
             failed.append({
                 "fingerprint": row_payload.get("fingerprint"),
@@ -528,7 +549,10 @@ async def api_import_discovered_cameras(body: DiscoveryImportRequest, request: R
             })
             continue
 
-        allowed, reason = licensing.can_add_camera(len(cfg["cameras"]) + len(created))
+        # Accepted rows are inserted into the in-memory config immediately, so
+        # len(cameras) already includes earlier rows from this import. Adding
+        # len(created) again double-counted them and rejected valid capacity.
+        allowed, reason = licensing.can_add_camera(len(cfg["cameras"]))
         if not allowed:
             failed.append({
                 "fingerprint": row_payload.get("fingerprint"),
@@ -563,7 +587,18 @@ async def api_import_discovered_cameras(body: DiscoveryImportRequest, request: R
             cfg,
         )
         execution_plan = cam_data["execution_plan"]
-        missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
+        # Connection tests may take longer than the catalogue TTL. Revalidate
+        # immediately before admitting each camera; the shared cache still
+        # collapses nearby devices into one fetch while never trusting stale
+        # readiness for a long-running import.
+        readiness = await asyncio.to_thread(
+            model_manager.model_readiness_snapshot,
+            execution_plan["required_model_keys"],
+        )
+        missing_model_keys = model_manager.missing_model_keys(
+            execution_plan["required_model_keys"],
+            readiness=readiness,
+        )
         if missing_model_keys:
             failed.append({
                 "fingerprint": row_payload.get("fingerprint"),
@@ -585,7 +620,7 @@ async def api_import_discovered_cameras(body: DiscoveryImportRequest, request: R
         save_config(cfg)
         for item in created:
             camera = cfg["cameras"][item["camera_id"]]
-            start_camera(item["camera_id"])
+            await asyncio.to_thread(start_camera, item["camera_id"])
             audit_store.log_event(
                 "camera.discover_import",
                 target_type="camera",
@@ -611,7 +646,14 @@ async def api_preview_camera_plan(body: CameraPlanPreviewRequest):
     draft = body.model_dump()
     draft = _prepare_camera_submission(draft, cfg)
     execution_plan = draft["execution_plan"]
-    missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
+    readiness = await asyncio.to_thread(
+        model_manager.model_readiness_snapshot,
+        execution_plan["required_model_keys"],
+    )
+    missing_model_keys = model_manager.missing_model_keys(
+        execution_plan["required_model_keys"],
+        readiness=readiness,
+    )
     return {
         "profile": draft.get("profile"),
         "capabilities": draft.get("capabilities", []),
@@ -631,13 +673,20 @@ async def api_add_camera(body: CameraCreate, request: Request):
     cam_id = _next_camera_id(cfg)
     cam_data = _prepare_camera_submission(body.model_dump(), cfg)
     execution_plan = cam_data["execution_plan"]
-    missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
+    readiness = await asyncio.to_thread(
+        model_manager.model_readiness_snapshot,
+        execution_plan["required_model_keys"],
+    )
+    missing_model_keys = model_manager.missing_model_keys(
+        execution_plan["required_model_keys"],
+        readiness=readiness,
+    )
     if missing_model_keys:
         return _missing_models_response(execution_plan, missing_model_keys)
 
     cfg["cameras"][cam_id] = cam_data
     save_config(cfg)
-    start_camera(cam_id)
+    await asyncio.to_thread(start_camera, cam_id)
     audit_store.log_event(
         "camera.create",
         target_type="camera",
@@ -652,7 +701,7 @@ async def api_add_camera(body: CameraCreate, request: Request):
         },
         **audit_store.build_actor_context(request),
     )
-    return _camera_public_payload(cam_id, cam_data, cfg)
+    return _camera_public_payload(cam_id, cam_data, cfg, readiness)
 
 
 @router.put("/cameras/{cam_id}", dependencies=[Depends(require_admin)])
@@ -666,13 +715,20 @@ async def api_update_camera(cam_id: str, body: CameraUpdate, request: Request):
     current_camera.update(updates)
     current_camera = _prepare_camera_submission(current_camera, cfg, existing_camera=cfg["cameras"][cam_id])
     execution_plan = current_camera["execution_plan"]
-    missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
+    readiness = await asyncio.to_thread(
+        model_manager.model_readiness_snapshot,
+        execution_plan["required_model_keys"],
+    )
+    missing_model_keys = model_manager.missing_model_keys(
+        execution_plan["required_model_keys"],
+        readiness=readiness,
+    )
     if missing_model_keys:
         return _missing_models_response(execution_plan, missing_model_keys)
 
     cfg["cameras"][cam_id] = current_camera
     save_config(cfg)
-    restart_camera(cam_id)
+    await asyncio.to_thread(restart_camera, cam_id)
     audit_store.log_event(
         "camera.update",
         target_type="camera",
@@ -685,7 +741,7 @@ async def api_update_camera(cam_id: str, body: CameraUpdate, request: Request):
         },
         **audit_store.build_actor_context(request),
     )
-    return _camera_public_payload(cam_id, current_camera, cfg)
+    return _camera_public_payload(cam_id, current_camera, cfg, readiness)
 
 
 @router.delete("/cameras/{cam_id}", dependencies=[Depends(require_admin)])
@@ -694,7 +750,7 @@ async def api_delete_camera(cam_id: str, request: Request):
     if cam_id not in cfg["cameras"]:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    if not stop_camera(cam_id):
+    if not await asyncio.to_thread(stop_camera, cam_id):
         raise HTTPException(
             status_code=409,
             detail="Camera worker is still stopping; retry deletion",

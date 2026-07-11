@@ -5,50 +5,21 @@ import state
 from routers.cameras import _camera_runtime_status
 
 
-def test_list_models_for_status_uses_short_timeout_and_failure_cache(monkeypatch):
-    model_manager.clear_remote_model_status_cache()
+def test_list_models_for_status_keeps_compatibility_wrapper(monkeypatch):
+    payload = [{"model_key": "coco_primary", "status": "ready", "is_ready": True}]
     calls = []
 
-    def fake_remote_get(path, *, timeout_seconds=None):
-        calls.append((path, timeout_seconds))
-        raise TimeoutError("model server hung")
-
-    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_settings", lambda: {"url": "http://models", "token": "", "timeout_seconds": 20})
-    monkeypatch.setattr(model_manager, "_remote_get", fake_remote_get)
-
-    first = model_manager.list_models_for_status()
-    second = model_manager.list_models_for_status()
-
-    assert calls == [("/api/models", model_manager.REMOTE_MODEL_STATUS_TIMEOUT_SECONDS)]
-    assert first[0]["status"] == "remote_unavailable"
-    assert second[0]["status"] == "remote_unavailable"
-    assert "model server hung" in first[0]["error"]
-
-    model_manager.clear_remote_model_status_cache()
-
-
-def test_list_models_for_status_caches_successful_status(monkeypatch):
-    model_manager.clear_remote_model_status_cache()
-    calls = []
-    payload = {
-        "models": [
-            {"model_key": "coco_primary", "status": "ready", "is_ready": True},
-        ]
-    }
-
-    def fake_remote_get(path, *, timeout_seconds=None):
-        calls.append((path, timeout_seconds))
+    def list_models(**kwargs):
+        calls.append(kwargs)
         return payload
 
-    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_get", fake_remote_get)
+    monkeypatch.setattr(model_manager, "list_models", list_models)
 
-    assert model_manager.list_models_for_status() == payload["models"]
-    assert model_manager.list_models_for_status() == payload["models"]
-    assert calls == [("/api/models", model_manager.REMOTE_MODEL_STATUS_TIMEOUT_SECONDS)]
-
-    model_manager.clear_remote_model_status_cache()
+    assert model_manager.list_models_for_status() == payload
+    assert calls == [{
+        "timeout_seconds": model_manager.REMOTE_MODEL_STATUS_TIMEOUT_SECONDS,
+        "allow_cached": True,
+    }]
 
 
 def test_running_camera_status_does_not_block_on_model_readiness(monkeypatch):

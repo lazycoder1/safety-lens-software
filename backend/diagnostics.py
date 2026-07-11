@@ -90,6 +90,8 @@ def build_health_snapshot() -> dict:
             "diagnostics": _path_usage(DIAGNOSTICS_DIR),
         }
         free_bytes = shutil.disk_usage(Path(__file__).parent).free
+        models = model_manager.list_models()
+        model_metadata = model_manager.remote_model_metadata_health()
 
         cameras = []
         enabled_cameras = 0
@@ -174,6 +176,13 @@ def build_health_snapshot() -> dict:
             if status == "ok":
                 status = "degraded"
             reasons.append("one or more cameras have an active connection outage")
+        if (
+            model_metadata.get("enabled") is True
+            and model_metadata.get("status") != "healthy"
+        ):
+            if status == "ok":
+                status = "degraded"
+            reasons.append("remote model metadata unavailable")
 
         result = {
             "status": status,
@@ -183,6 +192,7 @@ def build_health_snapshot() -> dict:
             "database": {"ok": db_ok},
             "license": license_status.to_public_dict(),
             "models": models,
+            "modelMetadata": model_metadata,
             "cameras": cameras,
             "streamFanout": stream_fanout.operational_stats(),
             "storage": {

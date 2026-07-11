@@ -11,6 +11,7 @@ function prettyStatus(model: ModelStatus) {
   if (model.status === "ready") return "Ready"
   if (model.status === "installing") return "Installing"
   if (model.status === "failed") return "Failed"
+  if (model.status === "remote_unavailable") return "Service Unavailable"
   return "Not Downloaded"
 }
 
@@ -37,7 +38,9 @@ export function SystemModels() {
   }, [refresh])
 
   const missingModels = useMemo(
-    () => models.filter((model) => !model.is_ready).map((model) => model.model_key),
+    () => models
+      .filter((model) => !model.is_ready && model.status !== "remote_unavailable")
+      .map((model) => model.model_key),
     [models]
   )
 
@@ -122,6 +125,8 @@ export function SystemModels() {
                     ? "bg-[var(--color-success-bg)] text-[var(--color-success)]"
                     : model.status === "failed"
                       ? "bg-[var(--color-critical-bg)] text-[var(--color-critical)]"
+                      : model.status === "remote_unavailable"
+                        ? "bg-[var(--color-warning-bg)] text-[var(--color-warning)]"
                       : "bg-[var(--color-info-bg)] text-[var(--color-info)]"
                 }`}
               >
@@ -143,7 +148,7 @@ export function SystemModels() {
             <div className="flex gap-2">
               <Button
                 onClick={() => handleInstall([model.model_key], `Setting up ${model.display_name}`)}
-                disabled={model.status === "installing"}
+                disabled={model.status === "installing" || model.status === "remote_unavailable"}
               >
                 {model.is_ready ? "Reinstall / Verify" : "Download / Setup"}
               </Button>
@@ -154,4 +159,3 @@ export function SystemModels() {
     </div>
   )
 }
-
