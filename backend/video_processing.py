@@ -135,6 +135,10 @@ CLOSED_SET_PPE_COLORS = {
 DETECTION_HISTORY_LIMIT = 120
 STREAM_MAX_WIDTH = 854
 IDLE_STREAM_FPS = 1.0
+EMPTY_SCENE_SIGNATURE_SIZE = (64, 36)
+EMPTY_SCENE_CHANGED_PIXEL_DELTA = 8
+EMPTY_SCENE_CHANGED_FRACTION = 0.001
+EMPTY_SCENE_MAX_INFERENCE_INTERVAL_SECONDS = 1.0
 
 
 def _positive_fps(value, fallback: float) -> float:
@@ -175,6 +179,39 @@ def _stream_publication_due(
         or _stream_publish_due(last_published_at, now, effective_fps)
     )
     return due, has_subscribers
+
+
+def _empty_scene_inference_decision(
+    frame: np.ndarray,
+    previous_signature: np.ndarray | None,
+    *,
+    last_submitted_at: float | None,
+    now: float,
+    detections: list[dict],
+) -> tuple[bool, np.ndarray, float]:
+    """Skip unchanged empty-scene frames, while forcing a one-second refresh."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    signature = cv2.resize(
+        gray,
+        EMPTY_SCENE_SIGNATURE_SIZE,
+        interpolation=cv2.INTER_AREA,
+    )
+    if previous_signature is None:
+        return True, signature, 1.0
+    changed_fraction = float(
+        (
+            cv2.absdiff(signature, previous_signature)
+            > EMPTY_SCENE_CHANGED_PIXEL_DELTA
+        ).mean()
+    )
+    if detections:
+        return True, signature, changed_fraction
+    if (
+        last_submitted_at is None
+        or now - last_submitted_at >= EMPTY_SCENE_MAX_INFERENCE_INTERVAL_SECONDS
+    ):
+        return True, signature, changed_fraction
+    return changed_fraction > EMPTY_SCENE_CHANGED_FRACTION, signature, changed_fraction
 
 
 def _resize_for_stream(frame: np.ndarray, max_width: int = STREAM_MAX_WIDTH) -> np.ndarray:
@@ -2247,6 +2284,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         last_stream_published_at = 0.0
         stream_had_subscribers = False
         last_annotated = None
+        last_inference_signature = None
+        last_inference_submitted_at = None
         received_frame = False
         try:
             while cap.isOpened() and not stop_event.is_set():
@@ -2380,35 +2419,54 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         now=now,
                     )
                 if pending_inference is None and now >= next_inference_at:
-                    try:
-                        pending_inference = inference_executor.submit(
-                            _run_detection_job,
-                            camera_id,
-                            frame.copy(),
-                            scheduled_plan,
-                            schedule_state,
-                            current_cam,
-                            current_cfg,
-                            yolo_conf=yolo_conf,
-                            device=device,
-                            inference_width=inference_width,
-                            last_face_log_by_key=last_face_log_by_key,
-                            last_plate_log_by_key=last_plate_log_by_key,
-                            plate_vote_window=plate_vote_window,
+                    should_submit, inference_signature, _changed_fraction = (
+                        _empty_scene_inference_decision(
+                            frame,
+                            last_inference_signature,
+                            last_submitted_at=last_inference_submitted_at,
+                            now=now,
+                            detections=state.camera_detections.get(camera_id, []),
                         )
-                    except RuntimeError as exc:
-                        if not _is_executor_shutdown_error(exc):
-                            raise
-                        state.camera_runtime_status[camera_id] = "offline"
-                        _clear_live_frame(camera_id)
-                        logger.debug("Stopping video processor during executor shutdown", extra={"camera_id": camera_id})
-                        return
-                    next_inference_at = inference_scheduler.next_inference_slot(
-                        camera_id,
-                        current_cfg,
-                        inference_interval,
-                        now=now + 1e-9,
                     )
+                    if not should_submit:
+                        next_inference_at = inference_scheduler.next_inference_slot(
+                            camera_id,
+                            current_cfg,
+                            inference_interval,
+                            now=now + inference_interval / 2,
+                        )
+                    else:
+                        try:
+                            pending_inference = inference_executor.submit(
+                                _run_detection_job,
+                                camera_id,
+                                frame.copy(),
+                                scheduled_plan,
+                                schedule_state,
+                                current_cam,
+                                current_cfg,
+                                yolo_conf=yolo_conf,
+                                device=device,
+                                inference_width=inference_width,
+                                last_face_log_by_key=last_face_log_by_key,
+                                last_plate_log_by_key=last_plate_log_by_key,
+                                plate_vote_window=plate_vote_window,
+                            )
+                            last_inference_signature = inference_signature
+                            last_inference_submitted_at = now
+                        except RuntimeError as exc:
+                            if not _is_executor_shutdown_error(exc):
+                                raise
+                            state.camera_runtime_status[camera_id] = "offline"
+                            _clear_live_frame(camera_id)
+                            logger.debug("Stopping video processor during executor shutdown", extra={"camera_id": camera_id})
+                            return
+                        next_inference_at = inference_scheduler.next_inference_slot(
+                            camera_id,
+                            current_cfg,
+                            inference_interval,
+                            now=now + 1e-9,
+                        )
 
                 elapsed = time.time() - started
                 sleep_time = frame_interval - elapsed

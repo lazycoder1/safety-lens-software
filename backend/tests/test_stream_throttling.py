@@ -1,5 +1,7 @@
 import asyncio
 
+import numpy as np
+
 import config_manager
 import video_processing
 from mjpeg_fanout import MjpegFanout, build_mjpeg_chunk
@@ -114,6 +116,81 @@ def test_idle_stream_schedule_cuts_publication_work_by_three_quarters(monkeypatc
 
     assert publication_count(active=True) == 32
     assert publication_count(active=False) == 8
+
+
+def test_empty_scene_inference_skips_unchanged_frame_before_refresh():
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    first_due, signature, _score = video_processing._empty_scene_inference_decision(
+        frame,
+        None,
+        last_submitted_at=None,
+        now=10.0,
+        detections=[],
+    )
+    next_due, _next_signature, score = video_processing._empty_scene_inference_decision(
+        frame.copy(),
+        signature,
+        last_submitted_at=10.0,
+        now=10.25,
+        detections=[],
+    )
+
+    assert first_due is True
+    assert next_due is False
+    assert score == 0.0
+
+
+def test_empty_scene_inference_runs_on_small_visual_change():
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    _due, signature, _score = video_processing._empty_scene_inference_decision(
+        frame,
+        None,
+        last_submitted_at=None,
+        now=10.0,
+        detections=[],
+    )
+    changed = frame.copy()
+    changed[70:110, 140:180] = 255
+
+    due, _signature, score = video_processing._empty_scene_inference_decision(
+        changed,
+        signature,
+        last_submitted_at=10.0,
+        now=10.25,
+        detections=[],
+    )
+
+    assert due is True
+    assert score > video_processing.EMPTY_SCENE_CHANGED_FRACTION
+
+
+def test_empty_scene_inference_forces_refresh_and_keeps_active_scenes_full_rate():
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    _due, signature, _score = video_processing._empty_scene_inference_decision(
+        frame,
+        None,
+        last_submitted_at=None,
+        now=10.0,
+        detections=[],
+    )
+
+    refresh_due, _signature, _score = video_processing._empty_scene_inference_decision(
+        frame,
+        signature,
+        last_submitted_at=10.0,
+        now=11.0,
+        detections=[],
+    )
+    active_due, _signature, _score = video_processing._empty_scene_inference_decision(
+        frame,
+        signature,
+        last_submitted_at=10.0,
+        now=10.25,
+        detections=[{"class": "person"}],
+    )
+
+    assert refresh_due is True
+    assert active_due is True
 
 
 def test_stream_consumer_waits_for_next_published_sequence():
