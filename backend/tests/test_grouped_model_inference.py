@@ -89,6 +89,66 @@ def test_other_ppe_gate_ignores_person_from_non_coco_model():
     assert gated["run_ppe_specialist"] is False
 
 
+def test_mobile_phone_probe_periodically_overrides_only_coco_width():
+    plan = {
+        "capabilities": ["mobile_phone", "rider_helmet_required"],
+        "run_coco_primary": True,
+        "run_ppe_specialist": True,
+        "ppe_prompt_terms": ["helmet"],
+    }
+    cfg = {
+        "global": {
+            "inference_width": 960,
+            "coco_inference_width": 640,
+            "ppe_inference_width": 640,
+            "mobile_phone_inference_width": 960,
+            "mobile_phone_probe_interval_seconds": 1.0,
+        }
+    }
+
+    probed, due = video_processing._mobile_phone_probe_execution_plan(
+        plan,
+        cfg,
+        now=10.0,
+        last_probe_at=8.9,
+    )
+    waiting, waiting_due = video_processing._mobile_phone_probe_execution_plan(
+        plan,
+        cfg,
+        now=10.0,
+        last_probe_at=9.1,
+    )
+
+    assert due is True
+    assert probed is not plan
+    assert probed["coco_inference_width_override"] == 960
+    assert probed["runtime_probe_reason"] == "mobile_phone_small_object_recall"
+    assert waiting is plan
+    assert waiting_due is False
+    assert "coco_inference_width_override" not in plan
+
+
+def test_mobile_phone_probe_is_disabled_for_non_phone_plan():
+    plan = {"capabilities": ["animal_presence"], "run_coco_primary": True}
+    cfg = {
+        "global": {
+            "coco_inference_width": 640,
+            "mobile_phone_inference_width": 960,
+            "mobile_phone_probe_interval_seconds": 1.0,
+        }
+    }
+
+    result, due = video_processing._mobile_phone_probe_execution_plan(
+        plan,
+        cfg,
+        now=10.0,
+        last_probe_at=None,
+    )
+
+    assert result is plan
+    assert due is False
+
+
 def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch):
     captured = {}
 
@@ -211,6 +271,45 @@ def test_grouped_inference_can_size_coco_and_ppe_independently(monkeypatch):
     )
 
     assert [request["imgsz"] for request in captured["requests"]] == [640, 640]
+
+
+def test_grouped_inference_phone_probe_overrides_coco_but_not_ppe(monkeypatch):
+    captured = {}
+
+    def fake_predict_record_batches(_frame, requests):
+        captured["requests"] = requests
+        return {item["request_id"]: [] for item in requests}
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict_record_batches,
+    )
+    execution_plan = {
+        "run_coco_primary": True,
+        "run_ppe_specialist": True,
+        "ppe_prompt_terms": ["helmet"],
+        "run_yoloe_long_tail": False,
+        "run_pose_specialist": False,
+        "coco_inference_width_override": 960,
+    }
+
+    video_processing._run_grouped_inference(
+        "cam-test",
+        np.zeros((720, 960, 3), dtype=np.uint8),
+        execution_plan,
+        conf=0.3,
+        device="cuda",
+        imgsz=960,
+        cfg={
+            "global": {
+                "coco_inference_width": 640,
+                "ppe_inference_width": 640,
+            }
+        },
+    )
+
+    assert [request["imgsz"] for request in captured["requests"]] == [960, 640]
 
 
 def test_grouped_inference_ignores_invalid_coco_width(monkeypatch):

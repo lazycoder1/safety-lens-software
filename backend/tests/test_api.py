@@ -705,6 +705,8 @@ def test_update_global_partial(mock_restart):
             "yolo_conf": 0.5,
             "coco_inference_width": 640,
             "ppe_inference_width": 640,
+            "mobile_phone_inference_width": 960,
+            "mobile_phone_probe_interval_seconds": 1.0,
         },
     )
     assert resp.status_code == 200
@@ -712,6 +714,8 @@ def test_update_global_partial(mock_restart):
     assert data["yolo_conf"] == 0.5
     assert data["coco_inference_width"] == 640
     assert data["ppe_inference_width"] == 640
+    assert data["mobile_phone_inference_width"] == 960
+    assert data["mobile_phone_probe_interval_seconds"] == 1.0
     assert data["target_fps"] == 6
 
 

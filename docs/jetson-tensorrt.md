@@ -92,6 +92,13 @@ configured size. Only set this after the matching fixed-size PPE engine passes
 site accuracy validation; a configured width without its matching engine can
 discard source detail before a larger fallback runtime receives the frame.
 
+For phone-enabled cameras, `global.mobile_phone_inference_width` and
+`global.mobile_phone_probe_interval_seconds` can periodically route only the
+COCO request through the larger fixed engine. This recovers small-object detail
+without moving every inference off the compact path. Configure a width only
+when a matching fixed COCO engine is installed, and validate the interval under
+the site's full camera load.
+
 ## Enable it
 
 Set the absolute engine path for the model-server service and recreate that service:

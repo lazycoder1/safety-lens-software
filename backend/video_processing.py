@@ -1116,7 +1116,15 @@ def _configured_model_inference_imgsz(
     return configured
 
 
-def _coco_inference_imgsz(cfg: dict | None, default_imgsz: int) -> int:
+def _coco_inference_imgsz(
+    cfg: dict | None,
+    default_imgsz: int,
+    execution_plan: dict | None = None,
+) -> int:
+    if isinstance(execution_plan, dict):
+        override = execution_plan.get("coco_inference_width_override")
+        if type(override) is int and 160 <= override <= 1920:
+            return override
     return _configured_model_inference_imgsz(
         cfg,
         "coco_inference_width",
@@ -1278,6 +1286,52 @@ def _context_gated_execution_plan(
         else "awaiting_person_context"
     )
     return gated
+
+
+def _mobile_phone_probe_execution_plan(
+    execution_plan: dict,
+    cfg: dict | None,
+    *,
+    now: float,
+    last_probe_at: float | None,
+) -> tuple[dict, bool]:
+    """Periodically recover small-phone recall without upscaling every frame."""
+    if not (
+        execution_plan.get("run_coco_primary")
+        and "mobile_phone" in set(execution_plan.get("capabilities") or [])
+        and isinstance(cfg, dict)
+    ):
+        return execution_plan, False
+    global_config = cfg.get("global")
+    if not isinstance(global_config, dict):
+        return execution_plan, False
+
+    probe_width = global_config.get("mobile_phone_inference_width")
+    if type(probe_width) is not int or not 160 <= probe_width <= 1920:
+        return execution_plan, False
+    default_width = global_config.get("inference_width", 960)
+    if type(default_width) is not int or not 160 <= default_width <= 1920:
+        default_width = 960
+    normal_width = _coco_inference_imgsz(cfg, default_width)
+    if probe_width <= normal_width:
+        return execution_plan, False
+
+    raw_interval = global_config.get("mobile_phone_probe_interval_seconds")
+    if isinstance(raw_interval, bool):
+        return execution_plan, False
+    try:
+        interval = float(raw_interval)
+    except (TypeError, ValueError):
+        return execution_plan, False
+    if not math.isfinite(interval) or not 0.1 <= interval <= 3600:
+        return execution_plan, False
+    if last_probe_at is not None and now - last_probe_at < interval:
+        return execution_plan, False
+
+    probed = deepcopy(execution_plan)
+    probed["coco_inference_width_override"] = probe_width
+    probed["runtime_probe_reason"] = "mobile_phone_small_object_recall"
+    return probed, True
 
 
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
@@ -1683,7 +1737,7 @@ def _run_grouped_inference(
             "model_key": "coco_primary",
             "conf": coco_conf,
             "device": device,
-            "imgsz": _coco_inference_imgsz(cfg, imgsz),
+            "imgsz": _coco_inference_imgsz(cfg, imgsz, execution_plan),
         })
     if execution_plan.get("run_ppe_specialist") and ppe_prompts:
         ppe_conf = _rule_confidence_for_model_family(
@@ -2635,6 +2689,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         last_inference_submitted_at = None
         pending_inference_signature = None
         pending_inference_submitted_at = None
+        last_mobile_phone_probe_at = None
         alert_confirmation_required = False
         received_frame = False
         try:
@@ -2840,6 +2895,14 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             scheduled_plan,
                             state.camera_detections.get(camera_id, []),
                         )
+                        runtime_plan, mobile_phone_probe_due = (
+                            _mobile_phone_probe_execution_plan(
+                                runtime_plan,
+                                current_cfg,
+                                now=now,
+                                last_probe_at=last_mobile_phone_probe_at,
+                            )
+                        )
                         try:
                             pending_inference = inference_executor.submit(
                                 _run_detection_job,
@@ -2858,6 +2921,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             )
                             pending_inference_signature = inference_signature
                             pending_inference_submitted_at = now
+                            if mobile_phone_probe_due:
+                                last_mobile_phone_probe_at = now
                         except RuntimeError as exc:
                             if not _is_executor_shutdown_error(exc):
                                 raise
