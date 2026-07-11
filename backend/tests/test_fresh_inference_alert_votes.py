@@ -53,6 +53,7 @@ class _ImmediateExecutor:
         ("positive", [2, 21], [21], 1, 2),
         ("empty", [2], [], 0, 2),
         ("error", [2], [], 1, 1),
+        ("overloaded", [2], [], 1, 1),
     ],
 )
 def test_cached_detection_does_not_advance_alert_window_between_inferences(
@@ -132,10 +133,14 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     def run_inference(_camera_id, frame, *_args, **_kwargs):
         inference_calls.append(capture.read_count)
         if len(inference_calls) == 2:
-                if second_result == "error":
-                    raise RuntimeError("synthetic inference failure")
-                if second_result == "empty":
-                    return frame.copy(), [], None, {}
+            if second_result == "overloaded":
+                raise video_processing.model_manager.RemoteInferenceOverloadedError(
+                    "synthetic overload"
+                )
+            if second_result == "error":
+                raise RuntimeError("synthetic inference failure")
+            if second_result == "empty":
+                return frame.copy(), [], None, {}
         return frame.copy(), [detection], None, {}
 
     def check_violations(_detections, _camera_id):

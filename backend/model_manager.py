@@ -36,6 +36,11 @@ from tensorrt_engine import validate_engine
 
 logger = logging.getLogger("rakshak_lens.models")
 
+
+class RemoteInferenceOverloadedError(RuntimeError):
+    """The bounded remote inference pool is busy with fresher admitted work."""
+
+
 MODELS_ROOT = PROJECT_ROOT / "models"
 TMP_MODELS_ROOT = Path(tempfile.gettempdir()) / "rakshak-lens-models"
 _JOB_POLL_FINAL_STATES = {"ready", "failed"}
@@ -44,6 +49,8 @@ _REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="remote-model-pair",
 )
+_REMOTE_PAIR_ADMISSION = threading.BoundedSemaphore(2)
+_REMOTE_PAIR_ADMISSION_WAIT_SECONDS = 0.05
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
@@ -2011,39 +2018,51 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
 
     maximum_imgsz = max(item["imgsz"] for item in normalized)
     resize_required = max(frame.shape[:2]) > maximum_imgsz
-    # Preserve the existing byte path for camera frames that already fit.
-    # Oversized grouped frames use the smallest higher quality that retained
-    # operational class presence across the Jetson validation corpus.
-    frame_jpeg, inference_shape = _prepare_remote_inference_jpeg(
-        frame,
-        maximum_imgsz,
-        jpeg_quality=(
-            _RESIZED_GROUPED_REMOTE_JPEG_QUALITY
-            if resize_required
-            else _REMOTE_JPEG_QUALITY
-        ),
-    )
-    if len(normalized) == 2:
-        futures = [
-            _REMOTE_PAIR_EXECUTOR.submit(
-                _remote_predict_records_jpeg,
-                item["model_key"],
-                frame_jpeg,
-                conf=item["conf"],
-                device=item["device"],
-                imgsz=item["imgsz"],
-                classes=item["classes"],
+    paired_request = len(normalized) == 2
+    if paired_request:
+        if not _REMOTE_PAIR_ADMISSION.acquire(
+            timeout=_REMOTE_PAIR_ADMISSION_WAIT_SECONDS
+        ):
+            raise RemoteInferenceOverloadedError(
+                "Remote paired inference is at its bounded concurrency limit"
             )
-            for item in normalized
-        ]
-        return {
-            item["request_id"]: _scale_remote_records_to_source(
-                future.result(),
-                frame.shape,
-                inference_shape,
-            )
-            for item, future in zip(normalized, futures)
-        }
+    try:
+        # Preserve the existing byte path for camera frames that already fit.
+        # Oversized grouped frames use the smallest higher quality that retained
+        # operational class presence across the Jetson validation corpus.
+        frame_jpeg, inference_shape = _prepare_remote_inference_jpeg(
+            frame,
+            maximum_imgsz,
+            jpeg_quality=(
+                _RESIZED_GROUPED_REMOTE_JPEG_QUALITY
+                if resize_required
+                else _REMOTE_JPEG_QUALITY
+            ),
+        )
+        if paired_request:
+            futures = [
+                _REMOTE_PAIR_EXECUTOR.submit(
+                    _remote_predict_records_jpeg,
+                    item["model_key"],
+                    frame_jpeg,
+                    conf=item["conf"],
+                    device=item["device"],
+                    imgsz=item["imgsz"],
+                    classes=item["classes"],
+                )
+                for item in normalized
+            ]
+            return {
+                item["request_id"]: _scale_remote_records_to_source(
+                    future.result(),
+                    frame.shape,
+                    inference_shape,
+                )
+                for item, future in zip(normalized, futures)
+            }
+    finally:
+        if paired_request:
+            _REMOTE_PAIR_ADMISSION.release()
     response = _remote_post_jpeg_batch(
         "/api/infer/jpeg/batch",
         frame_jpeg,

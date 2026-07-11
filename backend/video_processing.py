@@ -2286,6 +2286,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         last_annotated = None
         last_inference_signature = None
         last_inference_submitted_at = None
+        pending_inference_signature = None
+        pending_inference_submitted_at = None
         received_frame = False
         try:
             while cap.isOpened() and not stop_event.is_set():
@@ -2343,13 +2345,21 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                 state.camera_runtime_status[camera_id] = "running"
 
                 if pending_inference and pending_inference.done():
+                    completed_signature = pending_inference_signature
+                    completed_submitted_at = pending_inference_submitted_at
                     try:
                         result = pending_inference.result()
+                    except model_manager.RemoteInferenceOverloadedError:
+                        result = None
                     except Exception:
                         logger.exception("Detection failed", extra={"camera_id": camera_id})
                         result = None
                     pending_inference = None
+                    pending_inference_signature = None
+                    pending_inference_submitted_at = None
                     if result is not None:
+                        last_inference_signature = completed_signature
+                        last_inference_submitted_at = completed_submitted_at
                         detections = result["detections"]
                         last_annotated = result.get("annotated_frame")
                         state.camera_detections[camera_id] = detections
@@ -2443,8 +2453,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                 last_plate_log_by_key=last_plate_log_by_key,
                                 plate_vote_window=plate_vote_window,
                             )
-                            last_inference_signature = inference_signature
-                            last_inference_submitted_at = now
+                            pending_inference_signature = inference_signature
+                            pending_inference_submitted_at = now
                         except RuntimeError as exc:
                             if not _is_executor_shutdown_error(exc):
                                 raise
