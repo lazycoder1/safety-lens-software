@@ -21,6 +21,7 @@
     "yolo_conf": 0.35,
     "jpeg_quality": 60,
     "inference_width": 640,
+    "coco_inference_width": 640,
     "device": "mps",
     "alert_cooldown": 60
   },

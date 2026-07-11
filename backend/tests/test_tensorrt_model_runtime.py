@@ -112,7 +112,7 @@ def test_fixed_shape_engine_overrides_requested_image_size():
     assert handle.calls[0][1]["imgsz"] == 960
 
 
-def test_low_resolution_coco_engine_is_selected_only_for_frames_that_fit(tmp_path, monkeypatch):
+def test_low_resolution_coco_engine_accepts_fitting_source_or_exact_size_request(tmp_path, monkeypatch):
     source, engine = _write_valid_artifacts(tmp_path, imgsz=512)
     calls = []
 
@@ -139,11 +139,20 @@ def test_low_resolution_coco_engine_is_selected_only_for_frames_that_fit(tmp_pat
         device="cuda",
         imgsz=960,
     )
+    explicitly_used, explicit_result = model_manager._predict_with_low_res_coco_runtime(
+        np.zeros((720, 960, 3), dtype=np.uint8),
+        source_path=source,
+        conf=0.4,
+        device="cuda",
+        imgsz=512,
+    )
 
     assert skipped is False
     assert used is True
     assert result == ["low-resolution-result"]
-    assert [call[1]["imgsz"] for call in calls] == [512, 512]
+    assert explicitly_used is True
+    assert explicit_result == ["low-resolution-result"]
+    assert [call[1]["imgsz"] for call in calls] == [512, 512, 512]
 
 
 def test_coco_model_status_exposes_low_resolution_runtime(monkeypatch):

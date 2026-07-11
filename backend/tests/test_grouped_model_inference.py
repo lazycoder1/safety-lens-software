@@ -142,6 +142,71 @@ def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch)
     assert invocations["ppe_specialist"] == 1
 
 
+def test_grouped_inference_can_size_coco_without_downsizing_ppe(monkeypatch):
+    captured = {}
+
+    def fake_predict_record_batches(_frame, requests):
+        captured["requests"] = requests
+        return {item["request_id"]: [] for item in requests}
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict_record_batches,
+    )
+    execution_plan = {
+        "run_coco_primary": True,
+        "run_ppe_specialist": True,
+        "ppe_prompt_terms": ["helmet"],
+        "run_yoloe_long_tail": False,
+        "run_pose_specialist": False,
+    }
+
+    video_processing._run_grouped_inference(
+        "cam-test",
+        np.zeros((720, 960, 3), dtype=np.uint8),
+        execution_plan,
+        conf=0.3,
+        device="cuda",
+        imgsz=960,
+        cfg={"global": {"coco_inference_width": 640}},
+    )
+
+    assert [request["imgsz"] for request in captured["requests"]] == [640, 960]
+
+
+def test_grouped_inference_ignores_invalid_coco_width(monkeypatch):
+    captured = {}
+
+    def fake_predict_record_batches(_frame, requests):
+        captured["requests"] = requests
+        return {item["request_id"]: [] for item in requests}
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict_record_batches,
+    )
+    execution_plan = {
+        "run_coco_primary": True,
+        "run_ppe_specialist": False,
+        "run_yoloe_long_tail": False,
+        "run_pose_specialist": False,
+    }
+
+    video_processing._run_grouped_inference(
+        "cam-test",
+        np.zeros((720, 960, 3), dtype=np.uint8),
+        execution_plan,
+        conf=0.3,
+        device="cuda",
+        imgsz=960,
+        cfg={"global": {"coco_inference_width": "640"}},
+    )
+
+    assert captured["requests"][0]["imgsz"] == 960
+
+
 def test_coco_inference_uses_mobile_rule_confidence_without_lowering_other_rules(monkeypatch):
     captured = {}
     cfg = {

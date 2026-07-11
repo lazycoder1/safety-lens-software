@@ -699,10 +699,14 @@ def test_update_global_config(mock_restart):
 
 @mock.patch("routers.config.restart_all_cameras")
 def test_update_global_partial(mock_restart):
-    resp = api_put("/api/config/global", json={"yolo_conf": 0.5})
+    resp = api_put(
+        "/api/config/global",
+        json={"yolo_conf": 0.5, "coco_inference_width": 640},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["yolo_conf"] == 0.5
+    assert data["coco_inference_width"] == 640
     assert data["target_fps"] == 6
 
 

@@ -1779,7 +1779,7 @@ def _predict_with_low_res_coco_runtime(
     device: str,
     imgsz: int,
 ) -> tuple[bool, Any]:
-    """Use an optional smaller fixed engine only when the source fits it."""
+    """Use an optional compact engine for fitting sources or an exact size request."""
     configured = os.environ.get(_COCO_LOW_RES_ENGINE_ENV, "").strip()
     if not configured:
         return False, None
@@ -1831,11 +1831,16 @@ def _predict_with_low_res_coco_runtime(
             )
 
         fixed_imgsz = runtime.get("fixed_imgsz")
+        source_fits_runtime = (
+            type(fixed_imgsz) is int
+            and max(frame.shape[:2]) <= fixed_imgsz
+        )
+        request_targets_runtime = fixed_imgsz == imgsz
         if (
             runtime.get("runtime_backend") in {"tensorrt_rejected", "tensorrt_failed"}
             or type(fixed_imgsz) is not int
-            or max(frame.shape[:2]) > fixed_imgsz
             or fixed_imgsz > imgsz
+            or not (source_fits_runtime or request_targets_runtime)
         ):
             return False, None
         if runtime["handle"] is None:

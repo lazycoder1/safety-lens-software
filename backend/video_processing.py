@@ -1099,6 +1099,19 @@ def _filter_coco_records_for_rule_confidence(
     return filtered
 
 
+def _coco_inference_imgsz(cfg: dict | None, default_imgsz: int) -> int:
+    """Resolve an optional COCO-only width without changing specialist models."""
+    if not isinstance(cfg, dict):
+        return default_imgsz
+    global_config = cfg.get("global")
+    if not isinstance(global_config, dict):
+        return default_imgsz
+    configured = global_config.get("coco_inference_width")
+    if type(configured) is not int or not 160 <= configured <= 1920:
+        return default_imgsz
+    return configured
+
+
 def _model_keys_for_capabilities(capabilities: list[str], capability_model_overrides: dict | None = None) -> list[str]:
     capability_set = {capability for capability in capabilities if capability in CAPABILITY_REGISTRY}
     overrides = capability_model_overrides if isinstance(capability_model_overrides, dict) else None
@@ -1650,7 +1663,7 @@ def _run_grouped_inference(
             "model_key": "coco_primary",
             "conf": coco_conf,
             "device": device,
-            "imgsz": imgsz,
+            "imgsz": _coco_inference_imgsz(cfg, imgsz),
         })
     if execution_plan.get("run_ppe_specialist") and ppe_prompts:
         ppe_conf = _rule_confidence_for_model_family(

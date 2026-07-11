@@ -60,9 +60,11 @@ live services; the export remains atomic, so a failed or killed build does not
 replace the configured engine.
 
 Set `SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE` to this artifact. SafetyLens uses
-it only when the decoded frame's largest dimension is no greater than the
-engine's fixed image size and that size is smaller than the requested inference
-size or equal to it. Higher-resolution cameras continue to use the primary 960px engine. A
+it when the decoded frame's largest dimension fits the engine or when
+`global.coco_inference_width` exactly requests the engine's fixed size. This
+lets COCO use a compact runtime without lowering the input size used by PPE,
+pose, or other specialist models. Higher-resolution cameras continue to use the
+primary engine when no exact COCO width is configured. A
 missing, invalid, unloadable, or failing optional engine falls through to the
 primary runtime for the same request. Configured low-resolution engines are
 validated, loaded, and warmed during model-server initialization so the first
