@@ -48,6 +48,12 @@ RTSP_DECODE_THREADS = _env_int(
     minimum=1,
     maximum=16,
 )
+RTSP_BUFFER_DRAIN_MAX_SECONDS = _env_float(
+    "SAFETYLENS_RTSP_BUFFER_DRAIN_MAX_SECONDS",
+    0.012,
+    minimum=0.004,
+    maximum=0.040,
+)
 RTSP_RECONNECT_BASE_SECONDS = _env_float(
     "SAFETYLENS_RTSP_RECONNECT_BASE_SECONDS",
     1.0,

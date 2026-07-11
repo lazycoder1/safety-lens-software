@@ -37,6 +37,7 @@ from camera_capture import (
     CAMERA_STOP_TIMEOUT_SECONDS,
     CameraConnectionEvent,
     CameraConnectionTracker,
+    RTSP_BUFFER_DRAIN_MAX_SECONDS,
     open_video_capture,
     reconnect_delay_seconds,
     redact_video_source,
@@ -70,7 +71,6 @@ CAMERA_START_RETRY_INTERVAL_SECONDS = 10.0
 CAMERA_FRAME_WATCHDOG_INTERVAL_SECONDS = 5.0
 CAMERA_STALE_RESTART_SECONDS = 60.0
 RTSP_BUFFER_DRAIN_MAX_FRAMES = 30
-RTSP_BUFFER_DRAIN_MAX_SECONDS = 0.04
 RTSP_BUFFER_DRAIN_BLOCK_SECONDS = 0.012
 
 logger = logging.getLogger("rakshak_lens")

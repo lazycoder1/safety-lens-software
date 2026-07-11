@@ -138,6 +138,14 @@ def test_open_rtsp_capture_does_not_fall_back_after_ffmpeg_error(monkeypatch):
     assert capture.open_calls == 1
 
 
+def test_video_worker_uses_bounded_rtsp_drain_budget():
+    assert 0.004 <= camera_capture.RTSP_BUFFER_DRAIN_MAX_SECONDS <= 0.040
+    assert (
+        video_processing.RTSP_BUFFER_DRAIN_MAX_SECONDS
+        == camera_capture.RTSP_BUFFER_DRAIN_MAX_SECONDS
+    )
+
+
 def test_reconnect_backoff_grows_and_caps():
     delays = [camera_capture.reconnect_delay_seconds(index, "cam1") for index in range(10)]
 
