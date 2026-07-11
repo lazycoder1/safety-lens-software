@@ -125,6 +125,7 @@ CLOSED_SET_PPE_COLORS = {
 }
 DETECTION_HISTORY_LIMIT = 120
 STREAM_MAX_WIDTH = 854
+IDLE_STREAM_FPS = 1.0
 
 
 def _positive_fps(value, fallback: float) -> float:
@@ -144,6 +145,27 @@ def _configured_stream_fps(camera: dict, global_config: dict, target_fps: float)
 
 def _stream_publish_due(last_published_at: float, now: float, stream_fps: float) -> bool:
     return last_published_at <= 0.0 or now - last_published_at >= 1.0 / stream_fps
+
+
+def _stream_publication_due(
+    camera_id: str,
+    last_published_at: float,
+    now: float,
+    configured_stream_fps: float,
+    had_subscribers: bool,
+) -> tuple[bool, bool]:
+    """Throttle idle JPEG work while retaining a one-FPS state heartbeat."""
+    has_subscribers = stream_fanout.has_subscribers(camera_id)
+    effective_fps = (
+        configured_stream_fps
+        if has_subscribers
+        else min(configured_stream_fps, IDLE_STREAM_FPS)
+    )
+    due = (
+        (has_subscribers and not had_subscribers)
+        or _stream_publish_due(last_published_at, now, effective_fps)
+    )
+    return due, has_subscribers
 
 
 def _resize_for_stream(frame: np.ndarray, max_width: int = STREAM_MAX_WIDTH) -> np.ndarray:
@@ -2241,6 +2263,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             inference_interval,
         )
         last_stream_published_at = 0.0
+        stream_had_subscribers = False
         last_annotated = None
         received_frame = False
         try:
@@ -2340,7 +2363,14 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
 
                 stream_fps = _configured_stream_fps(current_cam, current_g, target_fps)
                 stream_now = time.monotonic()
-                if _stream_publish_due(last_stream_published_at, stream_now, stream_fps):
+                publish_stream_frame, stream_had_subscribers = _stream_publication_due(
+                    camera_id,
+                    last_stream_published_at,
+                    stream_now,
+                    stream_fps,
+                    stream_had_subscribers,
+                )
+                if publish_stream_frame:
                     try:
                         _publish_stream_frame(
                             camera_id,
