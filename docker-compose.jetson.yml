@@ -1,0 +1,26 @@
+services:
+  edge:
+    build:
+      context: .
+      dockerfile: Dockerfile.edge-jetson
+    environment:
+      SAFETYLENS_RTSP_CAPTURE_BACKEND: nvdec
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      LD_LIBRARY_PATH: /usr/lib/aarch64-linux-gnu/tegra
+    volumes:
+      - /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvideo4linux2.so:/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvideo4linux2.so:ro
+      - /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvidconv.so:/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvidconv.so:ro
+      - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  model-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.model-server-jetson

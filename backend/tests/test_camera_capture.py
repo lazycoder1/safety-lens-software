@@ -117,6 +117,60 @@ def test_open_rtsp_capture_forces_ffmpeg_and_bounded_timeouts(monkeypatch):
     assert capture.set_calls == [(camera_capture.cv2.CAP_PROP_BUFFERSIZE, 1)]
 
 
+def test_open_rtsp_capture_uses_nvdec_when_requested(monkeypatch):
+    capture = object()
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
+    monkeypatch.setattr(
+        camera_capture,
+        "_open_gstreamer_capture",
+        lambda source: capture if source == "rtsp://camera/live" else None,
+    )
+    monkeypatch.setattr(
+        camera_capture.cv2,
+        "VideoCapture",
+        lambda: pytest.fail("FFmpeg fallback should not be opened"),
+    )
+
+    assert (
+        camera_capture.open_video_capture(
+            "rtsp://camera/live",
+            stream_type="rtsp",
+        )
+        is capture
+    )
+
+
+def test_open_rtsp_capture_falls_back_when_nvdec_runtime_is_missing(monkeypatch):
+    class FakeCapture:
+        def open(self, *_args):
+            return True
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args):
+            return True
+
+    capture = FakeCapture()
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
+    monkeypatch.setattr(camera_capture, "_open_gstreamer_capture", lambda _source: None)
+    monkeypatch.setattr(camera_capture.cv2, "VideoCapture", lambda: capture)
+
+    assert (
+        camera_capture.open_video_capture(
+            "rtsp://camera/live",
+            stream_type="rtsp",
+        )
+        is capture
+    )
+
+
+def test_invalid_capture_backend_defaults_to_ffmpeg(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "shell-command")
+
+    assert camera_capture._rtsp_capture_backend() == "ffmpeg"
+
+
 def test_open_rtsp_capture_does_not_fall_back_after_ffmpeg_error(monkeypatch):
     class FailedCapture:
         def __init__(self):

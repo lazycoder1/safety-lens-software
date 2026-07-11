@@ -1,0 +1,50 @@
+# Build the frontend independently from the Jetson-compatible runtime image.
+FROM node:22-alpine AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
+
+# JetPack 5 / L4T r35 uses Ubuntu 20.04 userland. Copy a glibc-compatible
+# Python 3.11 runtime in rather than relying on the host Python 3.8.
+FROM python:3.11-slim-bullseye AS python-runtime
+
+FROM ubuntu:20.04 AS pygobject-build
+ENV DEBIAN_FRONTEND=noninteractive
+COPY --from=python-runtime /usr/local /usr/local
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config libgirepository1.0-dev libcairo2-dev \
+    && python -m pip wheel --no-cache-dir --wheel-dir /wheels \
+        pycairo==1.29.0 PyGObject==3.42.2
+
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SAFETYLENS_STATE_DIR=/var/lib/safetylens
+
+COPY --from=python-runtime /usr/local /usr/local
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgl1 libegl1 libglib2.0-0 libsm6 libxrender1 libxext6 \
+    libgirepository-1.0-1 gir1.2-gstreamer-1.0 kmod \
+    gstreamer1.0-tools libgstreamer1.0-0 \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=pygobject-build /wheels /tmp/pygobject-wheels
+RUN python -m pip install --no-cache-dir /tmp/pygobject-wheels/*.whl \
+    && rm -rf /tmp/pygobject-wheels
+
+WORKDIR /app
+
+COPY requirements-edge.txt .
+RUN python -m pip install --no-cache-dir -r requirements-edge.txt
+
+COPY backend/ ./backend/
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "server:app", "--app-dir", "/app/backend", "--host", "0.0.0.0", "--port", "8000"]

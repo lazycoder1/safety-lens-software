@@ -91,6 +91,18 @@ def test_read_live_frame_does_not_drain_file_sources():
     assert cap.grab_calls == 0
 
 
+def test_read_live_frame_does_not_redrain_latest_frame_capture():
+    frame = np.full((2, 2, 3), 7, dtype=np.uint8)
+    cap = _FakeCapture([frame])
+    cap.delivers_latest_frame = True
+
+    ok, result = video_processing._read_live_frame(cap, "rtsp")
+
+    assert ok
+    assert result is frame
+    assert cap.grab_calls == 0
+
+
 def test_ppe_model_confidence_uses_camera_rule_override(monkeypatch):
     cfg = {
         "cameras": {

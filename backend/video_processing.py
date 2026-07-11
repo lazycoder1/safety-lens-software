@@ -1833,6 +1833,8 @@ def _read_live_frame(cap: cv2.VideoCapture, stream_type: str) -> tuple[bool, np.
     ok, frame = cap.read()
     if not ok or frame is None or stream_type != "rtsp":
         return ok, frame
+    if getattr(cap, "delivers_latest_frame", False):
+        return ok, frame
     if not callable(getattr(cap, "grab", None)):
         return ok, frame
 

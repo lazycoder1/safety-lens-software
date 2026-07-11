@@ -85,6 +85,30 @@ For a local split stack:
 docker compose -f docker-compose.split.yml up --build
 ```
 
+### Jetson hardware RTSP decoding
+
+JetPack 5 devices can move RTSP H.264/H.265 decoding from CPU to NVDEC. Use
+the Jetson override together with the split stack:
+
+```bash
+docker compose \
+  -f docker-compose.split.yml \
+  -f docker-compose.jetson.yml \
+  up --build
+```
+
+The override uses a JetPack-compatible Ubuntu 20.04 GStreamer runtime, enables
+`SAFETYLENS_RTSP_CAPTURE_BACKEND=nvdec`, and mounts the NVIDIA GStreamer plugins
+and matching Tegra driver libraries read-only from the host. The capture factory
+falls back to bounded FFmpeg capture when the in-process NVDEC runtime is not
+available. Before deployment, verify the host provides:
+
+```bash
+gst-inspect-1.0 nvv4l2decoder
+gst-inspect-1.0 nvvidconv
+test -e /dev/nvhost-nvdec
+```
+
 The checked-in Compose file does not publish port `8100` on the host. The edge
 reaches the model server over the internal network at
 `http://model-server:8100`. Remote deployments must add an explicit port or

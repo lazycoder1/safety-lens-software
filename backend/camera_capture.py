@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import time
@@ -10,6 +11,9 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
 import cv2
+
+
+logger = logging.getLogger("rakshak_lens")
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -84,6 +88,34 @@ CAMERA_STOP_TIMEOUT_SECONDS = max(
 )
 
 
+def _rtsp_capture_backend() -> str:
+    backend = os.environ.get("SAFETYLENS_RTSP_CAPTURE_BACKEND", "ffmpeg")
+    normalized = str(backend).strip().lower()
+    return normalized if normalized in {"ffmpeg", "nvdec", "auto"} else "ffmpeg"
+
+
+def _open_gstreamer_capture(source: str):
+    """Return a Jetson NVDEC capture, or None when the runtime is unavailable."""
+    try:
+        from gstreamer_capture import GStreamerCapture, nvdec_runtime_available
+    except (ImportError, OSError):
+        return None
+
+    if not nvdec_runtime_available():
+        return None
+    try:
+        return GStreamerCapture(
+            source,
+            open_timeout_ms=RTSP_OPEN_TIMEOUT_MS,
+            read_timeout_ms=RTSP_READ_TIMEOUT_MS,
+        )
+    except Exception:
+        # Never include the source or exception text here: both GStreamer and
+        # RTSP libraries may embed credentials in their error messages.
+        logger.warning("Jetson NVDEC capture initialization failed; using FFmpeg")
+        return None
+
+
 def redact_video_source(source: str) -> str:
     """Return a diagnostic-safe source without credentials or query values."""
     try:
@@ -107,6 +139,11 @@ def open_video_capture(source: str, *, stream_type: str):
     """Open RTSP through FFmpeg with bounded blocking; preserve file behavior."""
     if stream_type != "rtsp":
         return cv2.VideoCapture(source)
+
+    if _rtsp_capture_backend() in {"nvdec", "auto"}:
+        capture = _open_gstreamer_capture(source)
+        if capture is not None:
+            return capture
 
     parameters: list[int] = []
     if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
