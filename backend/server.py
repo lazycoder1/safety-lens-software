@@ -217,8 +217,6 @@ async def startup():
     asyncio.create_task(diagnostics.retention_cleanup_loop())
     asyncio.create_task(alert_store.auto_resolve_loop())
     asyncio.create_task(report_generator.scheduled_report_loop())
-    asyncio.create_task(camera_start_retry_loop())
-    asyncio.create_task(camera_frame_watchdog_loop())
 
     # Phase 2: model loading + camera startup in background so the server
     # can serve login and health requests immediately.

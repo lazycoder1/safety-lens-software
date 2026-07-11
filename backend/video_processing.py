@@ -67,15 +67,11 @@ from detection import (
 from mjpeg_fanout import stream_fanout
 
 LICENSE_PAUSE_INTERVAL = 1.0
-CAMERA_START_RETRY_INTERVAL_SECONDS = 10.0
-CAMERA_FRAME_WATCHDOG_INTERVAL_SECONDS = 5.0
-CAMERA_STALE_RESTART_SECONDS = 60.0
 RTSP_BUFFER_DRAIN_MAX_FRAMES = 30
 RTSP_BUFFER_DRAIN_BLOCK_SECONDS = 0.012
 
 logger = logging.getLogger("rakshak_lens")
 
-_camera_watchdog_restart_at: dict[str, float] = {}
 # Compatibility state retained for lifecycle cleanup and older integrations;
 # the feature-rich pipeline passes fresh pose results explicitly.
 _last_pose_results: dict[str, object] = {}
