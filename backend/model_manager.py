@@ -53,6 +53,7 @@ _REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(2)
 _REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.05
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
+_COCO_LOW_RES_ENGINE_ENV = "SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE"
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
 _REMOTE_MODEL_CACHE_LOCK = threading.RLock()
 _REMOTE_MODEL_CACHE: dict[str, Any] = {
@@ -216,6 +217,7 @@ def _build_model_runtimes() -> dict[ModelKey, dict[str, Any]]:
 
 
 _MODEL_RUNTIMES = _build_model_runtimes()
+_COCO_LOW_RES_RUNTIME = _new_model_runtime()
 _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
     model_key: {
         "status": "not_downloaded",
@@ -1717,6 +1719,125 @@ def _predict_with_runtime(
     return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=effective_imgsz)
 
 
+def _configured_optional_engine_path(source_path: Path, configured: str) -> Path:
+    engine_path = Path(configured).expanduser()
+    if not engine_path.is_absolute():
+        engine_path = source_path.parent / engine_path
+    return engine_path
+
+
+def _predict_with_low_res_coco_runtime(
+    frame,
+    *,
+    source_path: Path,
+    conf: float,
+    device: str,
+    imgsz: int,
+) -> tuple[bool, Any]:
+    """Use an optional smaller fixed engine only when the source fits it."""
+    configured = os.environ.get(_COCO_LOW_RES_ENGINE_ENV, "").strip()
+    if not configured:
+        return False, None
+
+    runtime = _COCO_LOW_RES_RUNTIME
+    engine_path = _configured_optional_engine_path(source_path, configured)
+    with runtime["lock"]:
+        same_artifacts = (
+            runtime.get("loaded_path") == str(source_path)
+            and runtime.get("runtime_path") == str(engine_path)
+        )
+        if not same_artifacts:
+            old_handle = runtime.get("handle")
+            runtime_lock = runtime["lock"]
+            runtime.clear()
+            runtime.update(_new_model_runtime())
+            runtime["lock"] = runtime_lock
+            del old_handle
+            manifest, error = validate_engine(
+                source_path=source_path,
+                engine_path=engine_path,
+                expected_task="detect",
+            )
+            if error:
+                _set_runtime_metadata(
+                    runtime,
+                    source_path=source_path,
+                    runtime_path=engine_path,
+                    backend="tensorrt_rejected",
+                    fixed_imgsz=None,
+                    fixed_classes=[],
+                    fixed_class_groups=[],
+                    fallback_error=error,
+                )
+                logger.warning(
+                    "Low-resolution TensorRT engine rejected",
+                    extra={"engine_path": str(engine_path), "reason": error},
+                )
+                return False, None
+            _set_runtime_metadata(
+                runtime,
+                source_path=source_path,
+                runtime_path=engine_path,
+                backend="tensorrt_lazy",
+                fixed_imgsz=int(manifest["imgsz"]),
+                fixed_classes=[],
+                fixed_class_groups=[],
+                fallback_error=None,
+            )
+
+        fixed_imgsz = runtime.get("fixed_imgsz")
+        if (
+            runtime.get("runtime_backend") in {"tensorrt_rejected", "tensorrt_failed"}
+            or type(fixed_imgsz) is not int
+            or max(frame.shape[:2]) > fixed_imgsz
+            or fixed_imgsz > imgsz
+        ):
+            return False, None
+
+        if runtime["handle"] is None:
+            try:
+                from ultralytics import YOLO
+
+                runtime["handle"] = YOLO(str(engine_path), task="detect")
+                runtime["runtime_backend"] = "tensorrt"
+                runtime["warmed"] = False
+                logger.info(
+                    "Loaded low-resolution COCO TensorRT runtime",
+                    extra={"engine_path": str(engine_path), "fixed_imgsz": fixed_imgsz},
+                )
+            except Exception as exc:
+                runtime["handle"] = None
+                runtime["runtime_backend"] = "tensorrt_failed"
+                runtime["runtime_fallback_error"] = f"TensorRT load failed: {exc}"
+                logger.exception(
+                    "Low-resolution TensorRT model load failed; using primary runtime",
+                    extra={"engine_path": str(engine_path)},
+                )
+                return False, None
+
+        try:
+            return True, _predict_with_runtime(
+                "coco_primary",
+                runtime,
+                frame,
+                conf=conf,
+                device=device,
+                imgsz=imgsz,
+            )
+        except Exception as exc:
+            old_handle = runtime.get("handle")
+            runtime["handle"] = None
+            runtime["runtime_backend"] = "tensorrt_failed"
+            runtime["runtime_fallback_error"] = f"TensorRT inference failed: {exc}"
+            runtime["warmed"] = False
+            del old_handle
+            logger.exception(
+                "Low-resolution TensorRT inference failed; using primary runtime",
+                extra={"engine_path": str(engine_path)},
+            )
+            return False, None
+
+
 def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> None:
     fallback_path = runtime.get("fallback_path")
     if not fallback_path:
@@ -1756,6 +1877,20 @@ def predict(
 ):
     runtime_device = _runtime_device(device)
     runtime = _MODEL_RUNTIMES[model_key]
+
+    if model_key == "coco_primary":
+        with _MODEL_LOCK:
+            active_path = _MODEL_STATES[model_key].get("active_path")
+        if active_path:
+            used_low_res, result = _predict_with_low_res_coco_runtime(
+                frame,
+                source_path=Path(active_path),
+                conf=conf,
+                device=runtime_device,
+                imgsz=imgsz,
+            )
+            if used_low_res:
+                return result
 
     with runtime["lock"]:
         if runtime["handle"] is None and runtime.get("runtime_backend") == "lazy":

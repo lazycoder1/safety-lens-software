@@ -8,7 +8,7 @@ import model_manager
 from tensorrt_engine import build_manifest, manifest_path, write_manifest
 
 
-def _write_valid_artifacts(tmp_path, *, task="detect", classes=None, class_groups=None):
+def _write_valid_artifacts(tmp_path, *, task="detect", classes=None, class_groups=None, imgsz=960):
     source = tmp_path / "model.pt"
     engine = tmp_path / "model.engine"
     source.write_bytes(b"pytorch-model")
@@ -18,7 +18,7 @@ def _write_valid_artifacts(tmp_path, *, task="detect", classes=None, class_group
         build_manifest(
             source_path=source,
             engine_path=engine,
-            imgsz=960,
+            imgsz=imgsz,
             precision="fp16",
             task=task,
             classes=classes,
@@ -110,6 +110,71 @@ def test_fixed_shape_engine_overrides_requested_image_size():
     )
 
     assert handle.calls[0][1]["imgsz"] == 960
+
+
+def test_low_resolution_coco_engine_is_selected_only_for_frames_that_fit(tmp_path, monkeypatch):
+    source, engine = _write_valid_artifacts(tmp_path, imgsz=512)
+    calls = []
+
+    class FakeHandle:
+        def predict(self, frame, **kwargs):
+            calls.append((frame.shape, kwargs))
+            return ["low-resolution-result"]
+
+    monkeypatch.setenv("SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(model_manager, "_COCO_LOW_RES_RUNTIME", model_manager._new_model_runtime())
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=lambda path, task=None: FakeHandle()))
+
+    skipped, result = model_manager._predict_with_low_res_coco_runtime(
+        np.zeros((720, 960, 3), dtype=np.uint8),
+        source_path=source,
+        conf=0.4,
+        device="cuda",
+        imgsz=960,
+    )
+    used, result = model_manager._predict_with_low_res_coco_runtime(
+        np.zeros((288, 352, 3), dtype=np.uint8),
+        source_path=source,
+        conf=0.4,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert skipped is False
+    assert used is True
+    assert result == ["low-resolution-result"]
+    assert [call[1]["imgsz"] for call in calls] == [512, 512]
+
+
+def test_low_resolution_coco_failure_falls_through_to_primary_runtime(tmp_path, monkeypatch):
+    source, engine = _write_valid_artifacts(tmp_path, imgsz=512)
+
+    class FailingHandle:
+        def predict(self, *_args, **_kwargs):
+            raise RuntimeError("candidate execution failed")
+
+    class PrimaryHandle:
+        def predict(self, _frame, **_kwargs):
+            return ["primary-result"]
+
+    primary_runtime = model_manager._new_model_runtime()
+    primary_runtime.update(handle=PrimaryHandle(), runtime_backend="tensorrt", fixed_imgsz=960, warmed=True)
+    monkeypatch.setenv("SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(model_manager, "_COCO_LOW_RES_RUNTIME", model_manager._new_model_runtime())
+    monkeypatch.setitem(model_manager._MODEL_RUNTIMES, "coco_primary", primary_runtime)
+    monkeypatch.setitem(model_manager._MODEL_STATES["coco_primary"], "active_path", str(source))
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=lambda path, task=None: FailingHandle()))
+
+    result = model_manager.predict(
+        "coco_primary",
+        np.zeros((288, 352, 3), dtype=np.uint8),
+        conf=0.4,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert result == ["primary-result"]
+    assert model_manager._COCO_LOW_RES_RUNTIME["runtime_backend"] == "tensorrt_failed"
 
 
 def test_tensorrt_load_failure_uses_pytorch(tmp_path, monkeypatch):

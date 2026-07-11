@@ -20,6 +20,25 @@ docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
 
 The export writes `yolo26s.engine` and `yolo26s.engine.json`. The sidecar records hashes for both the source model and engine, the fixed image size, precision, task, and TensorRT version. Export is deliberately offline because it can take several minutes and consume most of an 8 GB Jetson's memory.
 
+Sites with mixed camera resolutions can also build a smaller engine without
+replacing the primary engine:
+
+```bash
+docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
+  python /app/scripts/export_tensorrt_engine.py \
+  --source /app/models/coco_primary/yolo26s.pt \
+  --output /app/models/coco_primary/yolo26s-512.engine \
+  --imgsz 512 \
+  --workspace 2
+```
+
+Set `SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE` to this artifact. SafetyLens uses
+it only when the decoded frame's largest dimension is no greater than the
+engine's fixed image size and that size is smaller than the requested inference
+size or equal to it. Higher-resolution cameras continue to use the primary 960px engine. A
+missing, invalid, unloadable, or failing optional engine falls through to the
+primary runtime for the same request.
+
 For a fixed-prompt YOLOE PPE engine, repeat `--class` in the exact order the camera plan uses and provide the MobileCLIP encoder:
 
 ```bash
