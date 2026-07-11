@@ -25,6 +25,13 @@ def _det(cls, conf=0.8, bbox=None):
     return detection
 
 
+def _phone_usage_detections(phone_confidence=0.8):
+    return [
+        _det("person", bbox=[0, 0, 100, 200]),
+        _det("cell phone", phone_confidence, bbox=[40, 60, 50, 80]),
+    ]
+
+
 def _cfg_with_alert_classes(cam_id, alert_classes):
     """Build a mock config using old alert_classes (backward compat path)."""
     return {
@@ -226,7 +233,7 @@ def test_check_fall_detections_uses_camera_confirmation_threshold(mock_cfg):
 @mock.patch("detection.get_config")
 def test_check_violations_mobile_phone(mock_cfg):
     mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["mobile_phone", "animal_intrusion"])
-    dets = [_det("person"), _det("cell phone", 0.75)]
+    dets = _phone_usage_detections(0.75)
     violations = check_violations(dets, "cam1")
     assert len(violations) == 1
     assert violations[0]["rule"] == "Mobile Phone Usage"
@@ -245,7 +252,7 @@ def test_check_violations_applies_rule_specific_confidence(mock_cfg):
     mock_cfg.return_value = cfg
 
     violations = check_violations(
-        [_det("cell phone", 0.18), _det("dog", 0.18)],
+        [*_phone_usage_detections(0.18), _det("dog", 0.18)],
         "cam1",
     )
 
@@ -261,8 +268,57 @@ def test_check_violations_prefers_camera_confidence_override(mock_cfg):
     }
     mock_cfg.return_value = cfg
 
-    assert check_violations([_det("cell phone", 0.20)], "cam1") == []
-    assert len(check_violations([_det("cell phone", 0.26)], "cam1")) == 1
+    low_confidence = _phone_usage_detections(0.20)
+    high_confidence = _phone_usage_detections(0.26)
+    assert check_violations(low_confidence, "cam1") == []
+    assert len(check_violations(high_confidence, "cam1")) == 1
+
+
+@mock.patch("detection.get_config")
+def test_check_violations_mobile_phone_requires_a_nearby_person(mock_cfg):
+    mock_cfg.return_value = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone"])
+
+    assert check_violations(
+        [_det("cell phone", bbox=[40, 60, 50, 80])],
+        "cam1",
+    ) == []
+    assert check_violations(
+        [
+            _det("person", bbox=[0, 0, 100, 200]),
+            _det("cell phone", bbox=[140, 60, 150, 80]),
+        ],
+        "cam1",
+    ) == []
+
+
+@mock.patch("detection.get_config")
+def test_check_violations_mobile_phone_rejects_implausibly_large_object(mock_cfg):
+    mock_cfg.return_value = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone"])
+
+    violations = check_violations(
+        [
+            _det("person", bbox=[0, 0, 100, 200]),
+            _det("cell phone", bbox=[20, 30, 80, 100]),
+        ],
+        "cam1",
+    )
+
+    assert violations == []
+
+
+@mock.patch("detection.get_config")
+def test_check_violations_mobile_phone_keeps_valid_close_phone(mock_cfg):
+    mock_cfg.return_value = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone"])
+
+    violations = check_violations(
+        [
+            _det("person", bbox=[0, 0, 100, 200]),
+            _det("cell phone", bbox=[30, 40, 70, 78]),
+        ],
+        "cam1",
+    )
+
+    assert len(violations) == 1
 
 
 # ── check_violations — animal intrusion ──────────────────────────────────────
@@ -321,7 +377,7 @@ def test_check_violations_alert_classes_filtering(mock_cfg):
     """Only rules in alert_classes should fire."""
     mock_cfg.return_value = _cfg_with_alert_classes("cam1", ["animal_intrusion"])
     # Both phone and dog present, but only animal_intrusion enabled
-    dets = [_det("person"), _det("cell phone", 0.8), _det("dog", 0.7)]
+    dets = [*_phone_usage_detections(0.8), _det("dog", 0.7)]
     violations = check_violations(dets, "cam1")
     assert len(violations) == 1
     assert violations[0]["rule"] == "Animal Intrusion"

@@ -1385,6 +1385,63 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
 # Per-severity cooldown multipliers (base_cooldown * multiplier)
 SEVERITY_COOLDOWN_MULT = {"P1": 1, "P2": 1, "P3": 2, "P4": 5}
 
+_MOBILE_PHONE_PERSON_X_PADDING = 0.20
+_MOBILE_PHONE_PERSON_Y_PADDING = 0.10
+_MOBILE_PHONE_MAX_PERSON_AREA_RATIO = 0.08
+_MOBILE_PHONE_MAX_PERSON_RELATIVE_Y = 0.85
+
+
+def _bbox_coordinates(detection: dict) -> tuple[float, float, float, float] | None:
+    bbox = detection.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        coordinates = tuple(float(value) for value in bbox)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in coordinates):
+        return None
+    x1, y1, x2, y2 = coordinates
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _mobile_phone_matches_person(phone: dict, person: dict) -> bool:
+    """Return whether a phone-sized box is plausibly being used by a person."""
+    phone_bbox = _bbox_coordinates(phone)
+    person_bbox = _bbox_coordinates(person)
+    if phone_bbox is None or person_bbox is None:
+        return False
+
+    phone_x1, phone_y1, phone_x2, phone_y2 = phone_bbox
+    person_x1, person_y1, person_x2, person_y2 = person_bbox
+    person_width = person_x2 - person_x1
+    person_height = person_y2 - person_y1
+    phone_center_x = (phone_x1 + phone_x2) / 2.0
+    phone_center_y = (phone_y1 + phone_y2) / 2.0
+    if not (
+        person_x1 - person_width * _MOBILE_PHONE_PERSON_X_PADDING
+        <= phone_center_x
+        <= person_x2 + person_width * _MOBILE_PHONE_PERSON_X_PADDING
+        and person_y1 - person_height * _MOBILE_PHONE_PERSON_Y_PADDING
+        <= phone_center_y
+        <= person_y2 + person_height * _MOBILE_PHONE_PERSON_Y_PADDING
+    ):
+        return False
+
+    relative_y = (phone_center_y - person_y1) / person_height
+    if not (
+        -_MOBILE_PHONE_PERSON_Y_PADDING
+        <= relative_y
+        <= _MOBILE_PHONE_MAX_PERSON_RELATIVE_Y
+    ):
+        return False
+
+    phone_area = (phone_x2 - phone_x1) * (phone_y2 - phone_y1)
+    person_area = person_width * person_height
+    return phone_area / person_area <= _MOBILE_PHONE_MAX_PERSON_AREA_RATIO
+
 
 def _alert_rule_confidence(cfg: dict, cam: dict, rule: dict) -> float:
     default_confidence = cfg.get("global", {}).get("yolo_conf", 0.35)
@@ -1438,6 +1495,15 @@ def check_violations(detections: list, camera_id: str) -> list:
             if detection["class"] in rule["classes"]
             and float(detection.get("confidence") or 0) >= confidence_threshold
         ]
+        if rule["classes"] == ["cell phone"]:
+            matching = [
+                phone
+                for phone in matching
+                if any(
+                    _mobile_phone_matches_person(phone, person)
+                    for person in persons
+                )
+            ]
         if not matching:
             continue
 
