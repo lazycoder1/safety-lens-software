@@ -20,6 +20,7 @@ yoloe_model: Any = None
 camera_frames: dict[str, Optional[bytes]] = {}
 camera_clean_frames: dict[str, Optional[bytes]] = {}
 camera_frame_updated_at: dict[str, float] = {}
+camera_frame_dimensions: dict[str, tuple[int, int]] = {}
 camera_worker_started_at: dict[str, float] = {}
 camera_detections: dict[str, list] = {}
 camera_detection_history: dict[str, list[dict[str, Any]]] = {}
@@ -29,6 +30,22 @@ vlm_lock = threading.Lock()
 camera_runtime_status: dict[str, str] = {}
 
 CAMERA_FRAME_STALE_SECONDS = 5.0
+
+
+def update_camera_frame_dimensions(camera_id: str, frame_width: int, frame_height: int) -> None:
+    """Cache source-frame dimensions used by detection coordinates."""
+    width = int(frame_width)
+    height = int(frame_height)
+    if width > 0 and height > 0:
+        camera_frame_dimensions[camera_id] = (width, height)
+
+
+def get_camera_frame_dimensions(camera_id: str) -> tuple[int, int] | None:
+    return camera_frame_dimensions.get(camera_id)
+
+
+def clear_camera_frame_dimensions(camera_id: str) -> None:
+    camera_frame_dimensions.pop(camera_id, None)
 
 # Connection telemetry intentionally contains only bounded counters, monotonic
 # timestamps, and a small transition enum.  Stream URLs and backend error text

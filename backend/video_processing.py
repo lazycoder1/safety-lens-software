@@ -325,6 +325,7 @@ def _clear_camera_observation(camera_id: str) -> None:
     state.camera_clean_frames[camera_id] = None
     state.camera_detections[camera_id] = []
     state.camera_frame_updated_at.pop(camera_id, None)
+    state.clear_camera_frame_dimensions(camera_id)
     stream_fanout.clear(camera_id)
 
 _alert_pipeline: AlertPipeline | None = None
@@ -1871,6 +1872,7 @@ def _clear_live_frame(camera_id: str) -> None:
     state.camera_frames[camera_id] = None
     state.camera_clean_frames[camera_id] = None
     state.camera_frame_updated_at.pop(camera_id, None)
+    state.clear_camera_frame_dimensions(camera_id)
 
 
 def _frame_age_seconds(camera_id: str):
@@ -2250,6 +2252,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     break
                 if not received_frame:
                     received_frame = True
+                frame_height, frame_width = frame.shape[:2]
+                state.update_camera_frame_dimensions(camera_id, frame_width, frame_height)
                 if connection_tracker is not None and _record_rtsp_connection_frame(
                     camera_id,
                     connection_tracker,
@@ -2697,6 +2701,7 @@ def stop_camera(cam_id: str) -> bool:
         state.camera_frames.pop(cam_id, None)
         state.camera_clean_frames.pop(cam_id, None)
         state.camera_frame_updated_at.pop(cam_id, None)
+        state.clear_camera_frame_dimensions(cam_id)
         state.camera_worker_started_at.pop(cam_id, None)
         state.camera_detections.pop(cam_id, None)
         state.camera_detection_history.pop(cam_id, None)

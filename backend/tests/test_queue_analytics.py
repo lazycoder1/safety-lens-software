@@ -1,7 +1,12 @@
 """Tests for queue snapshot telemetry."""
 
-import state
+import pytest
+
+import object_lifecycle_analytics
+import obstruction_analytics
+import occupancy_analytics
 import queue_analytics
+import state
 
 
 def test_queue_snapshot_counts_people_inside_queue_zone():
@@ -203,3 +208,24 @@ def test_queue_duration_session_resets_after_long_gap(monkeypatch):
     assert snapshot["queueActive"] is True
     assert snapshot["activeSeconds"] == 0
     assert snapshot["sessionSeconds"] == 0
+
+
+@pytest.mark.parametrize(
+    "analytics_module",
+    [
+        queue_analytics,
+        obstruction_analytics,
+        occupancy_analytics,
+        object_lifecycle_analytics,
+    ],
+)
+def test_camera_frame_size_prefers_cached_detection_dimensions(monkeypatch, analytics_module):
+    monkeypatch.setattr(state, "camera_frame_dimensions", {"cam1": (960, 540)})
+    monkeypatch.setattr(state, "camera_clean_frames", {"cam1": b"not-a-jpeg"})
+    monkeypatch.setattr(
+        analytics_module.cv2,
+        "imdecode",
+        lambda *_args, **_kwargs: pytest.fail("cached dimensions should avoid JPEG decode"),
+    )
+
+    assert analytics_module._camera_frame_size({"id": "cam1"}) == (960, 540)

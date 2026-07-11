@@ -34,6 +34,10 @@ def is_object_lifecycle_enabled(camera: dict[str, Any]) -> bool:
 
 
 def _camera_frame_size(camera: dict[str, Any]) -> tuple[int, int]:
+    cached = state.get_camera_frame_dimensions(str(camera.get("id", "")))
+    if cached is not None:
+        return cached
+
     video = camera.get("video")
     if video:
         path = Path(video)
