@@ -260,7 +260,11 @@ def test_failed_submission_does_not_start_policy_cooldown():
 
 def test_successful_submission_starts_policy_cooldown(monkeypatch):
     cfg, candidate, camera = _cooldown_fixture(60)
-    monkeypatch.setattr(policy_engine, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(
+        policy_engine,
+        "mark_automation_rule_triggered",
+        lambda *_args: True,
+    )
     first = policy_engine.evaluate_candidate(
         candidate,
         camera,
@@ -284,7 +288,11 @@ def test_successful_submission_starts_policy_cooldown(monkeypatch):
 
 def test_zero_cooldown_remains_unthrottled_after_success(monkeypatch):
     cfg, candidate, camera = _cooldown_fixture(0)
-    monkeypatch.setattr(policy_engine, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(
+        policy_engine,
+        "mark_automation_rule_triggered",
+        lambda *_args: True,
+    )
     first = policy_engine.evaluate_candidate(
         candidate,
         camera,

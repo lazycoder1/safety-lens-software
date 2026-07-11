@@ -9,7 +9,7 @@ from datetime import datetime, time as dt_time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from config_manager import get_config, save_config
+from config_manager import get_config, mark_automation_rule_triggered
 
 DEFAULT_MESSAGE_TEMPLATE = "{severity} {violation_type} on {camera} in {zone}"
 DAY_ALIASES = {
@@ -119,21 +119,13 @@ def mark_rule_triggered(
         return
     if camera_id:
         _last_triggered_by_key[f"{camera_id}:{rule_id}"] = time.monotonic()
-    cfg = cfg or get_config()
-    changed = False
     timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    for rule in cfg.get("automation_rules", []):
-        if rule.get("id") == rule_id:
-            rule["lastTriggered"] = timestamp
-            changed = True
-            break
-    if changed:
-        try:
-            save_config(cfg)
-        except Exception:
-            # Alert creation should not fail because the UI timestamp could not
-            # be persisted.
-            pass
+    try:
+        mark_automation_rule_triggered(rule_id, timestamp)
+    except Exception:
+        # Alert creation should not fail because the UI timestamp could not
+        # be persisted.
+        pass
 
 
 def render_template(template: str, data: dict[str, Any]) -> str:

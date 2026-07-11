@@ -463,6 +463,45 @@ def save_config(config: dict) -> None:
         _save_unlocked(config)
 
 
+def mark_automation_rule_triggered(rule_id: str, timestamp: str) -> bool:
+    """Update only one rule timestamp without rewriting a stale config snapshot."""
+    global _config, _config_checked_at, _config_version
+    if not rule_id:
+        return False
+    with _lock:
+        if _resolve_config_store() == "postgres":
+            version = _mark_rule_triggered_in_postgres(rule_id, timestamp)
+            if version is None:
+                return False
+            if _config is not None:
+                current = deepcopy(_config)
+                for rule in current.get("automation_rules", []):
+                    if rule.get("id") == rule_id:
+                        rule["lastTriggered"] = timestamp
+                        break
+                _config = current
+            # The targeted SQL update cannot overwrite concurrent config edits.
+            # Force the next reader to fetch their generation instead of
+            # pretending this locally patched cache is the returned DB row.
+            _config_version = None
+            _config_checked_at = 0.0
+        else:
+            current = deepcopy(_config) if _config is not None else _load_raw_config_with_version_unlocked()[0]
+            changed = False
+            for rule in current.get("automation_rules", []):
+                if rule.get("id") == rule_id:
+                    rule["lastTriggered"] = timestamp
+                    changed = True
+                    break
+            if not changed:
+                return False
+            _save_to_disk(current)
+            _config = current
+            _config_version = None
+            _config_checked_at = time.monotonic()
+        return True
+
+
 def _save_unlocked(config: dict) -> None:
     """Write config to disk (caller must hold _lock)."""
     global _config, _config_checked_at, _config_version
@@ -740,6 +779,52 @@ def _save_to_postgres(config: dict):
             )
             row = cur.fetchone()
         conn.commit()
+        return row[0]
+
+
+def _mark_rule_triggered_in_postgres(
+    rule_id: str,
+    timestamp: str,
+) -> object | None:
+    # Alert timestamps are a runtime hot path. Reuse the application's
+    # thread-safe pool instead of paying for a new TCP connection per alert.
+    from db import get_conn
+
+    with get_conn() as conn:
+        _ensure_pg_config_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH target_rule AS (
+                    SELECT
+                        app_config.id,
+                        (ordinal - 1)::text AS array_index
+                    FROM app_config
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                        COALESCE(config -> 'automation_rules', '[]'::jsonb)
+                    ) WITH ORDINALITY AS rules(value, ordinal)
+                    WHERE app_config.id = %s
+                      AND value ->> 'id' = %s
+                    LIMIT 1
+                )
+                UPDATE app_config AS stored
+                SET config = jsonb_set(
+                        stored.config,
+                        ARRAY['automation_rules', target_rule.array_index, 'lastTriggered'],
+                        to_jsonb(%s::text),
+                        TRUE
+                    ),
+                    updated_at = NOW()
+                FROM target_rule
+                WHERE stored.id = target_rule.id
+                RETURNING updated_at
+                """,
+                (PG_CONFIG_ID, rule_id, timestamp),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        if row is None:
+            return None
         return row[0]
 
 

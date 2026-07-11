@@ -674,6 +674,50 @@ def test_update_config_returns_full_config():
     assert "cameras" in result
 
 
+def test_mark_rule_triggered_updates_only_target_rule_on_disk():
+    cfg = config_manager.load_config()
+    cfg["automation_rules"] = [
+        {"id": "rule-1", "name": "First", "lastTriggered": None},
+        {"id": "rule-2", "name": "Second", "lastTriggered": None},
+    ]
+    original_cameras = deepcopy(cfg["cameras"])
+    config_manager.save_config(cfg)
+
+    changed = config_manager.mark_automation_rule_triggered(
+        "rule-1",
+        "2026-07-11T12:00:00Z",
+    )
+
+    persisted = json.loads(_test_config.read_text())
+    assert changed is True
+    assert persisted["automation_rules"][0]["lastTriggered"] == "2026-07-11T12:00:00Z"
+    assert persisted["automation_rules"][1]["lastTriggered"] is None
+    assert persisted["cameras"] == original_cameras
+
+
+def test_postgres_rule_timestamp_invalidates_local_generation(monkeypatch):
+    stale = config_manager.load_config()
+    stale["automation_rules"] = [{"id": "rule-1", "lastTriggered": None}]
+    calls = []
+    monkeypatch.setenv(config_manager.CONFIG_STORE_ENV, "postgres")
+    monkeypatch.setattr(
+        config_manager,
+        "_mark_rule_triggered_in_postgres",
+        lambda rule_id, timestamp: calls.append((rule_id, timestamp)) or "version-2",
+    )
+
+    changed = config_manager.mark_automation_rule_triggered(
+        "rule-1",
+        "2026-07-11T12:00:00Z",
+    )
+
+    assert changed is True
+    assert calls == [("rule-1", "2026-07-11T12:00:00Z")]
+    assert config_manager._config["automation_rules"][0]["lastTriggered"] == "2026-07-11T12:00:00Z"
+    assert config_manager._config_version is None
+    assert config_manager._config_checked_at == 0.0
+
+
 # ── DEFAULT_CONFIG structure ─────────────────────────────────────────────────
 
 def test_default_config_camera_structure():
