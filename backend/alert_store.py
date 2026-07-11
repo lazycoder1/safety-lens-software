@@ -3,9 +3,12 @@ Alert persistence with PostgreSQL for Rakshak Lens backend.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import threading
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -19,6 +22,9 @@ logger = logging.getLogger("rakshak_lens.alerts")
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 _get_conn = get_conn
+_SNAPSHOT_LINK_CACHE_MAX_ENTRIES = 64
+_snapshot_link_cache: OrderedDict[tuple[int, bytes], Path] = OrderedDict()
+_snapshot_link_cache_lock = threading.Lock()
 
 
 def init_db():
@@ -110,7 +116,7 @@ def create_alert(
             SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
             snapshot_filename = f"{alert_id}.jpg"
             snapshot_file = SNAPSHOTS_DIR / snapshot_filename
-            if _write_snapshot_once(snapshot_file, snapshot_jpeg):
+            if _link_or_write_snapshot_once(snapshot_file, snapshot_jpeg):
                 created_snapshot_paths.append(snapshot_file)
             snapshot_path = snapshot_filename
         except Exception:
@@ -120,7 +126,7 @@ def create_alert(
         try:
             clean_filename = f"{alert_id}_clean.jpg"
             clean_snapshot_file = SNAPSHOTS_DIR / clean_filename
-            if _write_snapshot_once(clean_snapshot_file, clean_snapshot_jpeg):
+            if _link_or_write_snapshot_once(clean_snapshot_file, clean_snapshot_jpeg):
                 created_snapshot_paths.append(clean_snapshot_file)
             clean_snapshot_path = clean_filename
         except Exception:
@@ -221,6 +227,39 @@ def _write_snapshot_once(path: Path, content: bytes) -> bool:
         path.unlink(missing_ok=True)
         raise
     return True
+
+
+def _link_or_write_snapshot_once(path: Path, content: bytes) -> bool:
+    """Create unique evidence names while sharing identical on-disk content."""
+    cache_key = (len(content), hashlib.sha256(content).digest())
+    with _snapshot_link_cache_lock:
+        if path.exists():
+            return False
+        source = _snapshot_link_cache.get(cache_key)
+        if source is not None:
+            try:
+                os.link(source, path)
+            except FileNotFoundError:
+                _snapshot_link_cache.pop(cache_key, None)
+            except FileExistsError:
+                return False
+            except OSError:
+                logger.debug(
+                    "Snapshot hardlink reuse unavailable; writing evidence",
+                    exc_info=True,
+                )
+            else:
+                _snapshot_link_cache[cache_key] = path
+                _snapshot_link_cache.move_to_end(cache_key)
+                return True
+
+        created = _write_snapshot_once(path, content)
+        if created:
+            _snapshot_link_cache[cache_key] = path
+            _snapshot_link_cache.move_to_end(cache_key)
+            while len(_snapshot_link_cache) > _SNAPSHOT_LINK_CACHE_MAX_ENTRIES:
+                _snapshot_link_cache.popitem(last=False)
+        return created
 
 
 def _same_alert_identity(
