@@ -85,6 +85,13 @@ docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
 
 Set `SAFETYLENS_PPE_TENSORRT_ENGINE` to enable it. PPE and dynamic long-tail YOLOE use separate runtimes when this is configured. If the requested PPE prompts differ from the engine manifest, SafetyLens releases the engine and falls back to the dynamic PyTorch model.
 
+When the fixed PPE engine is smaller than the camera's general inference width,
+set `global.ppe_inference_width` to the engine size. COCO and PPE can then share
+one compact remote JPEG while pose and other specialists retain their own
+configured size. Only set this after the matching fixed-size PPE engine passes
+site accuracy validation; a configured width without its matching engine can
+discard source detail before a larger fallback runtime receives the frame.
+
 ## Enable it
 
 Set the absolute engine path for the model-server service and recreate that service:

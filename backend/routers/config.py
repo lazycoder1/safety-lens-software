@@ -34,6 +34,7 @@ class GlobalConfigUpdate(BaseModel):
     jpeg_quality: Optional[int] = Field(None, ge=20, le=100)
     inference_width: Optional[int] = Field(None, ge=160, le=1920)
     coco_inference_width: Optional[int] = Field(None, ge=160, le=1920)
+    ppe_inference_width: Optional[int] = Field(None, ge=160, le=1920)
     device: Optional[str] = None
     alert_cooldown: Optional[int] = Field(None, ge=0, le=86400)
 
