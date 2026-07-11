@@ -953,8 +953,14 @@ def _rewrite_detection_record_classes(records: list[dict], class_names: dict[int
     return rewritten
 
 
-def _rule_confidence_for_capability(camera_id: str, capability_key: str, default_conf: float) -> float:
-    cfg = get_config()
+def _rule_confidence_for_capability(
+    camera_id: str,
+    capability_key: str,
+    default_conf: float,
+    *,
+    cfg: dict | None = None,
+) -> float:
+    cfg = cfg if cfg is not None else get_config()
     camera = cfg.get("cameras", {}).get(camera_id, {})
     rule_ids = camera.get("safety_rule_ids", [])
     rule_map = {rule.get("id"): rule for rule in cfg.get("safety_rules", [])}
@@ -975,8 +981,14 @@ def _rule_confidence_for_capability(camera_id: str, capability_key: str, default
     return min(confidences) if confidences else default_conf
 
 
-def _rule_confidence_for_model_family(camera_id: str, model_family: str, default_conf: float) -> float:
-    cfg = get_config()
+def _rule_confidence_for_model_family(
+    camera_id: str,
+    model_family: str,
+    default_conf: float,
+    *,
+    cfg: dict | None = None,
+) -> float:
+    cfg = cfg if cfg is not None else get_config()
     camera = cfg.get("cameras", {}).get(camera_id, {})
     rule_ids = camera.get("safety_rule_ids", [])
     rule_map = {rule.get("id"): rule for rule in cfg.get("safety_rules", [])}
@@ -1013,12 +1025,78 @@ def _capabilities_for_model_key(execution_plan: dict, model_key: str) -> list[st
     ]
 
 
-def _rule_confidence_for_capabilities(camera_id: str, capabilities: list[str], default_conf: float) -> float:
+def _rule_confidence_for_capabilities(
+    camera_id: str,
+    capabilities: list[str],
+    default_conf: float,
+    *,
+    cfg: dict | None = None,
+) -> float:
     confidences = [
-        _rule_confidence_for_capability(camera_id, capability, default_conf)
+        _rule_confidence_for_capability(
+            camera_id,
+            capability,
+            default_conf,
+            cfg=cfg,
+        )
         for capability in capabilities
     ]
     return min(confidences) if confidences else default_conf
+
+
+def _coco_record_confidence_threshold(
+    camera_id: str,
+    record: dict,
+    default_conf: float,
+    *,
+    cfg: dict | None = None,
+) -> float:
+    try:
+        class_id = int(record.get("class_id", record.get("cls", -1)))
+    except (TypeError, ValueError):
+        return default_conf
+    class_name = COCO_NAMES.get(class_id)
+    capability_keys = _COCO_CLASS_TO_CAPABILITIES.get(class_name or "", [])
+    if not capability_keys:
+        return default_conf
+    return min(
+        _rule_confidence_for_capability(
+            camera_id,
+            capability_key,
+            default_conf,
+            cfg=cfg,
+        )
+        for capability_key in capability_keys
+    )
+
+
+def _filter_coco_records_for_rule_confidence(
+    camera_id: str,
+    records: list[dict],
+    default_conf: float,
+    *,
+    cfg: dict | None = None,
+) -> list[dict]:
+    thresholds_by_class: dict[int, float] = {}
+    filtered = []
+    for record in records:
+        try:
+            class_id = int(record.get("class_id", record.get("cls", -1)))
+            confidence = float(record.get("confidence") or 0)
+        except (TypeError, ValueError):
+            continue
+        threshold = thresholds_by_class.get(class_id)
+        if threshold is None:
+            threshold = _coco_record_confidence_threshold(
+                camera_id,
+                record,
+                default_conf,
+                cfg=cfg,
+            )
+            thresholds_by_class[class_id] = threshold
+        if confidence >= threshold:
+            filtered.append(record)
+    return filtered
 
 
 def _model_keys_for_capabilities(capabilities: list[str], capability_model_overrides: dict | None = None) -> list[str]:
@@ -1534,7 +1612,16 @@ def vlm_worker(camera_id: str, stop_event: threading.Event):
         _deregister_worker_on_exit(state.vlm_threads, camera_id, stop_event)
 
 
-def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: dict, *, conf: float, device: str, imgsz: int):
+def _run_grouped_inference(
+    camera_id: str,
+    frame: np.ndarray,
+    execution_plan: dict,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+    cfg: dict | None = None,
+):
     annotated = None
     detections: list[dict] = []
     visible_detection_count = 0
@@ -1551,16 +1638,27 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
     long_tail_prompts = execution_plan.get("yoloe_prompt_terms") or []
     batch_requests = []
     if execution_plan.get("run_coco_primary"):
+        coco_conf = _rule_confidence_for_model_family(
+            camera_id,
+            "coco_primary",
+            conf,
+            cfg=cfg,
+        )
         model_invocations["coco_primary"] += 1
         batch_requests.append({
             "request_id": "coco_primary",
             "model_key": "coco_primary",
-            "conf": conf,
+            "conf": coco_conf,
             "device": device,
             "imgsz": imgsz,
         })
     if execution_plan.get("run_ppe_specialist") and ppe_prompts:
-        ppe_conf = _rule_confidence_for_model_family(camera_id, "ppe_specialist", conf)
+        ppe_conf = _rule_confidence_for_model_family(
+            camera_id,
+            "ppe_specialist",
+            conf,
+            cfg=cfg,
+        )
         model_invocations["ppe_specialist"] += 1
         batch_requests.append({
             "request_id": "ppe_specialist",
@@ -1579,6 +1677,7 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             camera_id,
             candidate_capabilities,
             conf,
+            cfg=cfg,
         )
         model_invocations["ppe_closed_set_candidate"] += 1
         batch_requests.append({
@@ -1599,7 +1698,12 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             "classes": long_tail_prompts,
         })
     if execution_plan.get("run_fire_smoke_specialist"):
-        fire_conf = _rule_confidence_for_capability(camera_id, "fire_smoke", conf)
+        fire_conf = _rule_confidence_for_capability(
+            camera_id,
+            "fire_smoke",
+            conf,
+            cfg=cfg,
+        )
         model_invocations["fire_smoke_specialist"] += 1
         batch_requests.append({
             "request_id": "fire_smoke_specialist",
@@ -1620,7 +1724,12 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
     record_batches = model_manager.predict_record_batches(frame, batch_requests)
 
     if execution_plan.get("run_coco_primary"):
-        records = record_batches["coco_primary"]
+        records = _filter_coco_records_for_rule_confidence(
+            camera_id,
+            record_batches["coco_primary"],
+            conf,
+            cfg=cfg,
+        )
         coco_detections = _detection_batch_from_records(
             records,
             "coco_primary",
@@ -2140,6 +2249,7 @@ def _run_detection_job(
         conf=yolo_conf,
         device=device,
         imgsz=inference_width,
+        cfg=current_cfg,
     )
     model_invocations.setdefault("face_recognition", 0)
     model_invocations.setdefault("plate_recognition", 0)

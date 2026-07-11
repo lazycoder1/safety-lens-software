@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from config_manager import get_config
-from constants import COCO_NAMES, CLASS_COLORS, YOLOE_COLORS
+from constants import COCO_NAMES, CLASS_COLORS
 
 logger = logging.getLogger("rakshak_lens")
 
@@ -1386,6 +1386,25 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
 SEVERITY_COOLDOWN_MULT = {"P1": 1, "P2": 1, "P3": 2, "P4": 5}
 
 
+def _alert_rule_confidence(cfg: dict, cam: dict, rule: dict) -> float:
+    default_confidence = cfg.get("global", {}).get("yolo_conf", 0.35)
+    overrides = cam.get("safety_rule_overrides") or {}
+    override = overrides.get(rule.get("id")) if isinstance(overrides, dict) else None
+    values = []
+    if isinstance(override, dict):
+        values.extend(override.get(key) for key in ("confidence", "conf"))
+    values.append(rule.get("confidence"))
+    values.append(default_confidence)
+    for value in values:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 < confidence <= 1:
+            return confidence
+    return 0.35
+
+
 def check_violations(detections: list, camera_id: str) -> list:
     """Return candidate violation dicts for COCO-based detections, config-driven from safety_rules."""
     cfg = get_config()
@@ -1412,7 +1431,13 @@ def check_violations(detections: list, camera_id: str) -> list:
         if rid == "alert_zone_intrusion":
             continue
 
-        matching = [d for d in detections if d["class"] in rule["classes"]]
+        confidence_threshold = _alert_rule_confidence(cfg, cam, rule)
+        matching = [
+            detection
+            for detection in detections
+            if detection["class"] in rule["classes"]
+            and float(detection.get("confidence") or 0) >= confidence_threshold
+        ]
         if not matching:
             continue
 

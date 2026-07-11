@@ -5,7 +5,6 @@ from unittest import mock
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from detection import (
     _fall_analysis,
@@ -233,6 +232,37 @@ def test_check_violations_mobile_phone(mock_cfg):
     assert violations[0]["rule"] == "Mobile Phone Usage"
     assert violations[0]["severity"] == "P3"
     assert violations[0]["confidence"] == 0.75
+
+
+@mock.patch("detection.get_config")
+def test_check_violations_applies_rule_specific_confidence(mock_cfg):
+    cfg = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone", "alert_animal"])
+    cfg["global"] = {"yolo_conf": 0.30}
+    mobile_rule = next(
+        rule for rule in cfg["safety_rules"] if rule["id"] == "alert_mobile_phone"
+    )
+    mobile_rule["confidence"] = 0.15
+    mock_cfg.return_value = cfg
+
+    violations = check_violations(
+        [_det("cell phone", 0.18), _det("dog", 0.18)],
+        "cam1",
+    )
+
+    assert [violation["rule"] for violation in violations] == ["Mobile Phone Usage"]
+
+
+@mock.patch("detection.get_config")
+def test_check_violations_prefers_camera_confidence_override(mock_cfg):
+    cfg = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone"])
+    cfg["global"] = {"yolo_conf": 0.30}
+    cfg["cameras"]["cam1"]["safety_rule_overrides"] = {
+        "alert_mobile_phone": {"confidence": 0.25},
+    }
+    mock_cfg.return_value = cfg
+
+    assert check_violations([_det("cell phone", 0.20)], "cam1") == []
+    assert len(check_violations([_det("cell phone", 0.26)], "cam1")) == 1
 
 
 # ── check_violations — animal intrusion ──────────────────────────────────────

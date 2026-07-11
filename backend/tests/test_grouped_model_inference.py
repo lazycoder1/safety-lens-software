@@ -142,6 +142,72 @@ def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch)
     assert invocations["ppe_specialist"] == 1
 
 
+def test_coco_inference_uses_mobile_rule_confidence_without_lowering_other_rules(monkeypatch):
+    captured = {}
+    cfg = {
+        "cameras": {
+            "cam-phone": {
+                "safety_rule_ids": ["alert_mobile_phone", "alert_animal"],
+            }
+        },
+        "safety_rules": [
+            {
+                "id": "alert_mobile_phone",
+                "type": "alert",
+                "enabled": True,
+                "confidence": 0.15,
+            },
+            {
+                "id": "alert_animal",
+                "type": "alert",
+                "enabled": True,
+            },
+        ],
+    }
+
+    def fake_predict_record_batches(_frame, requests):
+        captured["requests"] = requests
+        return {
+            "coco_primary": [
+                {"class_id": 67, "confidence": 0.18, "bbox": [1, 2, 10, 20]},
+                {"class_id": 16, "confidence": 0.18, "bbox": [20, 2, 35, 20]},
+            ]
+        }
+
+    monkeypatch.setattr(
+        video_processing,
+        "get_config",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("grouped inference should reuse the caller's config snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict_record_batches,
+    )
+    execution_plan = {
+        "capabilities": ["mobile_phone", "animal_presence"],
+        "run_coco_primary": True,
+        "run_ppe_specialist": False,
+        "run_yoloe_long_tail": False,
+        "run_pose_specialist": False,
+    }
+
+    _annotated, detections, _pose, _invocations = video_processing._run_grouped_inference(
+        "cam-phone",
+        np.zeros((90, 160, 3), dtype=np.uint8),
+        execution_plan,
+        conf=0.30,
+        device="cuda",
+        imgsz=960,
+        cfg=cfg,
+    )
+
+    assert captured["requests"][0]["conf"] == 0.15
+    assert [detection["class"] for detection in detections] == ["cell phone"]
+
+
 def test_bbox_only_grouped_inference_skips_full_resolution_rendering(monkeypatch):
     def fake_predict_record_batches(_frame, requests):
         assert [request["request_id"] for request in requests] == ["coco_primary", "ppe_specialist"]
