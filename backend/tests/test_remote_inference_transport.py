@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import model_manager
 import model_server
+import plate_analyzer
 
 
 def _jpeg_bytes(frame):
@@ -595,3 +596,151 @@ def test_model_server_rejects_duplicate_batch_request_ids(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Inference batch request IDs must be unique"
+
+
+def test_edge_uses_raw_jpeg_anpr_transport(monkeypatch):
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    captured = {}
+    expected = [{"plateText": "KA05MN4523"}]
+
+    def fake_raw(path, frame_jpeg, *, params):
+        captured.update(path=path, frame_jpeg=frame_jpeg, params=params)
+        return {"plates": expected}
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg", fake_raw)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post",
+        lambda *_args, **_kwargs: pytest.fail("raw-capable ANPR used JSON fallback"),
+    )
+
+    plates = model_manager.predict_plate_records(
+        frame,
+        conf=0.25,
+        device="cuda",
+        imgsz=960,
+    )
+
+    decoded = cv2.imdecode(
+        np.frombuffer(captured["frame_jpeg"], np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert decoded.shape == frame.shape
+    assert captured["path"] == "/api/anpr/jpeg"
+    assert captured["params"] == {"conf": 0.25, "device": "cuda", "imgsz": 960}
+    assert plates is expected
+
+
+def test_edge_anpr_falls_back_to_legacy_json(monkeypatch):
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    captured = {}
+
+    def fake_legacy(path, payload):
+        captured.update(path=path, payload=payload)
+        return {"plates": []}
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model_manager, "_remote_post", fake_legacy)
+
+    model_manager.predict_plate_records(
+        frame,
+        conf=0.25,
+        device="cuda",
+        imgsz=960,
+    )
+
+    decoded = cv2.imdecode(
+        np.frombuffer(base64.b64decode(captured["payload"]["frame_jpeg_b64"]), np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert decoded.shape == frame.shape
+    assert captured["path"] == "/api/anpr"
+
+
+def test_edge_rejects_stale_anpr_before_jpeg_encoding(monkeypatch):
+    class RejectAdmission:
+        def acquire(self, **kwargs):
+            assert kwargs == {
+                "timeout": model_manager._REMOTE_JOB_ADMISSION_WAIT_SECONDS
+            }
+            return False
+
+        def release(self):
+            pytest.fail("Rejected ANPR must not release an unclaimed slot")
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", RejectAdmission())
+    monkeypatch.setattr(
+        cv2,
+        "imencode",
+        lambda *_args, **_kwargs: pytest.fail("Rejected ANPR reached JPEG encoding"),
+    )
+
+    with pytest.raises(model_manager.RemoteInferenceOverloadedError):
+        model_manager.predict_plate_records(
+            np.zeros((120, 200, 3), dtype=np.uint8),
+            conf=0.25,
+            device="cuda",
+            imgsz=960,
+        )
+
+
+def test_model_server_accepts_raw_jpeg_anpr(monkeypatch):
+    captured = {}
+
+    def fake_analyze(frame, *, conf, device, imgsz):
+        captured.update(shape=frame.shape, conf=conf, device=device, imgsz=imgsz)
+        return [{"plateText": "KA05MN4523"}]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(plate_analyzer, "analyze_frame", fake_analyze)
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    response = client.post(
+        "/api/anpr/jpeg",
+        params={"conf": 0.27, "device": "cpu", "imgsz": 640},
+        content=_jpeg_bytes(frame),
+        headers={"Content-Type": "image/jpeg"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plates"] == [{"plateText": "KA05MN4523"}]
+    assert captured == {
+        "shape": (120, 200, 3),
+        "conf": 0.27,
+        "device": "cpu",
+        "imgsz": 640,
+    }
+
+
+def test_model_server_keeps_legacy_json_anpr(monkeypatch):
+    captured = {}
+
+    def fake_analyze(frame, *, conf, device, imgsz):
+        captured.update(shape=frame.shape, conf=conf, device=device, imgsz=imgsz)
+        return [{"plateText": "KA05MN4523"}]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(plate_analyzer, "analyze_frame", fake_analyze)
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    response = client.post(
+        "/api/anpr",
+        json={
+            "frame_jpeg_b64": base64.b64encode(_jpeg_bytes(frame)).decode("ascii"),
+            "conf": 0.27,
+            "device": "cpu",
+            "imgsz": 640,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plates"] == [{"plateText": "KA05MN4523"}]
+    assert captured == {
+        "shape": (120, 200, 3),
+        "conf": 0.27,
+        "device": "cpu",
+        "imgsz": 640,
+    }

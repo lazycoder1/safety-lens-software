@@ -26,3 +26,9 @@ def test_jetson_edge_exposes_nvdec_runtime_devices_and_plugins():
         "/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvidconv.so:/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvidconv.so:ro",
         "/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro",
     }
+
+
+def test_jetson_model_server_image_contains_anpr_runtime_module():
+    dockerfile = (ROOT / "Dockerfile.model-server-jetson").read_text()
+
+    assert "COPY backend/plate_analyzer.py ./backend/plate_analyzer.py" in dockerfile

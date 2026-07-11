@@ -280,10 +280,40 @@ def anpr(body: AnprRequest, authorization: Optional[str] = Header(default=None))
     _require_model_server_token(authorization)
     try:
         frame_bytes = base64.b64decode(body.frame_jpeg_b64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid frame_jpeg_b64") from exc
+    return _run_anpr(
+        frame_bytes,
+        conf=body.conf,
+        device=body.device,
+        imgsz=body.imgsz,
+    )
+
+
+@app.post("/api/anpr/jpeg")
+def anpr_jpeg(
+    frame_jpeg: bytes = Body(..., media_type="image/jpeg"),
+    conf: float = Query(0.35),
+    device: str = Query("cuda"),
+    imgsz: int = Query(960, gt=0),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _run_anpr(frame_jpeg, conf=conf, device=device, imgsz=imgsz)
+
+
+def _run_anpr(
+    frame_bytes: bytes,
+    *,
+    conf: float,
+    device: str,
+    imgsz: int,
+) -> Dict[str, Any]:
+    try:
         arr = np.frombuffer(frame_bytes, np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid frame_jpeg_b64") from exc
+        raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
     if frame is None:
         raise HTTPException(status_code=400, detail="Could not decode frame")
 
@@ -292,9 +322,9 @@ def anpr(body: AnprRequest, authorization: Optional[str] = Header(default=None))
 
         plates = plate_analyzer.analyze_frame(
             frame,
-            conf=body.conf,
-            device=_runtime_device(body.device),
-            imgsz=body.imgsz,
+            conf=conf,
+            device=_runtime_device(device),
+            imgsz=imgsz,
         )
     except Exception as exc:
         logger.exception("ANPR inference failed")

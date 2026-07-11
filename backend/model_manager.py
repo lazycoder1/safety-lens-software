@@ -2146,14 +2146,36 @@ def predict_plate_records(
     if not is_remote_inference_enabled():
         raise RuntimeError("ANPR inference must run through the model server")
 
-    import cv2
-    ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ok:
-        raise RuntimeError("Could not encode frame for remote ANPR")
-    payload = {
-        "frame_jpeg_b64": base64.b64encode(buffer.tobytes()).decode("ascii"),
-        "conf": conf,
-        "device": device,
-        "imgsz": imgsz,
-    }
-    return _remote_post("/api/anpr", payload).get("plates", [])
+    if not _REMOTE_JOB_ADMISSION.acquire(
+        timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
+    ):
+        raise RemoteInferenceOverloadedError(
+            "Remote inference is at its bounded concurrency limit"
+        )
+    try:
+        import cv2
+
+        ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError("Could not encode frame for remote ANPR")
+        frame_jpeg = buffer.tobytes()
+        metadata = {
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+        }
+        response = _remote_post_jpeg(
+            "/api/anpr/jpeg",
+            frame_jpeg,
+            params=metadata,
+        )
+        if response is not None:
+            return response.get("plates", [])
+
+        payload = {
+            "frame_jpeg_b64": base64.b64encode(frame_jpeg).decode("ascii"),
+            **metadata,
+        }
+        return _remote_post("/api/anpr", payload).get("plates", [])
+    finally:
+        _REMOTE_JOB_ADMISSION.release()
