@@ -1751,19 +1751,25 @@ def predict(
 
 
 def _records_from_results(results) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
     if not results or len(results) == 0:
-        return records
+        return []
     boxes = results[0].boxes
     if boxes is None:
-        return records
-    for box in boxes:
-        records.append({
-            "class_id": int(box.cls[0]),
-            "confidence": float(box.conf[0]),
-            "bbox": list(map(int, box.xyxy[0])),
-        })
-    return records
+        return []
+
+    # Ultralytics box tensors live on the inference device. Converting cls,
+    # confidence, and each coordinate separately forces several CUDA scalar
+    # synchronizations per detection. Transfer the compact Nx6/Nx7 tensor to
+    # host memory once, then normalize ordinary Python rows.
+    rows = boxes.data.tolist()
+    return [
+        {
+            "class_id": int(row[-1]),
+            "confidence": float(row[-2]),
+            "bbox": [int(value) for value in row[:4]],
+        }
+        for row in rows
+    ]
 
 
 def _bbox_iou(left: list[int], right: list[int]) -> float:
