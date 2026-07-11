@@ -1,13 +1,74 @@
 import asyncio
+import base64
 import gc
 import weakref
 
+import cv2
+import numpy as np
 import pytest
 from fastapi import HTTPException
 from starlette.requests import ClientDisconnect
 
 from mjpeg_fanout import MjpegFanout, MjpegSubscriberLimitError
 from routers import stream as stream_router
+
+
+class _FakeRtspCapture:
+    def __init__(self, *, opened=True, frame=None):
+        self.opened = opened
+        self.frame = frame
+        self.released = False
+
+    def isOpened(self):
+        return self.opened
+
+    def read(self):
+        return self.frame is not None, self.frame
+
+    def release(self):
+        self.released = True
+
+
+def test_rtsp_probe_uses_bounded_capture_factory_and_releases_failure(monkeypatch):
+    capture = _FakeRtspCapture(opened=False)
+    calls = []
+    monkeypatch.setattr(
+        stream_router,
+        "open_video_capture",
+        lambda source, *, stream_type: calls.append((source, stream_type)) or capture,
+    )
+
+    result = stream_router._test_rtsp_sync("rtsp://camera.example/live")
+
+    assert calls == [("rtsp://camera.example/live", "rtsp")]
+    assert result == {
+        "success": False,
+        "resolution": None,
+        "snapshot_b64": None,
+        "error": "Cannot open RTSP URL — check address/credentials",
+    }
+    assert capture.released is True
+
+
+def test_rtsp_probe_encodes_one_frame_and_releases_capture(monkeypatch):
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+    capture = _FakeRtspCapture(frame=frame)
+    monkeypatch.setattr(
+        stream_router,
+        "open_video_capture",
+        lambda *_args, **_kwargs: capture,
+    )
+
+    result = stream_router._test_rtsp_sync("rtsp://camera.example/live")
+
+    decoded = cv2.imdecode(
+        np.frombuffer(base64.b64decode(result["snapshot_b64"]), np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert result["success"] is True
+    assert result["resolution"] == [160, 90]
+    assert decoded.shape == frame.shape
+    assert capture.released is True
 
 
 def test_stream_route_keeps_mjpeg_boundary_and_uses_async_fanout(monkeypatch):

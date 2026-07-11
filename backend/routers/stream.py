@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, HTTPExce
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from camera_capture import open_video_capture
 from config_manager import get_config
 from dependencies import require_admin
 from mjpeg_fanout import MjpegSubscriberLimitError, stream_fanout
@@ -54,9 +55,8 @@ class RtspTestRequest(BaseModel):
 
 def _test_rtsp_sync(url: str) -> dict:
     """Open an RTSP URL, grab one frame, return result dict.  Runs in a thread."""
-    cap = cv2.VideoCapture(url)
+    cap = open_video_capture(url, stream_type="rtsp")
     try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             return {"success": False, "resolution": None, "snapshot_b64": None,
                     "error": "Cannot open RTSP URL — check address/credentials"}
