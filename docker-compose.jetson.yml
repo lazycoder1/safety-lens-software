@@ -14,6 +14,18 @@ services:
       - /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvidconv.so:/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnvvidconv.so:ro
       - /usr/lib/aarch64-linux-gnu/libv4l/plugins:/usr/lib/aarch64-linux-gnu/libv4l/plugins:ro
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro
+    # JetPack 5's generic GPU reservation does not expose the media-engine
+    # nodes needed by nvv4l2decoder/nvvidconv. Without these mappings the
+    # configured NVDEC backend silently falls back to CPU FFmpeg decoding.
+    devices:
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvhost-gpu:/dev/nvhost-gpu
+      - /dev/nvhost-ctrl-gpu:/dev/nvhost-ctrl-gpu
+      - /dev/nvmap:/dev/nvmap
+      - /dev/nvhost-ctrl:/dev/nvhost-ctrl
+      - /dev/nvhost-nvdec:/dev/nvhost-nvdec
+      - /dev/nvhost-ctrl-nvdec:/dev/nvhost-ctrl-nvdec
+      - /dev/nvhost-vic:/dev/nvhost-vic
     deploy:
       resources:
         reservations:
