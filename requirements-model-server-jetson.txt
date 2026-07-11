@@ -1,0 +1,7 @@
+# Jetson GPU model-server dependencies.
+# Keep CUDA/PyTorch/OpenCV/Ultralytics from the Ultralytics JetPack image.
+fastapi==0.115.14
+uvicorn==0.30.6
+pydantic==2.10.6
+# PP-OCRv6 ANPR requires PaddleOCR. Install a Jetson-compatible PaddlePaddle
+# wheel for the target JetPack release, then install paddleocr==3.7.0.

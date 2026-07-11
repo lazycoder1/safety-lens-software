@@ -1,0 +1,494 @@
+"""Tests for video processing runtime helpers."""
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import numpy as np
+
+import camera_planner
+import state
+import video_processing
+
+
+def test_executor_shutdown_error_classifier_is_narrow():
+    assert video_processing._is_executor_shutdown_error(
+        RuntimeError("cannot schedule new futures after shutdown")
+    )
+    assert video_processing._is_executor_shutdown_error(
+        RuntimeError("cannot schedule new futures after interpreter shutdown")
+    )
+    assert not video_processing._is_executor_shutdown_error(RuntimeError("camera inference submit failed"))
+
+
+class _FakeCapture:
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.grabbed = None
+        self.grab_calls = 0
+
+    def read(self):
+        if not self.frames:
+            return False, None
+        return True, self.frames.pop(0)
+
+    def grab(self):
+        self.grab_calls += 1
+        if not self.frames:
+            return False
+        self.grabbed = self.frames.pop(0)
+        return True
+
+    def retrieve(self):
+        if self.grabbed is None:
+            return False, None
+        return True, self.grabbed
+
+
+def test_read_live_frame_drains_rtsp_buffer_to_latest_frame(monkeypatch):
+    frames = [np.full((2, 2, 3), value, dtype=np.uint8) for value in range(4)]
+    cap = _FakeCapture(frames)
+    monkeypatch.setattr(video_processing, "RTSP_BUFFER_DRAIN_MAX_FRAMES", 10)
+    monkeypatch.setattr(video_processing, "RTSP_BUFFER_DRAIN_MAX_SECONDS", 1.0)
+    monkeypatch.setattr(video_processing, "RTSP_BUFFER_DRAIN_BLOCK_SECONDS", 1.0)
+
+    ok, frame = video_processing._read_live_frame(cap, "rtsp")
+
+    assert ok
+    assert frame is not None
+    assert int(frame[0, 0, 0]) == 3
+    assert cap.grab_calls >= 3
+
+
+def test_read_live_frame_does_not_drain_file_sources():
+    frames = [np.full((2, 2, 3), value, dtype=np.uint8) for value in range(3)]
+    cap = _FakeCapture(frames)
+
+    ok, frame = video_processing._read_live_frame(cap, "file")
+
+    assert ok
+    assert frame is not None
+    assert int(frame[0, 0, 0]) == 0
+    assert cap.grab_calls == 0
+
+
+def test_ppe_model_confidence_uses_camera_rule_override(monkeypatch):
+    cfg = {
+        "cameras": {
+            "cam_apron": {
+                "safety_rule_ids": ["ppe_apron"],
+                "safety_rule_overrides": {
+                    "ppe_apron": {"confidence": 0.10},
+                },
+            }
+        },
+        "safety_rules": [
+            {
+                "id": "ppe_apron",
+                "type": "ppe",
+                "enabled": True,
+                "confidence": 0.35,
+            }
+        ],
+    }
+    monkeypatch.setattr(video_processing, "get_config", lambda: cfg)
+
+    assert video_processing._rule_confidence_for_model_family("cam_apron", "ppe_specialist", 0.35) == 0.10
+
+
+def test_ppe_model_confidence_falls_back_to_rule_confidence(monkeypatch):
+    cfg = {
+        "cameras": {
+            "cam_harness": {
+                "safety_rule_ids": ["ppe_harness"],
+            }
+        },
+        "safety_rules": [
+            {
+                "id": "ppe_harness",
+                "type": "ppe",
+                "enabled": True,
+                "confidence": 0.15,
+            }
+        ],
+    }
+    monkeypatch.setattr(video_processing, "get_config", lambda: cfg)
+
+    assert video_processing._rule_confidence_for_model_family("cam_harness", "ppe_specialist", 0.35) == 0.15
+
+
+def _apron_plan():
+    return {
+        "capabilities": ["apron_required"],
+        "required_model_keys": ["coco_primary", "ppe_specialist"],
+        "run_coco_primary": True,
+        "run_ppe_specialist": True,
+        "run_yoloe_long_tail": False,
+        "run_fire_smoke_specialist": False,
+        "run_face_recognition": False,
+        "run_pose_specialist": False,
+        "run_plate_recognition": False,
+        "ppe_prompt_terms": ["apron", "denim apron", "work apron"],
+        "yoloe_prompt_terms": [],
+        "capability_windows": [
+            {
+                "id": "apron_monday_shift",
+                "capabilities": ["apron_required"],
+                "mode": "detection",
+                "windows": [{"days": ["mon"], "from": "09:00", "to": "17:00"}],
+            }
+        ],
+    }
+
+
+def _apron_candidate_plan():
+    return {
+        "capabilities": ["apron_required"],
+        "required_model_keys": ["ppe_closed_set_candidate"],
+        "capability_model_overrides": {"apron_required": "ppe_closed_set_candidate"},
+        "run_coco_primary": False,
+        "run_ppe_specialist": False,
+        "run_ppe_closed_set_candidate": True,
+        "run_yoloe_long_tail": False,
+        "run_fire_smoke_specialist": False,
+        "run_face_recognition": False,
+        "run_pose_specialist": False,
+        "run_plate_recognition": False,
+        "ppe_prompt_terms": [],
+        "yoloe_prompt_terms": [],
+        "capability_windows": [
+            {
+                "id": "apron_candidate_monday_shift",
+                "capabilities": ["apron_required"],
+                "mode": "detection",
+                "windows": [{"days": ["mon"], "from": "09:00", "to": "17:00"}],
+            }
+        ],
+    }
+
+
+def test_detection_window_keeps_capability_active_inside_window():
+    cfg = {"site": {"timezone": "Asia/Kolkata"}}
+    schedule = video_processing._capability_schedule_state(
+        {},
+        cfg,
+        _apron_plan(),
+        now=datetime(2026, 6, 15, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+    scheduled_plan = video_processing._scheduled_execution_plan(_apron_plan(), schedule)
+
+    assert schedule["suppressedCapabilities"] == []
+    assert scheduled_plan["run_ppe_specialist"] is True
+    assert scheduled_plan["run_coco_primary"] is True
+    assert "denim apron" in scheduled_plan["ppe_prompt_terms"]
+
+
+def test_detection_window_suppresses_model_paths_outside_window():
+    cfg = {"site": {"timezone": "Asia/Kolkata"}}
+    schedule = video_processing._capability_schedule_state(
+        {},
+        cfg,
+        _apron_plan(),
+        now=datetime(2026, 6, 17, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+    scheduled_plan = video_processing._scheduled_execution_plan(_apron_plan(), schedule)
+
+    assert schedule["suppressedCapabilities"] == ["apron_required"]
+    assert scheduled_plan["capabilities"] == []
+    assert scheduled_plan["required_model_keys"] == []
+    assert scheduled_plan["run_ppe_specialist"] is False
+    assert scheduled_plan["run_coco_primary"] is False
+    assert scheduled_plan["ppe_prompt_terms"] == []
+
+
+def test_detection_window_preserves_closed_set_candidate_override_inside_window():
+    cfg = {"site": {"timezone": "Asia/Kolkata"}}
+    schedule = video_processing._capability_schedule_state(
+        {},
+        cfg,
+        _apron_candidate_plan(),
+        now=datetime(2026, 6, 15, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+    scheduled_plan = video_processing._scheduled_execution_plan(_apron_candidate_plan(), schedule)
+
+    assert schedule["suppressedCapabilities"] == []
+    assert scheduled_plan["required_model_keys"] == ["ppe_closed_set_candidate"]
+    assert scheduled_plan["run_ppe_closed_set_candidate"] is True
+    assert scheduled_plan["run_ppe_specialist"] is False
+    assert scheduled_plan["run_coco_primary"] is False
+
+
+def test_detection_window_suppresses_closed_set_candidate_outside_window():
+    cfg = {"site": {"timezone": "Asia/Kolkata"}}
+    schedule = video_processing._capability_schedule_state(
+        {},
+        cfg,
+        _apron_candidate_plan(),
+        now=datetime(2026, 6, 17, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+    scheduled_plan = video_processing._scheduled_execution_plan(_apron_candidate_plan(), schedule)
+
+    assert schedule["suppressedCapabilities"] == ["apron_required"]
+    assert scheduled_plan["required_model_keys"] == []
+    assert scheduled_plan["run_ppe_closed_set_candidate"] is False
+    assert scheduled_plan["run_ppe_specialist"] is False
+    assert scheduled_plan["run_coco_primary"] is False
+
+
+def test_crowd_count_detector_window_suppresses_coco_only_model_path():
+    cfg = {"site": {"timezone": "Asia/Kolkata"}, "safety_rules": []}
+    camera = {
+        "id": "eval_office_crowd_count",
+        "capabilities": ["crowd_count_threshold"],
+        "safety_rule_ids": [],
+        "capability_windows": {
+            "crowd_count_threshold": {
+                "id": "office_crowd_count_inactive_window",
+                "mode": "detection",
+                "active": False,
+                "windows": [{"days": ["mon"], "from": "09:00", "to": "17:00"}],
+            }
+        },
+    }
+
+    plan = camera_planner.build_execution_plan(camera, cfg)
+    schedule = video_processing._capability_schedule_state(
+        camera,
+        cfg,
+        plan,
+        now=datetime(2026, 6, 15, 10, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+    scheduled_plan = video_processing._scheduled_execution_plan(plan, schedule)
+
+    assert plan["capabilities"] == ["crowd_count_threshold"]
+    assert plan["required_model_keys"] == ["coco_primary"]
+    assert plan["run_coco_primary"] is True
+    assert plan["capability_windows"][0]["active"] is False
+    assert schedule["capabilities"]["crowd_count_threshold"]["active"] is False
+    assert schedule["suppressedCapabilities"] == ["crowd_count_threshold"]
+    assert scheduled_plan["capabilities"] == []
+    assert scheduled_plan["required_model_keys"] == []
+    assert scheduled_plan["run_coco_primary"] is False
+
+
+def test_crowd_count_threshold_candidate_is_person_count_policy_only():
+    candidates = video_processing._crowd_count_threshold_candidates(
+        "eval_office_crowd_count",
+        [
+            {"class": "person", "confidence": 0.62},
+            {"class": "person", "confidence": 0.54},
+            {"class": "chair", "confidence": 0.81},
+        ],
+    )
+
+    assert candidates == [
+        {
+            "camera_id": "eval_office_crowd_count",
+            "rule": "Person Detected",
+            "severity": "P3",
+            "confidence": 0.62,
+            "count": 2,
+            "classes": ["person"],
+            "description": "2 person detected detection(s)",
+            "source": "COCO Primary",
+            "threshold": 1,
+            "metadata": {"capability": "crowd_count_threshold"},
+        }
+    ]
+
+
+def test_detection_history_records_schedule_suppression_telemetry():
+    state.camera_detection_history.clear()
+    state.camera_schedule_telemetry.clear()
+    schedule = {
+        "suppressedCapabilities": ["apron_required"],
+        "suppressedCount": 1,
+        "capabilities": {"apron_required": {"active": False, "suppressed": True}},
+    }
+    invocations = {"coco_primary": 0, "ppe_specialist": 0}
+
+    video_processing._record_detection_history(
+        "cam_apron",
+        [],
+        schedule_state=schedule,
+        model_invocations=invocations,
+    )
+
+    sample = state.camera_detection_history["cam_apron"][-1]
+    assert sample["detectionsCount"] == 0
+    assert sample["scheduleState"]["suppressedCapabilities"] == ["apron_required"]
+    assert sample["modelInvocationCounts"] == invocations
+    assert state.camera_schedule_telemetry["cam_apron"]["scheduleState"] == schedule
+
+
+def test_violation_window_ignores_stale_display_frames_for_detection_rules():
+    windows = {"Missing gloves": [True, True]}
+    video_processing._advance_violation_window(
+        windows,
+        {"Missing gloves": {"rule": "Missing gloves"}},
+        window_size=15,
+        fresh_detection_evaluated=False,
+        fresh_fall_evaluated=False,
+    )
+
+    assert windows["Missing gloves"] == [True, True]
+
+
+def test_violation_window_advances_on_fresh_detection_observation():
+    windows = {"Missing gloves": [True, True]}
+    video_processing._advance_violation_window(
+        windows,
+        {"Missing gloves": {"rule": "Missing gloves"}},
+        window_size=15,
+        fresh_detection_evaluated=True,
+        fresh_fall_evaluated=False,
+    )
+
+    assert windows["Missing gloves"] == [True, True, True]
+
+
+def test_empty_violation_observation_does_not_clear_on_stale_display_frame():
+    windows = {"Missing gloves": [True]}
+    active = {"Missing gloves"}
+
+    video_processing._record_empty_violation_observation(
+        windows,
+        active,
+        window_size=15,
+        fresh_detection_evaluated=False,
+        fresh_fall_evaluated=False,
+    )
+
+    assert windows["Missing gloves"] == [True]
+    assert active == {"Missing gloves"}
+
+
+def test_grouped_inference_runs_closed_set_candidate_with_rule_labels(monkeypatch):
+    cfg = {
+        "cameras": {
+            "cam_candidate": {
+                "safety_rule_ids": ["ppe_harness"],
+                "safety_rule_overrides": {"ppe_harness": {"confidence": 0.22}},
+            }
+        },
+        "safety_rules": [
+            {"id": "ppe_harness", "type": "ppe", "enabled": True, "confidence": 0.31},
+        ],
+    }
+    calls = []
+
+    def fake_predict_records(model_key, frame, *, conf, device, imgsz, classes=None):
+        calls.append({
+            "model_key": model_key,
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+            "classes": classes,
+        })
+        return [
+            {"class_id": 0, "confidence": 0.91, "bbox": [5, 5, 45, 70]},
+            {"class_id": 2, "confidence": 0.88, "bbox": [10, 12, 42, 65]},
+        ]
+
+    monkeypatch.setattr(video_processing, "get_config", lambda: cfg)
+    monkeypatch.setattr(video_processing.model_manager, "predict_records", fake_predict_records)
+
+    frame = np.zeros((80, 80, 3), dtype=np.uint8)
+    plan = {
+        "capabilities": ["harness_required"],
+        "required_model_keys": ["ppe_closed_set_candidate"],
+        "capability_model_overrides": {"harness_required": "ppe_closed_set_candidate"},
+        "run_coco_primary": False,
+        "run_ppe_specialist": False,
+        "run_ppe_closed_set_candidate": True,
+        "run_yoloe_long_tail": False,
+        "run_fire_smoke_specialist": False,
+        "run_pose_specialist": False,
+        "ppe_prompt_terms": [],
+        "yoloe_prompt_terms": [],
+    }
+
+    _annotated, detections, _pose, invocations = video_processing._run_grouped_inference(
+        "cam_candidate",
+        frame,
+        plan,
+        conf=0.35,
+        device="cpu",
+        imgsz=640,
+    )
+
+    assert calls == [
+        {
+            "model_key": "ppe_closed_set_candidate",
+            "conf": 0.22,
+            "device": "cpu",
+            "imgsz": 640,
+            "classes": None,
+        }
+    ]
+    assert invocations["ppe_closed_set_candidate"] == 1
+    assert invocations["ppe_specialist"] == 0
+    assert invocations["coco_primary"] == 0
+    assert [d["class"] for d in detections] == ["person", "safety harness"]
+    assert {d["model_family"] for d in detections} == {"ppe_closed_set_candidate"}
+    assert detections[1]["capability_keys"] == ["harness_required"]
+
+
+def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
+    calls = []
+
+    def fake_check_yoloe_violations(detections, camera_id, frame_w=None, frame_h=None):
+        calls.append({
+            "camera_id": camera_id,
+            "classes": [d["class"] for d in detections],
+            "frame_w": frame_w,
+            "frame_h": frame_h,
+        })
+        return []
+
+    monkeypatch.setattr(video_processing, "check_yoloe_violations", fake_check_yoloe_violations)
+    monkeypatch.setattr(video_processing, "check_violations", lambda detections, camera_id: [])
+
+    video_processing._process_detection_observation(
+        "cam_candidate",
+        np.zeros((40, 60, 3), dtype=np.uint8),
+        [{"class": "person", "confidence": 0.9, "bbox": [1, 1, 20, 35], "model_family": "ppe_closed_set_candidate"}],
+        None,
+        {
+            "capabilities": ["harness_required"],
+            "run_pose_specialist": False,
+            "run_ppe_specialist": False,
+            "run_ppe_closed_set_candidate": True,
+        },
+        {},
+        {"site": {"timezone": "Asia/Kolkata"}},
+        last_alert_by_rule={},
+        active_violations=set(),
+        violation_window={},
+        alert_cooldown=30,
+        window_size=3,
+    )
+
+    assert calls == [
+        {
+            "camera_id": "cam_candidate",
+            "classes": ["person"],
+            "frame_w": 60,
+            "frame_h": 40,
+        }
+    ]
+
+
+def test_empty_violation_observation_clears_after_fresh_absence():
+    windows = {"Missing gloves": [False]}
+    active = {"Missing gloves"}
+
+    video_processing._record_empty_violation_observation(
+        windows,
+        active,
+        window_size=15,
+        fresh_detection_evaluated=True,
+        fresh_fall_evaluated=False,
+    )
+
+    assert "Missing gloves" not in windows
+    assert active == set()

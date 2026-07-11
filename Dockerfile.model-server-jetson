@@ -1,0 +1,19 @@
+FROM ultralytics/ultralytics:latest-jetson-jetpack5
+
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+COPY requirements-model-server-jetson.txt .
+RUN python3 -m pip install --no-cache-dir -r requirements-model-server-jetson.txt
+
+COPY backend/model_server.py ./backend/model_server.py
+COPY backend/model_manager.py ./backend/model_manager.py
+COPY backend/logging_config.py ./backend/logging_config.py
+COPY backend/capability_registry.py ./backend/capability_registry.py
+COPY backend/constants.py ./backend/constants.py
+
+EXPOSE 8100
+
+CMD ["python3", "-m", "uvicorn", "model_server:app", "--app-dir", "/app/backend", "--host", "0.0.0.0", "--port", "8100"]

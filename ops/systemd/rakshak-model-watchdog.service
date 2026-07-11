@@ -1,0 +1,8 @@
+[Unit]
+Description=Rakshak Lens model server watchdog
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rakshak-model-watchdog
