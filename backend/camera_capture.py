@@ -114,12 +114,17 @@ def _open_gstreamer_capture(source: str):
     if not nvdec_runtime_available():
         return None
     try:
-        return GStreamerCapture(
+        capture = GStreamerCapture(
             source,
             open_timeout_ms=RTSP_OPEN_TIMEOUT_MS,
             read_timeout_ms=RTSP_READ_TIMEOUT_MS,
             max_dimension=_rtsp_max_dimension(),
         )
+        if capture.isOpened():
+            return capture
+        capture.release()
+        logger.warning("Jetson NVDEC capture did not open; using FFmpeg")
+        return None
     except Exception:
         # Never include the source or exception text here: both GStreamer and
         # RTSP libraries may embed credentials in their error messages.

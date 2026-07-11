@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -163,6 +164,42 @@ def test_open_rtsp_capture_falls_back_when_nvdec_runtime_is_missing(monkeypatch)
         )
         is capture
     )
+
+
+def test_gstreamer_capture_that_does_not_open_is_released_and_falls_back(
+    monkeypatch,
+    caplog,
+):
+    class ClosedCapture:
+        def __init__(self, *_args, **_kwargs):
+            self.released = False
+
+        def isOpened(self):
+            return False
+
+        def release(self):
+            self.released = True
+
+    closed = ClosedCapture()
+    monkeypatch.setitem(
+        sys.modules,
+        "gstreamer_capture",
+        SimpleNamespace(
+            GStreamerCapture=lambda *_args, **_kwargs: closed,
+            nvdec_runtime_available=lambda: True,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="rakshak_lens"):
+        result = camera_capture._open_gstreamer_capture(
+            "rtsp://user:secret@camera/live"
+        )
+
+    assert result is None
+    assert closed.released is True
+    assert "did not open" in caplog.text
+    assert "user" not in caplog.text
+    assert "secret" not in caplog.text
 
 
 def test_invalid_capture_backend_defaults_to_ffmpeg(monkeypatch):
