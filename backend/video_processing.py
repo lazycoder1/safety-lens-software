@@ -139,6 +139,7 @@ EMPTY_SCENE_SIGNATURE_SIZE = (64, 36)
 EMPTY_SCENE_CHANGED_PIXEL_DELTA = 8
 EMPTY_SCENE_CHANGED_FRACTION = 0.001
 EMPTY_SCENE_MAX_INFERENCE_INTERVAL_SECONDS = 1.0
+UNCHANGED_STREAM_MAX_INTERVAL_SECONDS = 1.0
 
 
 def _positive_fps(value, fallback: float) -> float:
@@ -190,25 +191,75 @@ def _empty_scene_inference_decision(
     detections: list[dict],
 ) -> tuple[bool, np.ndarray, float]:
     """Skip unchanged empty-scene frames, while forcing a one-second refresh."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    signature = cv2.resize(
-        gray,
-        EMPTY_SCENE_SIGNATURE_SIZE,
-        interpolation=cv2.INTER_AREA,
-    )
+    signature = _frame_change_signature(frame)
+    changed_fraction = _signature_changed_fraction(signature, previous_signature)
     if previous_signature is None:
-        return True, signature, 1.0
-    changed_fraction = float(
-        (
-            cv2.absdiff(signature, previous_signature)
-            > EMPTY_SCENE_CHANGED_PIXEL_DELTA
-        ).mean()
-    )
+        return True, signature, changed_fraction
     if detections:
         return True, signature, changed_fraction
     if (
         last_submitted_at is None
         or now - last_submitted_at >= EMPTY_SCENE_MAX_INFERENCE_INTERVAL_SECONDS
+    ):
+        return True, signature, changed_fraction
+    return changed_fraction > EMPTY_SCENE_CHANGED_FRACTION, signature, changed_fraction
+
+
+def _frame_change_signature(frame: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(
+        gray,
+        EMPTY_SCENE_SIGNATURE_SIZE,
+        interpolation=cv2.INTER_AREA,
+    )
+
+
+def _signature_changed_fraction(
+    signature: np.ndarray,
+    previous_signature: np.ndarray | None,
+) -> float:
+    if previous_signature is None:
+        return 1.0
+    return float(
+        (
+            cv2.absdiff(signature, previous_signature)
+            > EMPTY_SCENE_CHANGED_PIXEL_DELTA
+        ).mean()
+    )
+
+
+def _stream_change_signature(frame: np.ndarray) -> np.ndarray:
+    """Build a stream-only luma signature after reducing color pixels."""
+    reduced = cv2.resize(
+        frame,
+        EMPTY_SCENE_SIGNATURE_SIZE,
+        interpolation=cv2.INTER_AREA,
+    )
+    return cv2.cvtColor(reduced, cv2.COLOR_BGR2GRAY)
+
+
+def _active_stream_change_decision(
+    frame: np.ndarray,
+    previous_published_signature: np.ndarray | None,
+    *,
+    last_published_at: float,
+    now: float,
+    detections: list[dict],
+    subscriber_joined: bool,
+) -> tuple[bool, np.ndarray | None, float]:
+    """Suppress only unchanged, empty active-view frames between heartbeats."""
+    if detections:
+        return True, None, 1.0
+    signature = _stream_change_signature(frame)
+    changed_fraction = _signature_changed_fraction(
+        signature,
+        previous_published_signature,
+    )
+    if (
+        subscriber_joined
+        or previous_published_signature is None
+        or last_published_at <= 0.0
+        or now - last_published_at >= UNCHANGED_STREAM_MAX_INTERVAL_SECONDS
     ):
         return True, signature, changed_fraction
     return changed_fraction > EMPTY_SCENE_CHANGED_FRACTION, signature, changed_fraction
@@ -2298,8 +2349,10 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             get_config(),
             inference_interval,
         )
+        last_stream_checked_at = 0.0
         last_stream_published_at = 0.0
         stream_had_subscribers = False
+        last_stream_signature = None
         last_annotated = None
         last_inference_signature = None
         last_inference_submitted_at = None
@@ -2410,15 +2463,36 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
 
                 stream_fps = _configured_stream_fps(current_cam, current_g, target_fps)
                 stream_now = time.monotonic()
+                previous_stream_had_subscribers = stream_had_subscribers
                 publish_stream_frame, stream_had_subscribers = _stream_publication_due(
                     camera_id,
-                    last_stream_published_at,
+                    last_stream_checked_at,
                     stream_now,
                     stream_fps,
                     stream_had_subscribers,
                 )
                 if publish_stream_frame:
+                    last_stream_checked_at = stream_now
                     detections = state.camera_detections.get(camera_id, [])
+                    stream_signature = None
+                    if stream_had_subscribers:
+                        (
+                            publish_stream_frame,
+                            stream_signature,
+                            _stream_changed_fraction,
+                        ) = _active_stream_change_decision(
+                            frame,
+                            last_stream_signature,
+                            last_published_at=last_stream_published_at,
+                            now=stream_now,
+                            detections=detections,
+                            subscriber_joined=(
+                                not previous_stream_had_subscribers
+                            ),
+                        )
+                    else:
+                        last_stream_signature = None
+                if publish_stream_frame:
                     source_annotated = _preserved_source_annotation(
                         frame,
                         last_annotated,
@@ -2441,6 +2515,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         logger.exception("Stream frame encoding failed", extra={"camera_id": camera_id})
                     else:
                         last_stream_published_at = stream_now
+                        if stream_signature is not None:
+                            last_stream_signature = stream_signature
                 now = time.monotonic()
                 if pending_inference is None and now - next_inference_at > inference_interval / 2:
                     next_inference_at = inference_scheduler.next_inference_slot(

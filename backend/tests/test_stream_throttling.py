@@ -193,6 +193,90 @@ def test_empty_scene_inference_forces_refresh_and_keeps_active_scenes_full_rate(
     assert active_due is True
 
 
+def test_active_stream_skips_unchanged_empty_frame_before_heartbeat():
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    first_due, signature, _score = video_processing._active_stream_change_decision(
+        frame,
+        None,
+        last_published_at=0.0,
+        now=10.0,
+        detections=[],
+        subscriber_joined=True,
+    )
+    next_due, _next_signature, score = video_processing._active_stream_change_decision(
+        frame.copy(),
+        signature,
+        last_published_at=10.0,
+        now=10.25,
+        detections=[],
+        subscriber_joined=False,
+    )
+
+    assert first_due is True
+    assert next_due is False
+    assert score == 0.0
+
+
+def test_active_stream_forces_motion_detection_and_heartbeat_frames():
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    signature = video_processing._stream_change_signature(frame)
+    changed = frame.copy()
+    changed[20:35, 20:35] = 255
+
+    motion_due, _signature, score = video_processing._active_stream_change_decision(
+        changed,
+        signature,
+        last_published_at=10.0,
+        now=10.25,
+        detections=[],
+        subscriber_joined=False,
+    )
+    heartbeat_due, _signature, _score = video_processing._active_stream_change_decision(
+        frame,
+        signature,
+        last_published_at=10.0,
+        now=11.0,
+        detections=[],
+        subscriber_joined=False,
+    )
+    detection_due, _signature, _score = video_processing._active_stream_change_decision(
+        frame,
+        signature,
+        last_published_at=10.0,
+        now=10.25,
+        detections=[{"class": "person"}],
+        subscriber_joined=False,
+    )
+
+    assert motion_due is True
+    assert score > video_processing.EMPTY_SCENE_CHANGED_FRACTION
+    assert heartbeat_due is True
+    assert detection_due is True
+
+
+def test_active_stream_detection_path_skips_signature_work(monkeypatch):
+    monkeypatch.setattr(
+        video_processing,
+        "_stream_change_signature",
+        lambda _frame: (_ for _ in ()).throw(
+            AssertionError("detection-active stream must not compute a signature")
+        ),
+    )
+
+    due, signature, score = video_processing._active_stream_change_decision(
+        np.zeros((180, 320, 3), dtype=np.uint8),
+        None,
+        last_published_at=10.0,
+        now=10.25,
+        detections=[{"class": "person"}],
+        subscriber_joined=False,
+    )
+
+    assert due is True
+    assert signature is None
+    assert score == 1.0
+
+
 def test_stream_consumer_waits_for_next_published_sequence():
     async def scenario():
         hub = MjpegFanout()
