@@ -42,11 +42,17 @@ class _ImmediateExecutor:
 
 
 @pytest.mark.parametrize(
-    ("second_result", "expected_violation_checks", "expected_alert_indices"),
+    (
+        "second_result",
+        "expected_violation_checks",
+        "expected_alert_indices",
+        "expected_preserved_detections",
+        "expected_history_length",
+    ),
     [
-        ("positive", [2, 21], [21]),
-        ("empty", [2], []),
-        ("error", [2], []),
+        ("positive", [2, 21], [21], 1, 2),
+        ("empty", [2], [], 0, 2),
+        ("error", [2], [], 1, 1),
     ],
 )
 def test_cached_detection_does_not_advance_alert_window_between_inferences(
@@ -54,6 +60,8 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     second_result,
     expected_violation_checks,
     expected_alert_indices,
+    expected_preserved_detections,
+    expected_history_length,
 ):
     stop_event = threading.Event()
 
@@ -117,7 +125,9 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     inference_calls = []
     violation_checks = []
     alert_capture_indices = []
+    detections_before_clear = []
     next_slots = iter((0.0, 0.0, 1.0, float("inf")))
+    original_clear_observation = video_processing._clear_camera_observation
 
     def run_inference(_camera_id, frame, *_args, **_kwargs):
         inference_calls.append(capture.read_count)
@@ -135,6 +145,10 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     def create_alert(**_kwargs):
         alert_capture_indices.append(capture.read_count)
         return {"id": "alert-1"}
+
+    def record_then_clear(camera_id):
+        detections_before_clear.append(list(state.camera_detections.get(camera_id, [])))
+        original_clear_observation(camera_id)
 
     monkeypatch.setattr(video_processing, "get_config", lambda: config)
     monkeypatch.setattr(video_processing, "open_video_capture", lambda *_args, **_kwargs: capture)
@@ -163,6 +177,7 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     )
     monkeypatch.setattr(video_processing, "create_alert", create_alert)
     monkeypatch.setattr(video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(video_processing, "_clear_camera_observation", record_then_clear)
     monkeypatch.setattr(video_processing, "stream_fanout", MjpegFanout())
     monkeypatch.setattr(
         video_processing.policy_engine,
@@ -183,6 +198,7 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     monkeypatch.setattr(state, "camera_frames", {})
     monkeypatch.setattr(state, "camera_clean_frames", {})
     monkeypatch.setattr(state, "camera_detections", {})
+    monkeypatch.setattr(state, "camera_detection_history", {})
     monkeypatch.setattr(state, "camera_runtime_status", {})
 
     video_processing.video_processor("cam1", stop_event)
@@ -191,6 +207,8 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     assert inference_calls == [1, 20]
     assert violation_checks == expected_violation_checks
     assert alert_capture_indices == expected_alert_indices
+    assert len(detections_before_clear[0]) == expected_preserved_detections
+    assert len(state.camera_detection_history["cam1"]) == expected_history_length
 
 
 def test_cached_pose_result_is_evaluated_once_per_inference(monkeypatch):

@@ -2347,42 +2347,33 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         result = pending_inference.result()
                     except Exception:
                         logger.exception("Detection failed", extra={"camera_id": camera_id})
-                        result = {
-                            "frame": frame,
-                            "detections": [],
-                            "fresh_pose_results": None,
-                            "model_invocations": {},
-                            "scheduled_plan": scheduled_plan,
-                            "schedule_state": schedule_state,
-                            "current_cam": current_cam,
-                            "current_cfg": current_cfg,
-                            "annotated_frame": None,
-                        }
+                        result = None
                     pending_inference = None
-                    detections = result["detections"]
-                    last_annotated = result.get("annotated_frame")
-                    state.camera_detections[camera_id] = detections
-                    _record_detection_history(
-                        camera_id,
-                        detections,
-                        schedule_state=result["schedule_state"],
-                        model_invocations=result["model_invocations"],
-                    )
-                    _process_detection_observation(
-                        camera_id,
-                        result["frame"],
-                        result.get("annotated_frame"),
-                        detections,
-                        result["fresh_pose_results"],
-                        result["scheduled_plan"],
-                        result["current_cam"],
-                        result["current_cfg"],
-                        last_alert_by_rule=last_alert_by_rule,
-                        active_violations=active_violations,
-                        violation_window=violation_window,
-                        alert_cooldown=alert_cooldown,
-                        window_size=window_size,
-                    )
+                    if result is not None:
+                        detections = result["detections"]
+                        last_annotated = result.get("annotated_frame")
+                        state.camera_detections[camera_id] = detections
+                        _record_detection_history(
+                            camera_id,
+                            detections,
+                            schedule_state=result["schedule_state"],
+                            model_invocations=result["model_invocations"],
+                        )
+                        _process_detection_observation(
+                            camera_id,
+                            result["frame"],
+                            result.get("annotated_frame"),
+                            detections,
+                            result["fresh_pose_results"],
+                            result["scheduled_plan"],
+                            result["current_cam"],
+                            result["current_cfg"],
+                            last_alert_by_rule=last_alert_by_rule,
+                            active_violations=active_violations,
+                            violation_window=violation_window,
+                            alert_cooldown=alert_cooldown,
+                            window_size=window_size,
+                        )
 
                 stream_fps = _configured_stream_fps(current_cam, current_g, target_fps)
                 stream_now = time.monotonic()
