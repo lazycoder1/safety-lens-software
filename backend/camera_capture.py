@@ -238,6 +238,7 @@ class CameraConnectionTracker:
         self.last_summary_monotonic: float | None = None
         self.last_transition = "initializing"
         self.last_transition_monotonic = started_at
+        self.capture_backend = "unknown"
         self.outage_failure_count = 0
         self.total_failure_count = 0
         self.suppressed_failure_count = 0

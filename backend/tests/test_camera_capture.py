@@ -643,6 +643,7 @@ def test_connection_health_bounds_fields_and_rejects_arbitrary_transition_text(
         "outageAgeSeconds": state.CAMERA_CONNECTION_AGE_MAX_SECONDS,
         "lastTransition": "unknown",
         "lastTransitionAgeSeconds": state.CAMERA_CONNECTION_AGE_MAX_SECONDS,
+        "captureBackend": "unknown",
     }
     serialized = json.dumps(snapshot)
     assert "password" not in serialized
@@ -681,6 +682,7 @@ def test_non_rtsp_worker_clears_stale_connection_health(monkeypatch):
         "outageAgeSeconds": None,
         "lastTransition": "unknown",
         "lastTransitionAgeSeconds": None,
+        "captureBackend": "unknown",
     }
 
 
@@ -753,6 +755,7 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
         suppressed_failure_count=6,
         last_transition="outage",
         last_transition_monotonic=now - 12,
+        capture_backend="gstreamer_nvdec",
     )
 
     snapshot = diagnostics.build_health_snapshot()
@@ -776,7 +779,9 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
         "outageAgeSeconds",
         "lastTransition",
         "lastTransitionAgeSeconds",
+        "captureBackend",
     }
+    assert connection["captureBackend"] == "gstreamer_nvdec"
 
 
 def test_clear_camera_observation_discards_stale_frame_and_detection_state(monkeypatch):

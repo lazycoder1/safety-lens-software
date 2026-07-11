@@ -43,6 +43,7 @@ _CAMERA_CONNECTION_TRANSITIONS = {
     "recovered",
     "unknown",
 }
+_CAMERA_CAPTURE_BACKENDS = {"unknown", "ffmpeg", "gstreamer_nvdec"}
 camera_connection_health: dict[str, dict[str, Any]] = {}
 camera_connection_health_lock = threading.Lock()
 
@@ -79,11 +80,15 @@ def update_camera_connection_health(
     suppressed_failure_count: int,
     last_transition: str,
     last_transition_monotonic: float | None,
+    capture_backend: str = "unknown",
 ) -> None:
     """Publish a credential-safe, bounded connection telemetry snapshot."""
     transition = str(last_transition)
     if transition not in _CAMERA_CONNECTION_TRANSITIONS:
         transition = "unknown"
+    backend = str(capture_backend)
+    if backend not in _CAMERA_CAPTURE_BACKENDS:
+        backend = "unknown"
     snapshot = {
         "outage_active": bool(outage_active),
         "outage_started_monotonic": _safe_monotonic(outage_started_monotonic),
@@ -94,6 +99,7 @@ def update_camera_connection_health(
         ),
         "last_transition": transition,
         "last_transition_monotonic": _safe_monotonic(last_transition_monotonic),
+        "capture_backend": backend,
     }
     with camera_connection_health_lock:
         camera_connection_health[camera_id] = snapshot
@@ -123,6 +129,7 @@ def get_camera_connection_health(
             "outageAgeSeconds": None,
             "lastTransition": "unknown",
             "lastTransitionAgeSeconds": None,
+            "captureBackend": "unknown",
         }
 
     now = _safe_monotonic(now_monotonic)
@@ -152,6 +159,7 @@ def get_camera_connection_health(
         "lastTransitionAgeSeconds": bounded_age(
             snapshot["last_transition_monotonic"]
         ),
+        "captureBackend": snapshot.get("capture_backend", "unknown"),
     }
 
 

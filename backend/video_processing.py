@@ -1570,7 +1570,13 @@ def _publish_camera_connection_health(
         suppressed_failure_count=tracker.suppressed_failure_count,
         last_transition=tracker.last_transition,
         last_transition_monotonic=tracker.last_transition_monotonic,
+        capture_backend=tracker.capture_backend,
     )
+
+
+def _capture_backend_name(capture) -> str:
+    backend = str(getattr(capture, "capture_backend", "ffmpeg"))
+    return backend if backend in {"ffmpeg", "gstreamer_nvdec"} else "unknown"
 
 
 def _connection_event_fields(event: CameraConnectionEvent) -> dict:
@@ -2178,6 +2184,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
             "starting" if frame_counter == 0 and reconnect_failures == 0 else "reconnecting"
         )
         cap = _open_video_capture(video_source, stream_type)
+        if connection_tracker is not None:
+            connection_tracker.capture_backend = _capture_backend_name(cap)
+            _publish_camera_connection_health(camera_id, connection_tracker)
         if not cap.isOpened():
             cap.release()
             if stop_event.is_set():
