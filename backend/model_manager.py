@@ -176,6 +176,7 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
 
 _DEFAULT_LONG_TAIL_PROMPTS = ["fire", "smoke", "flames"]
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
+_LAZY_START_MODEL_KEYS = {"yoloe_long_tail"}
 _MAX_CLASS_EMBEDDING_CACHE_ENTRIES = 16
 _MODEL_LOCK = threading.RLock()
 
@@ -1456,6 +1457,25 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     _apply_open_vocab_classes(runtime, handle, initial_classes, device=device)
 
 
+def _mark_runtime_lazy(model_key: ModelKey, source_path: Path) -> None:
+    runtime = _MODEL_RUNTIMES[model_key]
+    if runtime["handle"] is not None:
+        return
+    _set_runtime_metadata(
+        runtime,
+        source_path=source_path,
+        runtime_path=source_path,
+        backend="lazy",
+        fixed_imgsz=None,
+        fixed_classes=[],
+        fixed_class_groups=[],
+        fallback_error=None,
+    )
+    runtime["current_classes"] = []
+    runtime["class_embeddings"] = {}
+    runtime["warmed"] = False
+
+
 def initialize() -> None:
     MODELS_ROOT.mkdir(parents=True, exist_ok=True)
     with _MODEL_LOCK:
@@ -1469,7 +1489,10 @@ def initialize() -> None:
         with _MODEL_LOCK:
             _set_model_state(model_key, status="loading", error=None, active_path=existing_path, job_id=None)
         try:
-            _load_runtime(model_key, existing_path)
+            if model_key in _LAZY_START_MODEL_KEYS:
+                _mark_runtime_lazy(model_key, existing_path)
+            else:
+                _load_runtime(model_key, existing_path)
             with _MODEL_LOCK:
                 _set_model_state(model_key, status="ready", error=None, active_path=existing_path, job_id=None)
         except Exception as exc:
@@ -1735,6 +1758,13 @@ def predict(
     runtime = _MODEL_RUNTIMES[model_key]
 
     with runtime["lock"]:
+        if runtime["handle"] is None and runtime.get("runtime_backend") == "lazy":
+            with _MODEL_LOCK:
+                active_path = _MODEL_STATES[model_key].get("active_path")
+            if not active_path:
+                raise RuntimeError(f"Model {model_key} has no active lazy-load path")
+            _load_runtime(model_key, Path(active_path))
+            _sync_state_compat()
         try:
             return _predict_with_runtime(
                 model_key,

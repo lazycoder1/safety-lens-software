@@ -206,6 +206,55 @@ def test_edge_rejects_stale_pair_before_model_request_queue(monkeypatch):
         )
 
 
+def test_long_tail_runtime_loads_on_first_prediction(monkeypatch, tmp_path):
+    runtime = model_manager._MODEL_RUNTIMES["yoloe_long_tail"]
+    source = tmp_path / "long-tail.pt"
+    source.write_bytes(b"model")
+    handle = object()
+    load_calls = []
+
+    monkeypatch.setitem(runtime, "handle", None)
+    monkeypatch.setitem(runtime, "runtime_backend", "lazy")
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES,
+        "yoloe_long_tail",
+        {
+            **model_manager._MODEL_STATES["yoloe_long_tail"],
+            "status": "ready",
+            "active_path": source,
+        },
+    )
+
+    def load_runtime(model_key, path):
+        load_calls.append((model_key, path))
+        runtime["handle"] = handle
+        runtime["runtime_backend"] = "pytorch"
+
+    monkeypatch.setattr(model_manager, "_load_runtime", load_runtime)
+    monkeypatch.setattr(model_manager, "_sync_state_compat", lambda: None)
+    monkeypatch.setattr(model_manager, "_runtime_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        model_manager,
+        "_predict_with_runtime",
+        lambda model_key, loaded_runtime, *_args, **_kwargs: (
+            model_key,
+            loaded_runtime["handle"],
+        ),
+    )
+
+    result = model_manager.predict(
+        "yoloe_long_tail",
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        conf=0.3,
+        device="cuda",
+        imgsz=960,
+        classes=["fire"],
+    )
+
+    assert load_calls == [("yoloe_long_tail", source)]
+    assert result == ("yoloe_long_tail", handle)
+
+
 def test_edge_bounds_grouped_transport_and_restores_source_coordinates(monkeypatch):
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
     decoded_shapes = []
