@@ -226,13 +226,8 @@ def _signature_changed_fraction(
 
 
 def _stream_change_signature(frame: np.ndarray) -> np.ndarray:
-    """Build a stream-only luma signature after reducing color pixels."""
-    reduced = cv2.resize(
-        frame,
-        EMPTY_SCENE_SIGNATURE_SIZE,
-        interpolation=cv2.INTER_AREA,
-    )
-    return cv2.cvtColor(reduced, cv2.COLOR_BGR2GRAY)
+    """Reuse the cheaper grayscale-first inference signature for streams."""
+    return _frame_change_signature(frame)
 
 
 def _active_stream_change_decision(

@@ -246,6 +246,21 @@ def test_active_stream_skips_unchanged_empty_frame_before_heartbeat():
     assert score == 0.0
 
 
+def test_stream_and_inference_motion_signatures_share_one_implementation(monkeypatch):
+    expected = np.full(video_processing.EMPTY_SCENE_SIGNATURE_SIZE[::-1], 7, dtype=np.uint8)
+    calls = []
+
+    def inference_signature(frame):
+        calls.append(frame.shape)
+        return expected
+
+    monkeypatch.setattr(video_processing, "_frame_change_signature", inference_signature)
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+
+    assert video_processing._stream_change_signature(frame) is expected
+    assert calls == [frame.shape]
+
+
 def test_active_stream_forces_motion_detection_and_heartbeat_frames():
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
     signature = video_processing._stream_change_signature(frame)
