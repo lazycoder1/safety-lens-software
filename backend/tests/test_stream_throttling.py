@@ -1,6 +1,7 @@
 import asyncio
 
 import numpy as np
+import pytest
 
 import config_manager
 import video_processing
@@ -191,6 +192,27 @@ def test_motion_adaptive_inference_forces_refresh_and_alert_confirmation():
 
     assert refresh_due is True
     assert confirmation_due is True
+
+
+def test_alert_confirmation_skips_motion_signature_work(monkeypatch):
+    previous_signature = np.zeros((36, 64), dtype=np.uint8)
+    monkeypatch.setattr(
+        video_processing,
+        "_frame_change_signature",
+        lambda _frame: pytest.fail("forced alert inference must not compute motion"),
+    )
+
+    due, signature, score = video_processing._motion_adaptive_inference_decision(
+        np.zeros((180, 320, 3), dtype=np.uint8),
+        previous_signature,
+        last_submitted_at=10.0,
+        now=10.25,
+        alert_confirmation_required=True,
+    )
+
+    assert due is True
+    assert signature is previous_signature
+    assert score == 1.0
 
 
 def test_alert_confirmation_required_tracks_positive_and_active_windows():

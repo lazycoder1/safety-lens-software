@@ -190,13 +190,13 @@ def _motion_adaptive_inference_decision(
     last_submitted_at: float | None,
     now: float,
     alert_confirmation_required: bool,
-) -> tuple[bool, np.ndarray, float]:
+) -> tuple[bool, np.ndarray | None, float]:
     """Skip unchanged frames without slowing alert confirmation or clearing."""
+    if alert_confirmation_required:
+        return True, previous_signature, 1.0
     signature = _frame_change_signature(frame)
     changed_fraction = _signature_changed_fraction(signature, previous_signature)
     if previous_signature is None:
-        return True, signature, changed_fraction
-    if alert_confirmation_required:
         return True, signature, changed_fraction
     if (
         last_submitted_at is None
