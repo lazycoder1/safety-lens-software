@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import cv2
@@ -34,7 +33,8 @@ def _pipeline_description(tcp_timeout_us: int) -> str:
         "rtspsrc name=source protocols=tcp latency=100 drop-on-latency=true "
         f"tcp-timeout={tcp_timeout_us} "
         "! decodebin "
-        f"! nvvidconv interpolation-method={_NVVIDCONV_INTERPOLATION_METHOD} "
+        "! nvvidconv name=converter "
+        f"interpolation-method={_NVVIDCONV_INTERPOLATION_METHOD} "
         "! capsfilter name=scale_caps "
         "! videoconvert ! video/x-raw,format=BGR "
         "! appsink name=sink sync=false max-buffers=1 drop=true"
@@ -62,6 +62,17 @@ def _bounded_dimensions(width: int, height: int, max_dimension: int) -> tuple[in
     target_width -= target_width % 2
     target_height -= target_height % 2
     return target_width, target_height
+
+
+def _output_caps_description(width: int, height: int, max_dimension: int) -> str:
+    """Return caps fixed from decoded dimensions before the first frame."""
+    target_width, target_height = _bounded_dimensions(width, height, max_dimension)
+    if (target_width, target_height) == (width, height):
+        return "video/x-raw,format=BGRx"
+    return (
+        "video/x-raw,format=BGRx,"
+        f"width={target_width},height={target_height},pixel-aspect-ratio=1/1"
+    )
 
 
 class GStreamerCapture:
@@ -95,9 +106,10 @@ class GStreamerCapture:
         tcp_timeout_us = max(1_000_000, int(read_timeout_ms) * 1_000)
         pipeline = Gst.parse_launch(_pipeline_description(tcp_timeout_us))
         source_element = pipeline.get_by_name("source")
+        converter = pipeline.get_by_name("converter")
         scale_filter = pipeline.get_by_name("scale_caps")
         sink = pipeline.get_by_name("sink")
-        if source_element is None or scale_filter is None or sink is None:
+        if source_element is None or converter is None or scale_filter is None or sink is None:
             pipeline.set_state(Gst.State.NULL)
             raise RuntimeError("GStreamer RTSP pipeline is incomplete")
 
@@ -106,6 +118,13 @@ class GStreamerCapture:
         source_element.set_property("location", source)
         base_caps = Gst.Caps.from_string("video/x-raw,format=BGRx")
         scale_filter.set_property("caps", base_caps)
+        converter_sink = converter.get_static_pad("sink")
+        if converter_sink is not None and max_dimension > 0:
+            converter_sink.add_probe(
+                Gst.PadProbeType.EVENT_DOWNSTREAM,
+                self._configure_output_caps,
+                (max_dimension, base_caps),
+            )
         self._pipeline = pipeline
         self._sink = sink
         self._bus = pipeline.get_bus()
@@ -119,51 +138,34 @@ class GStreamerCapture:
         if first_frame is None:
             self.release()
             return
-        first_frame = self._renegotiate_output_size(
-            first_frame,
-            max_dimension=max_dimension,
-            open_timeout_ms=open_timeout_ms,
-            base_caps=base_caps,
-        )
         self._pending_frame = first_frame
         self._opened = True
 
-    def _renegotiate_output_size(
-        self,
-        first_frame: np.ndarray,
-        *,
-        max_dimension: int,
-        open_timeout_ms: int,
-        base_caps: Any,
-    ) -> np.ndarray:
-        source_height, source_width = first_frame.shape[:2]
-        target_width, target_height = _bounded_dimensions(
-            source_width,
-            source_height,
-            max_dimension,
-        )
-        if (target_width, target_height) == (source_width, source_height):
-            return first_frame
-
-        target_caps = Gst.Caps.from_string(
-            "video/x-raw,format=BGRx,"
-            f"width={target_width},height={target_height}"
+    def _configure_output_caps(self, _pad: Any, info: Any, settings: Any) -> Any:
+        """Fix output dimensions from the decoder CAPS event before frame flow."""
+        max_dimension, base_caps = settings
+        event = info.get_event()
+        if event is None or event.type != Gst.EventType.CAPS:
+            return Gst.PadProbeReturn.OK
+        caps = event.parse_caps()
+        if caps is None or caps.get_size() < 1:
+            return Gst.PadProbeReturn.OK
+        structure = caps.get_structure(0)
+        try:
+            width = int(structure.get_value("width") or 0)
+            height = int(structure.get_value("height") or 0)
+        except (TypeError, ValueError):
+            return Gst.PadProbeReturn.OK
+        if width <= 0 or height <= 0:
+            return Gst.PadProbeReturn.OK
+        description = _output_caps_description(width, height, max_dimension)
+        target_caps = (
+            base_caps
+            if description == "video/x-raw,format=BGRx"
+            else Gst.Caps.from_string(description)
         )
         self._scale_filter.set_property("caps", target_caps)
-        deadline = time.monotonic() + max(0.001, open_timeout_ms / 1_000.0)
-        while time.monotonic() < deadline:
-            remaining_ns = int((deadline - time.monotonic()) * Gst.SECOND)
-            candidate = self._pull_frame(max(0, remaining_ns))
-            if candidate is None:
-                break
-            if candidate.shape[:2] == (target_height, target_width):
-                return candidate
-
-        # Scaling is an optimization, not a reason to reject a healthy stream.
-        self._scale_filter.set_property("caps", base_caps)
-        self._width = source_width
-        self._height = source_height
-        return first_frame
+        return Gst.PadProbeReturn.REMOVE
 
     def isOpened(self) -> bool:
         return self._opened
