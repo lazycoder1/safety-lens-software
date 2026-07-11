@@ -1632,10 +1632,10 @@ def _run_face_recognition(
         logger.exception("Face recognition failed", extra={"camera_id": camera_id})
         return annotated, []
 
-    _, snapshot_buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    snapshot_jpeg = snapshot_buffer.tobytes()
     now = time.time()
     detections: list[dict] = []
+    snapshot_jpeg: bytes | None = None
+    snapshot_encode_attempted = False
 
     for event in events:
         bbox = event.get("bbox") or {}
@@ -1669,6 +1669,20 @@ def _run_face_recognition(
         if now - last_face_log_by_key.get(dedupe_key, 0) < FACE_LOG_COOLDOWN_SECONDS:
             continue
         last_face_log_by_key[dedupe_key] = now
+        if not snapshot_encode_attempted:
+            snapshot_encode_attempted = True
+            snapshot_ok, snapshot_buffer = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, 85],
+            )
+            if snapshot_ok:
+                snapshot_jpeg = snapshot_buffer.tobytes()
+            else:
+                logger.warning(
+                    "Face event snapshot encoding failed; persisting without snapshot",
+                    extra={"camera_id": camera_id},
+                )
         face_store.log_face_event(
             camera_id=camera_id,
             camera_name=camera.get("name", camera_id),

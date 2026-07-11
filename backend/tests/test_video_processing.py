@@ -11,6 +11,105 @@ import state
 import video_processing
 
 
+def _face_event(event_type="face_unknown", *, matched_face_id=None):
+    return {
+        "eventType": event_type,
+        "confidence": 91.0 if matched_face_id else None,
+        "matchedFaceId": matched_face_id,
+        "personName": "Worker" if matched_face_id else None,
+        "personGroup": "employees" if matched_face_id else None,
+        "bbox": {"x1": 10, "y1": 20, "x2": 70, "y2": 90},
+        "qualityReason": None,
+    }
+
+
+def test_face_recognition_skips_snapshot_encoding_without_events(monkeypatch):
+    monkeypatch.setattr(video_processing.face_analyzer, "analyze_frame", lambda _frame: [])
+    monkeypatch.setattr(
+        video_processing.cv2,
+        "imencode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty face analysis encoded a snapshot")
+        ),
+    )
+
+    annotated, detections = video_processing._run_face_recognition(
+        "cam1",
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        {"name": "Gate"},
+        {},
+    )
+
+    assert annotated.shape == (120, 200, 3)
+    assert detections == []
+
+
+def test_face_recognition_encodes_one_snapshot_for_multiple_loggable_events(monkeypatch):
+    events = [
+        _face_event("face_match", matched_face_id="face-1"),
+        _face_event("face_unknown"),
+    ]
+    encode_calls = []
+    logged = []
+    monkeypatch.setattr(video_processing.face_analyzer, "analyze_frame", lambda _frame: events)
+
+    def fake_encode(extension, frame, options):
+        encode_calls.append((extension, frame.shape, options))
+        return True, np.frombuffer(b"snapshot", dtype=np.uint8)
+
+    monkeypatch.setattr(video_processing.cv2, "imencode", fake_encode)
+    monkeypatch.setattr(
+        video_processing.face_store,
+        "log_face_event",
+        lambda **kwargs: logged.append(kwargs),
+    )
+
+    _annotated, detections = video_processing._run_face_recognition(
+        "cam1",
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        {"name": "Gate"},
+        {},
+    )
+
+    assert len(detections) == 2
+    assert len(encode_calls) == 1
+    assert len(logged) == 2
+    assert all(item["snapshot_jpeg"] == b"snapshot" for item in logged)
+
+
+def test_face_recognition_skips_snapshot_encoding_during_log_cooldown(monkeypatch):
+    now = 1000.0
+    event = _face_event("face_unknown")
+    monkeypatch.setattr(video_processing.face_analyzer, "analyze_frame", lambda _frame: [event])
+    monkeypatch.setattr(video_processing.time, "time", lambda: now)
+    monkeypatch.setattr(
+        video_processing.cv2,
+        "imencode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cooldown face event encoded a snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        video_processing.face_store,
+        "log_face_event",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cooldown face event was persisted")
+        ),
+    )
+
+    _annotated, detections = video_processing._run_face_recognition(
+        "cam1",
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        {"name": "Gate"},
+        {"cam1:face_unknown:face_unknown": now - 1},
+    )
+
+    assert len(detections) == 1
+
+
 def test_executor_shutdown_error_classifier_is_narrow():
     assert video_processing._is_executor_shutdown_error(
         RuntimeError("cannot schedule new futures after shutdown")
