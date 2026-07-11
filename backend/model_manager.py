@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
@@ -39,6 +40,10 @@ MODELS_ROOT = PROJECT_ROOT / "models"
 TMP_MODELS_ROOT = Path(tempfile.gettempdir()) / "rakshak-lens-models"
 _JOB_POLL_FINAL_STATES = {"ready", "failed"}
 _REMOTE_SESSION_LOCAL = threading.local()
+_REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="remote-model-pair",
+)
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
 _REMOTE_MODEL_CACHE_LOCK = threading.RLock()
 _REMOTE_MODEL_CACHE: dict[str, Any] = {
@@ -2003,6 +2008,23 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
     if not ok:
         raise RuntimeError("Could not encode frame for remote inference")
     frame_jpeg = buffer.tobytes()
+    if len(normalized) == 2:
+        futures = [
+            _REMOTE_PAIR_EXECUTOR.submit(
+                _remote_predict_records_jpeg,
+                item["model_key"],
+                frame_jpeg,
+                conf=item["conf"],
+                device=item["device"],
+                imgsz=item["imgsz"],
+                classes=item["classes"],
+            )
+            for item in normalized
+        ]
+        return {
+            item["request_id"]: future.result()
+            for item, future in zip(normalized, futures)
+        }
     response = _remote_post_jpeg_batch(
         "/api/infer/jpeg/batch",
         frame_jpeg,

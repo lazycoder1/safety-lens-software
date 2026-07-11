@@ -134,10 +134,11 @@ def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
     assert decoded.shape == frame.shape
 
 
-def test_edge_batches_models_with_one_jpeg_encode(monkeypatch):
+def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    captured = {}
+    jpeg_objects = []
     encode_calls = 0
+    barrier = threading.Barrier(2)
     real_imencode = cv2.imencode
 
     def counted_imencode(*args, **kwargs):
@@ -145,13 +146,14 @@ def test_edge_batches_models_with_one_jpeg_encode(monkeypatch):
         encode_calls += 1
         return real_imencode(*args, **kwargs)
 
-    def fake_remote_batch(path, frame_jpeg, *, batch):
-        captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
-        return {"results": {"coco": [{"class_id": 0}], "ppe": [{"class_id": 1}]}}
+    def fake_single(model_key, frame_jpeg, **_kwargs):
+        jpeg_objects.append(frame_jpeg)
+        barrier.wait(timeout=1.0)
+        return [{"model_key": model_key}]
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
     monkeypatch.setattr(cv2, "imencode", counted_imencode)
-    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_remote_batch)
+    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
 
     results = model_manager.predict_record_batches(frame, [
         {"request_id": "coco", "model_key": "coco_primary", "conf": 0.3, "device": "cuda", "imgsz": 960},
@@ -159,29 +161,41 @@ def test_edge_batches_models_with_one_jpeg_encode(monkeypatch):
     ])
 
     assert encode_calls == 1
-    assert captured["path"] == "/api/infer/jpeg/batch"
-    assert [item["request_id"] for item in captured["batch"]] == ["coco", "ppe"]
-    assert results["ppe"] == [{"class_id": 1}]
+    assert jpeg_objects[0] is jpeg_objects[1]
+    assert results == {
+        "coco": [{"model_key": "coco_primary"}],
+        "ppe": [{"model_key": "ppe_specialist"}],
+    }
 
 
-def test_edge_reuses_encoded_jpeg_when_batch_route_is_unavailable(monkeypatch):
+def test_edge_uses_batch_route_for_more_than_two_models(monkeypatch):
     frame = np.zeros((90, 160, 3), dtype=np.uint8)
-    jpeg_objects = []
+    captured = {}
 
-    def fake_single(model_key, frame_jpeg, **_kwargs):
-        jpeg_objects.append(frame_jpeg)
-        return [{"model_key": model_key}]
+    def fake_remote_batch(path, frame_jpeg, *, batch):
+        captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
+        return {
+            "results": {
+                item["request_id"]: [{"model_key": item["model_key"]}]
+                for item in batch
+            }
+        }
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_remote_batch)
 
     results = model_manager.predict_record_batches(frame, [
         {"request_id": "coco", "model_key": "coco_primary"},
         {"request_id": "ppe", "model_key": "ppe_specialist"},
+        {"request_id": "fire", "model_key": "fire_smoke_specialist"},
     ])
 
-    assert jpeg_objects[0] is jpeg_objects[1]
+    assert captured["path"] == "/api/infer/jpeg/batch"
+    assert [item["request_id"] for item in captured["batch"]] == [
+        "coco",
+        "ppe",
+        "fire",
+    ]
     assert results["coco"] == [{"model_key": "coco_primary"}]
 
 
