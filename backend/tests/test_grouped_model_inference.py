@@ -55,13 +55,38 @@ def test_rider_gate_ignores_vehicle_label_from_non_coco_model():
     assert gated["run_ppe_specialist"] is False
 
 
-def test_rider_gate_does_not_suppress_other_ppe_capabilities():
+def test_other_ppe_capabilities_wait_for_coco_person_context():
     plan = _rider_plan()
     plan["capabilities"].append("helmet_required")
 
-    result = video_processing._context_gated_execution_plan(plan, [])
+    gated = video_processing._context_gated_execution_plan(plan, [])
+
+    assert gated["run_ppe_specialist"] is False
+    assert gated["runtime_suppression_reason"] == "awaiting_person_context"
+
+
+def test_other_ppe_capabilities_run_after_coco_person_detection():
+    plan = _rider_plan()
+    plan["capabilities"].append("helmet_required")
+
+    result = video_processing._context_gated_execution_plan(
+        plan,
+        [{"class": "person", "model_family": "coco_primary"}],
+    )
 
     assert result is plan
+
+
+def test_other_ppe_gate_ignores_person_from_non_coco_model():
+    plan = _rider_plan()
+    plan["capabilities"].append("helmet_required")
+
+    gated = video_processing._context_gated_execution_plan(
+        plan,
+        [{"class": "person", "model_family": "ppe_specialist"}],
+    )
+
+    assert gated["run_ppe_specialist"] is False
 
 
 def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch):

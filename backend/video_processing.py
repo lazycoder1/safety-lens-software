@@ -1141,18 +1141,20 @@ def _context_gated_execution_plan(
     ppe_capabilities = set(
         _capabilities_for_model_key(execution_plan, "ppe_specialist")
     )
-    if ppe_capabilities != {"rider_helmet_required"}:
+    if not ppe_capabilities:
         return execution_plan
-    has_rider_vehicle = any(
+    required_context_classes = (
+        {"motorcycle", "motorbike", "scooter"}
+        if ppe_capabilities == {"rider_helmet_required"}
+        else {"person"}
+    )
+    has_required_context = any(
         detection.get("model_family") == "coco_primary"
-        and str(detection.get("class") or "").lower() in {
-            "motorcycle",
-            "motorbike",
-            "scooter",
-        }
+        and str(detection.get("class") or "").lower()
+        in required_context_classes
         for detection in previous_detections
     )
-    if has_rider_vehicle:
+    if has_required_context:
         return execution_plan
 
     gated = deepcopy(execution_plan)
@@ -1164,7 +1166,11 @@ def _context_gated_execution_plan(
         if model_key != "ppe_specialist"
     ]
     gated["runtime_suppressed_model_keys"] = ["ppe_specialist"]
-    gated["runtime_suppression_reason"] = "awaiting_rider_vehicle_context"
+    gated["runtime_suppression_reason"] = (
+        "awaiting_rider_vehicle_context"
+        if ppe_capabilities == {"rider_helmet_required"}
+        else "awaiting_person_context"
+    )
     return gated
 
 
