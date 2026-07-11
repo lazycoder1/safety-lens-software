@@ -137,6 +137,7 @@ def build_health_snapshot() -> dict:
                     "lastFrameAgeSeconds": None if last_frame_age is None else round(last_frame_age, 1),
                     "runtimeStatus": runtime_status,
                     "connection": connection_health,
+                    "inference": state.get_camera_inference_health(cam_id),
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
                     "stream": {
                         "sequence": stream_stats["sequence"],

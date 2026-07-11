@@ -2212,6 +2212,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     reconnect_failures = 0
     safe_video_source = redact_video_source(video_source)
     state.clear_camera_connection_health(camera_id)
+    state.clear_camera_inference_health(camera_id)
     connection_tracker = (
         CameraConnectionTracker(now=time.monotonic())
         if stream_type == "rtsp"
@@ -2350,14 +2351,17 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     try:
                         result = pending_inference.result()
                     except model_manager.RemoteInferenceOverloadedError:
+                        state.record_camera_inference_outcome(camera_id, "overloaded")
                         result = None
                     except Exception:
+                        state.record_camera_inference_outcome(camera_id, "failed")
                         logger.exception("Detection failed", extra={"camera_id": camera_id})
                         result = None
                     pending_inference = None
                     pending_inference_signature = None
                     pending_inference_submitted_at = None
                     if result is not None:
+                        state.record_camera_inference_outcome(camera_id, "success")
                         last_inference_signature = completed_signature
                         last_inference_submitted_at = completed_submitted_at
                         detections = result["detections"]
@@ -2566,6 +2570,7 @@ def _finalize_camera_worker_exit(cam_id: str, stop_event: threading.Event) -> No
             del state.camera_threads[cam_id]
         _clear_camera_observation(cam_id)
         state.clear_camera_connection_health(cam_id)
+        state.clear_camera_inference_health(cam_id)
         state.camera_runtime_status[cam_id] = "offline" if stop_event.is_set() else "error"
 
 
@@ -2780,6 +2785,7 @@ def stop_camera(cam_id: str) -> bool:
         state.camera_schedule_telemetry.pop(cam_id, None)
         _last_pose_results.pop(cam_id, None)
         state.clear_camera_connection_health(cam_id)
+        state.clear_camera_inference_health(cam_id)
         state.camera_runtime_status[cam_id] = "offline"
         return True
 

@@ -63,6 +63,8 @@ _CAMERA_CONNECTION_TRANSITIONS = {
 _CAMERA_CAPTURE_BACKENDS = {"unknown", "ffmpeg", "gstreamer_nvdec"}
 camera_connection_health: dict[str, dict[str, Any]] = {}
 camera_connection_health_lock = threading.Lock()
+camera_inference_health: dict[str, dict[str, Any]] = {}
+camera_inference_health_lock = threading.Lock()
 
 # Thread management: cam_id -> (Thread, Event)
 camera_threads: dict[str, tuple[threading.Thread, threading.Event]] = {}
@@ -126,6 +128,68 @@ def clear_camera_connection_health(camera_id: str) -> None:
     """Forget telemetry when a camera stops or changes away from RTSP."""
     with camera_connection_health_lock:
         camera_connection_health.pop(camera_id, None)
+
+
+def record_camera_inference_outcome(
+    camera_id: str,
+    outcome: str,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Record bounded, credential-free inference capacity telemetry."""
+    if outcome not in {"success", "overloaded", "failed"}:
+        raise ValueError(f"Unknown inference outcome: {outcome}")
+    now = _safe_monotonic(now_monotonic)
+    if now is None:
+        now = time.monotonic()
+    counter_key = f"{outcome}_count"
+    with camera_inference_health_lock:
+        current = camera_inference_health.get(camera_id, {})
+        snapshot = dict(current)
+        snapshot[counter_key] = _bounded_connection_counter(
+            snapshot.get(counter_key, 0)
+        )
+        snapshot[counter_key] = _bounded_connection_counter(
+            snapshot[counter_key] + 1
+        )
+        snapshot[f"last_{outcome}_monotonic"] = now
+        camera_inference_health[camera_id] = snapshot
+
+
+def clear_camera_inference_health(camera_id: str) -> None:
+    with camera_inference_health_lock:
+        camera_inference_health.pop(camera_id, None)
+
+
+def get_camera_inference_health(
+    camera_id: str,
+    *,
+    now_monotonic: float | None = None,
+) -> dict[str, Any]:
+    with camera_inference_health_lock:
+        stored = camera_inference_health.get(camera_id)
+        snapshot = stored.copy() if stored is not None else {}
+    now = _safe_monotonic(now_monotonic)
+    if now is None:
+        now = time.monotonic()
+
+    def age(outcome: str) -> float | None:
+        anchor = _safe_monotonic(snapshot.get(f"last_{outcome}_monotonic"))
+        if anchor is None:
+            return None
+        return round(
+            min(CAMERA_CONNECTION_AGE_MAX_SECONDS, max(0.0, now - anchor)),
+            3,
+        )
+
+    return {
+        "successCount": _bounded_connection_counter(snapshot.get("success_count", 0)),
+        "overloadDropCount": _bounded_connection_counter(snapshot.get("overloaded_count", 0)),
+        "failureCount": _bounded_connection_counter(snapshot.get("failed_count", 0)),
+        "lastSuccessAgeSeconds": age("success"),
+        "lastOverloadDropAgeSeconds": age("overloaded"),
+        "lastFailureAgeSeconds": age("failed"),
+    }
 
 
 def get_camera_connection_health(

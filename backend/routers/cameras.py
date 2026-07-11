@@ -150,6 +150,7 @@ def _camera_public_payload(
         "recentDetectionHistory": recent_detection_history,
         "recentDetectionClassCountsMax": _recent_detection_class_counts_max(recent_detection_history),
         "scheduleTelemetry": state.camera_schedule_telemetry.get(cam_id, {}),
+        "inferenceHealth": state.get_camera_inference_health(cam_id),
     }
     payload.update(public_camera_connection_fields(cam))
     return payload

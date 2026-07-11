@@ -307,6 +307,34 @@ def test_reconnect_backoff_grows_and_caps():
     assert delays[-1] == delays[-2]
 
 
+def test_inference_health_tracks_bounded_outcomes_and_ages():
+    state.clear_camera_inference_health("cam1")
+
+    state.record_camera_inference_outcome("cam1", "success", now_monotonic=10.0)
+    state.record_camera_inference_outcome("cam1", "success", now_monotonic=11.0)
+    state.record_camera_inference_outcome("cam1", "overloaded", now_monotonic=12.0)
+    state.record_camera_inference_outcome("cam1", "failed", now_monotonic=13.0)
+
+    assert state.get_camera_inference_health("cam1", now_monotonic=15.0) == {
+        "successCount": 2,
+        "overloadDropCount": 1,
+        "failureCount": 1,
+        "lastSuccessAgeSeconds": 4.0,
+        "lastOverloadDropAgeSeconds": 3.0,
+        "lastFailureAgeSeconds": 2.0,
+    }
+
+    state.clear_camera_inference_health("cam1")
+    assert state.get_camera_inference_health("cam1", now_monotonic=15.0) == {
+        "successCount": 0,
+        "overloadDropCount": 0,
+        "failureCount": 0,
+        "lastSuccessAgeSeconds": None,
+        "lastOverloadDropAgeSeconds": None,
+        "lastFailureAgeSeconds": None,
+    }
+
+
 def test_saturated_reconnect_backoff_keeps_stable_bounded_camera_jitter():
     cam1 = camera_capture.reconnect_delay_seconds(100, "cam1")
     cam2 = camera_capture.reconnect_delay_seconds(100, "cam2")
