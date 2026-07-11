@@ -1869,8 +1869,17 @@ def _coerce_fps(value, default: float) -> float:
     return max(0.1, fps)
 
 
-def _open_video_capture(video_source: str, stream_type: str) -> cv2.VideoCapture:
-    return open_video_capture(video_source, stream_type=stream_type)
+def _open_video_capture(
+    video_source: str,
+    stream_type: str,
+    *,
+    max_fps: float | None = None,
+) -> cv2.VideoCapture:
+    return open_video_capture(
+        video_source,
+        stream_type=stream_type,
+        max_fps=max_fps,
+    )
 
 
 def _read_live_frame(cap: cv2.VideoCapture, stream_type: str) -> tuple[bool, np.ndarray | None]:
@@ -2236,7 +2245,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         state.camera_runtime_status[camera_id] = (
             "starting" if frame_counter == 0 and reconnect_failures == 0 else "reconnecting"
         )
-        cap = _open_video_capture(video_source, stream_type)
+        cap = _open_video_capture(video_source, stream_type, max_fps=target_fps)
         if connection_tracker is not None:
             connection_tracker.capture_backend = _capture_backend_name(cap)
             _publish_camera_connection_health(camera_id, connection_tracker)
@@ -2325,6 +2334,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                 scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
                 target_fps = _coerce_fps(current_cam.get("fps", current_g.get("target_fps", target_fps)), target_fps)
                 frame_interval = 1.0 / target_fps
+                update_capture_fps = getattr(cap, "set_max_fps", None)
+                if callable(update_capture_fps):
+                    update_capture_fps(target_fps)
                 current_inference_fps = _coerce_fps(
                     current_cam.get("inference_fps", current_g.get("inference_fps", max(1.0, target_fps / 3))),
                     max(1.0, target_fps / 3),

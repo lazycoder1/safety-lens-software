@@ -120,11 +120,14 @@ def test_open_rtsp_capture_forces_ffmpeg_and_bounded_timeouts(monkeypatch):
 
 def test_open_rtsp_capture_uses_nvdec_when_requested(monkeypatch):
     capture = object()
+    opened = {}
     monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
     monkeypatch.setattr(
         camera_capture,
         "_open_gstreamer_capture",
-        lambda source: capture if source == "rtsp://camera/live" else None,
+        lambda source, **kwargs: (
+            opened.update(source=source, **kwargs) or capture
+        ),
     )
     monkeypatch.setattr(
         camera_capture.cv2,
@@ -136,9 +139,11 @@ def test_open_rtsp_capture_uses_nvdec_when_requested(monkeypatch):
         camera_capture.open_video_capture(
             "rtsp://camera/live",
             stream_type="rtsp",
+            max_fps=6.5,
         )
         is capture
     )
+    assert opened == {"source": "rtsp://camera/live", "max_fps": 6.5}
 
 
 def test_open_rtsp_capture_supports_short_software_probe_timeouts(monkeypatch):

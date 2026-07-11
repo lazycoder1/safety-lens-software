@@ -104,7 +104,7 @@ def _rtsp_max_dimension() -> int:
     return min(4_096, max(320, value))
 
 
-def _open_gstreamer_capture(source: str):
+def _open_gstreamer_capture(source: str, *, max_fps: float | None = None):
     """Return a Jetson NVDEC capture, or None when the runtime is unavailable."""
     try:
         from gstreamer_capture import GStreamerCapture, nvdec_runtime_available
@@ -119,6 +119,7 @@ def _open_gstreamer_capture(source: str):
             open_timeout_ms=RTSP_OPEN_TIMEOUT_MS,
             read_timeout_ms=RTSP_READ_TIMEOUT_MS,
             max_dimension=_rtsp_max_dimension(),
+            max_fps=max_fps,
         )
         if capture.isOpened():
             return capture
@@ -168,13 +169,18 @@ def open_video_capture(
     prefer_hardware: bool = True,
     open_timeout_ms: int | None = None,
     read_timeout_ms: int | None = None,
+    max_fps: float | None = None,
 ):
     """Open RTSP through FFmpeg with bounded blocking; preserve file behavior."""
     if stream_type != "rtsp":
         return cv2.VideoCapture(source)
 
     if prefer_hardware and _rtsp_capture_backend() in {"nvdec", "auto"}:
-        capture = _open_gstreamer_capture(source)
+        capture = (
+            _open_gstreamer_capture(source)
+            if max_fps is None
+            else _open_gstreamer_capture(source, max_fps=max_fps)
+        )
         if capture is not None:
             return capture
 

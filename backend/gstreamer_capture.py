@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import cv2
@@ -21,6 +22,7 @@ _REQUIRED_ELEMENTS = (
     "decodebin",
     "nvv4l2decoder",
     "nvvidconv",
+    "videorate",
     "videoconvert",
     "appsink",
 )
@@ -36,6 +38,11 @@ def _pipeline_description(tcp_timeout_us: int) -> str:
         "! nvvidconv name=converter "
         f"interpolation-method={_NVVIDCONV_INTERPOLATION_METHOD} "
         "! capsfilter name=scale_caps "
+        # Allow negotiation for RTSP decoders that expose framerate=0/1.
+        # Normal high-rate sources are still dropped to max-rate; a genuinely
+        # slower source may duplicate frames so the pipeline remains usable.
+        "! videorate name=rate_limiter drop-only=false "
+        "! capsfilter name=rate_caps "
         "! videoconvert ! video/x-raw,format=BGR "
         "! appsink name=sink sync=false max-buffers=1 drop=true"
     )
@@ -47,6 +54,23 @@ def nvdec_runtime_available() -> bool:
         return False
     Gst.init(None)
     return all(Gst.ElementFactory.find(name) is not None for name in _REQUIRED_ELEMENTS)
+
+
+def _bounded_max_rate(value: float | None) -> int:
+    """Return a safe integer GstVideoRate limit or its unlimited sentinel."""
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError):
+        return 2_147_483_647
+    if not math.isfinite(parsed) or parsed <= 0:
+        return 2_147_483_647
+    return min(240, max(1, math.ceil(parsed)))
+
+
+def _rate_caps_description(maximum: int) -> str:
+    if maximum >= 2_147_483_647:
+        return "video/x-raw"
+    return f"video/x-raw,framerate={maximum}/1"
 
 
 def _bounded_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
@@ -88,6 +112,7 @@ class GStreamerCapture:
         open_timeout_ms: int,
         read_timeout_ms: int,
         max_dimension: int = 0,
+        max_fps: float | None = None,
     ) -> None:
         if not nvdec_runtime_available():
             raise RuntimeError("Jetson NVDEC GStreamer runtime is unavailable")
@@ -102,20 +127,37 @@ class GStreamerCapture:
         self._sink: Any = None
         self._bus: Any = None
         self._scale_filter: Any = None
+        self._rate_limiter: Any = None
+        self._rate_filter: Any = None
+        self._max_rate = _bounded_max_rate(max_fps)
 
         tcp_timeout_us = max(1_000_000, int(read_timeout_ms) * 1_000)
         pipeline = Gst.parse_launch(_pipeline_description(tcp_timeout_us))
         source_element = pipeline.get_by_name("source")
         converter = pipeline.get_by_name("converter")
         scale_filter = pipeline.get_by_name("scale_caps")
+        rate_limiter = pipeline.get_by_name("rate_limiter")
+        rate_filter = pipeline.get_by_name("rate_caps")
         sink = pipeline.get_by_name("sink")
-        if source_element is None or converter is None or scale_filter is None or sink is None:
+        if (
+            source_element is None
+            or converter is None
+            or scale_filter is None
+            or rate_limiter is None
+            or rate_filter is None
+            or sink is None
+        ):
             pipeline.set_state(Gst.State.NULL)
             raise RuntimeError("GStreamer RTSP pipeline is incomplete")
 
         # Set the URL as a property, not in the parse string, so parse errors
         # can never echo credentials embedded in the source.
         source_element.set_property("location", source)
+        rate_limiter.set_property("max-rate", self._max_rate)
+        rate_filter.set_property(
+            "caps",
+            Gst.Caps.from_string(_rate_caps_description(self._max_rate)),
+        )
         base_caps = Gst.Caps.from_string("video/x-raw,format=BGRx")
         scale_filter.set_property("caps", base_caps)
         converter_sink = converter.get_static_pad("sink")
@@ -129,6 +171,8 @@ class GStreamerCapture:
         self._sink = sink
         self._bus = pipeline.get_bus()
         self._scale_filter = scale_filter
+        self._rate_limiter = rate_limiter
+        self._rate_filter = rate_filter
         transition = pipeline.set_state(Gst.State.PLAYING)
         if transition == Gst.StateChangeReturn.FAILURE:
             self.release()
@@ -251,6 +295,20 @@ class GStreamerCapture:
     def set(self, _property_id: int, _value: float) -> bool:
         return False
 
+    def set_max_fps(self, value: float) -> None:
+        """Update the pre-conversion drop rate after a live config change."""
+        maximum = _bounded_max_rate(value)
+        if maximum == self._max_rate:
+            return
+        if self._rate_limiter is not None:
+            self._rate_limiter.set_property("max-rate", maximum)
+        if self._rate_filter is not None:
+            self._rate_filter.set_property(
+                "caps",
+                Gst.Caps.from_string(_rate_caps_description(maximum)),
+            )
+        self._max_rate = maximum
+
     def release(self) -> None:
         self._opened = False
         self._pending_frame = None
@@ -259,5 +317,7 @@ class GStreamerCapture:
         self._sink = None
         self._bus = None
         self._scale_filter = None
+        self._rate_limiter = None
+        self._rate_filter = None
         if pipeline is not None and Gst is not None:
             pipeline.set_state(Gst.State.NULL)
