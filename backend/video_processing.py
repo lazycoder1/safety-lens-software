@@ -2262,7 +2262,11 @@ def _process_detection_observation(
                 if alert:
                     submitted_alert = True
                     if decision.rule_id:
-                        policy_engine.mark_rule_triggered(decision.rule_id, cfg=current_cfg)
+                        policy_engine.mark_rule_triggered(
+                            decision.rule_id,
+                            camera_id=camera_id,
+                            cfg=current_cfg,
+                        )
                     logger.debug(
                         "Detection alert queued",
                         extra={"camera_id": camera_id, "rule": candidate["rule"]},

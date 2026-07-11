@@ -79,7 +79,12 @@ def evaluate_candidate(
         matched_policy = True
         if not _schedule_matches(rule.get("schedule") or camera.get("active_windows"), event["now"], cfg):
             continue
-        cooldown = int(rule.get("cooldownSeconds") or rule.get("cooldown_seconds") or 60)
+        cooldown_value = rule.get("cooldownSeconds")
+        if cooldown_value is None:
+            cooldown_value = rule.get("cooldown_seconds")
+        if cooldown_value is None:
+            cooldown_value = 60
+        cooldown = max(0, int(cooldown_value))
         cooldown_key = f"{camera_id}:{rule.get('id')}"
         monotonic_now = time.monotonic()
         if monotonic_now - _last_triggered_by_key.get(cooldown_key, 0) < cooldown:
@@ -98,16 +103,22 @@ def evaluate_candidate(
                 cooldown_seconds=cooldown,
             )
         )
-        _last_triggered_by_key[cooldown_key] = monotonic_now
     if decisions or matched_policy:
         return decisions
     return [_fallback_decision(candidate)]
 
 
-def mark_rule_triggered(rule_id: str, *, cfg: dict[str, Any] | None = None) -> None:
-    """Persist lastTriggered for UI visibility. Best-effort and non-fatal."""
+def mark_rule_triggered(
+    rule_id: str,
+    *,
+    camera_id: str | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """Start cooldown after queue admission and persist UI visibility."""
     if not rule_id:
         return
+    if camera_id:
+        _last_triggered_by_key[f"{camera_id}:{rule_id}"] = time.monotonic()
     cfg = cfg or get_config()
     changed = False
     timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"

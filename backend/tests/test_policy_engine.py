@@ -207,3 +207,101 @@ def test_count_threshold_rule_uses_candidate_count():
     assert decisions[0].rule_id == "crowd_watch"
     assert decisions[0].severity == "P3"
     assert decisions[0].output_ids == ["in_app"]
+
+
+def _cooldown_fixture(seconds):
+    cfg = {
+        "site": {"timezone": "Asia/Kolkata"},
+        "automation_rules": [
+            {
+                "id": "fire_watch",
+                "name": "Fire watch",
+                "enabled": True,
+                "trigger": "detection",
+                "cameras": ["boiler"],
+                "conditions": [
+                    {"type": "class_is", "params": {"classes": "fire"}}
+                ],
+                "cooldownSeconds": seconds,
+            }
+        ],
+    }
+    candidate = {
+        "camera_id": "boiler",
+        "rule": "Fire",
+        "severity": "P1",
+        "confidence": 0.95,
+        "description": "Fire detected",
+        "source": "Fire / Smoke Specialist",
+    }
+    camera = {"name": "Boiler", "zone": "Utility"}
+    return cfg, candidate, camera
+
+
+def test_failed_submission_does_not_start_policy_cooldown():
+    cfg, candidate, camera = _cooldown_fixture(60)
+
+    first = policy_engine.evaluate_candidate(
+        candidate,
+        camera,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+    retry = policy_engine.evaluate_candidate(
+        candidate,
+        camera,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+
+    assert len(first) == 1
+    assert len(retry) == 1
+
+
+def test_successful_submission_starts_policy_cooldown(monkeypatch):
+    cfg, candidate, camera = _cooldown_fixture(60)
+    monkeypatch.setattr(policy_engine, "save_config", lambda _cfg: None)
+    first = policy_engine.evaluate_candidate(
+        candidate,
+        camera,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+
+    policy_engine.mark_rule_triggered(
+        first[0].rule_id,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+
+    assert policy_engine.evaluate_candidate(
+        candidate,
+        camera,
+        camera_id="boiler",
+        cfg=cfg,
+    ) == []
+
+
+def test_zero_cooldown_remains_unthrottled_after_success(monkeypatch):
+    cfg, candidate, camera = _cooldown_fixture(0)
+    monkeypatch.setattr(policy_engine, "save_config", lambda _cfg: None)
+    first = policy_engine.evaluate_candidate(
+        candidate,
+        camera,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+
+    policy_engine.mark_rule_triggered(
+        first[0].rule_id,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+
+    retry = policy_engine.evaluate_candidate(
+        candidate,
+        camera,
+        camera_id="boiler",
+        cfg=cfg,
+    )
+    assert len(retry) == 1
