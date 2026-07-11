@@ -1901,14 +1901,6 @@ def _status_frame(camera_id: str, status: str, *, jpeg_quality: int = 70) -> byt
     return encoded
 
 
-def _resize_for_stream(frame: np.ndarray, max_width: int = 854) -> np.ndarray:
-    height, width = frame.shape[:2]
-    if width <= max_width:
-        return frame
-    scale = max_width / width
-    return cv2.resize(frame, (max_width, int(height * scale)))
-
-
 def _publish_live_frame(camera_id: str, frame: np.ndarray, *, jpeg_quality: int) -> None:
     """Publish the newest camera frame without waiting for model inference."""
     detections = [
