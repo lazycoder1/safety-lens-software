@@ -26,6 +26,38 @@ def _request(method: str, path: str) -> Request:
     return request
 
 
+def test_duplicate_camera_search_prefers_exact_channel_on_shared_nvr():
+    cfg = {
+        "cameras": {
+            "cam1": {
+                "stream_type": "rtsp",
+                "host": "nvr.local",
+                "rtsp_port": 554,
+                "stream_path": "/channel/1",
+            },
+            "cam2": {
+                "stream_type": "rtsp",
+                "host": "nvr.local",
+                "rtsp_port": 554,
+                "stream_path": "/channel/2",
+            },
+        }
+    }
+
+    assert camera_routes._find_duplicate_camera(
+        cfg,
+        host="nvr.local",
+        rtsp_port=554,
+        stream_path="/channel/2",
+    ) == ("exact", "cam2")
+    assert camera_routes._find_duplicate_camera(
+        cfg,
+        host="nvr.local",
+        rtsp_port=554,
+        stream_path="/unknown",
+    ) == ("potential", "cam1")
+
+
 def test_async_model_routes_run_model_manager_calls_off_event_loop(monkeypatch):
     worker_threads: dict[str, int] = {}
 

@@ -108,6 +108,67 @@ def test_connection_probe_stops_starting_paths_after_budget(monkeypatch):
     assert len(result["attempted_paths"]) == 3
 
 
+def test_connection_probe_reuses_matching_cached_jpeg_without_network(monkeypatch):
+    frame = np.zeros((540, 960, 3), dtype=np.uint8)
+    ok, encoded = camera_discovery.cv2.imencode(".jpg", frame)
+    assert ok is True
+    monkeypatch.setattr(
+        camera_discovery,
+        "_rtsp_options_auth_state",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("network auth probe used")),
+    )
+    monkeypatch.setattr(
+        camera_discovery,
+        "_capture_preview",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("RTSP capture used")),
+    )
+
+    result = camera_discovery.test_camera_connection(
+        {
+            "host": "camera.local",
+            "rtsp_port": 554,
+            "stream_path": "/stream1",
+            "username": "viewer",
+            "password": "secret",
+        },
+        cached_preview_jpeg=encoded.tobytes(),
+        cached_stream_path="/stream1",
+        cached_rtsp_port=554,
+    )
+
+    assert result["ok"] is True
+    assert result["auth_state"] == "valid"
+    assert result["stream_path"] == "/stream1"
+    assert result["width"] == 320
+    assert result["height"] == 180
+
+
+def test_connection_probe_does_not_reuse_cache_for_different_path(monkeypatch):
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    ok, encoded = camera_discovery.cv2.imencode(".jpg", frame)
+    assert ok is True
+    captures = []
+    monkeypatch.setattr(
+        camera_discovery,
+        "_capture_preview",
+        lambda url: captures.append(url) or {"ok": False, "latency_ms": 1},
+    )
+
+    result = camera_discovery.test_camera_connection(
+        {
+            "host": "camera.local",
+            "rtsp_port": 554,
+            "stream_path": "/different",
+        },
+        cached_preview_jpeg=encoded.tobytes(),
+        cached_stream_path="/stream1",
+        cached_rtsp_port=554,
+    )
+
+    assert result["ok"] is False
+    assert len(captures) == 1
+
+
 def test_discovery_to_site_document_builds_valid_yaml_ready_cameras(tmp_path):
     discovery = {
         "cidrs": ["192.168.29.0/24"],

@@ -226,6 +226,7 @@ def _find_duplicate_camera(
     onvif_uuid: str = "",
 ) -> tuple[str | None, str | None]:
     normalized_path = normalize_stream_path(stream_path)
+    potential_camera_id: str | None = None
     for camera_id, camera in cfg["cameras"].items():
         public_fields = public_camera_connection_fields(camera)
         existing_host = public_fields.get("host") or ""
@@ -237,7 +238,10 @@ def _find_duplicate_camera(
         if host and existing_host and host == existing_host:
             if normalized_path and normalized_path == existing_path and int(rtsp_port or DEFAULT_RTSP_PORT) == int(existing_port):
                 return "exact", camera_id
-            return "potential", camera_id
+            if potential_camera_id is None:
+                potential_camera_id = camera_id
+    if potential_camera_id is not None:
+        return "potential", potential_camera_id
     return None, None
 
 
@@ -253,6 +257,45 @@ def _annotate_duplicate_state(device: dict[str, Any], cfg: dict) -> dict[str, An
         **device,
         "duplicate_state": duplicate_state or "none",
         "existing_camera_id": existing_camera_id,
+    }
+
+
+def _fresh_duplicate_preview_kwargs(
+    device: dict[str, Any],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Reuse an active camera frame only for the same connection and credentials."""
+    duplicate_state, camera_id = _find_duplicate_camera(
+        cfg,
+        host=device.get("host") or device.get("ip") or "",
+        rtsp_port=device.get("rtsp_port"),
+        stream_path=device.get("stream_path", ""),
+        onvif_uuid=device.get("onvif_uuid") or "",
+    )
+    if duplicate_state != "exact" or not camera_id:
+        return {}
+
+    camera = cfg.get("cameras", {}).get(camera_id, {})
+    if any(
+        str(device.get(field) or "") != str(camera.get(field) or "")
+        for field in ("username", "password")
+    ):
+        return {}
+
+    updated_at = state.camera_frame_updated_at.get(camera_id)
+    frame_jpeg = state.camera_clean_frames.get(camera_id) or state.camera_frames.get(camera_id)
+    if (
+        frame_jpeg is None
+        or updated_at is None
+        or time.time() - updated_at > state.CAMERA_FRAME_STALE_SECONDS
+    ):
+        return {}
+
+    connection = public_camera_connection_fields(camera)
+    return {
+        "cached_preview_jpeg": frame_jpeg,
+        "cached_stream_path": connection.get("stream_path") or "",
+        "cached_rtsp_port": connection.get("rtsp_port") or DEFAULT_RTSP_PORT,
     }
 
 
@@ -497,7 +540,12 @@ async def api_discover_cameras(body: DiscoveryScanRequest):
 @router.post("/cameras/discover/test", dependencies=[Depends(require_admin)])
 async def api_test_discovered_camera(body: DiscoveryTestRequest):
     cfg = get_config()
-    result = await asyncio.to_thread(test_camera_connection, body.model_dump())
+    payload = body.model_dump()
+    result = await asyncio.to_thread(
+        test_camera_connection,
+        payload,
+        **_fresh_duplicate_preview_kwargs(payload, cfg),
+    )
     return _annotate_duplicate_state(result, cfg)
 
 
@@ -524,7 +572,11 @@ async def api_import_discovered_cameras(body: DiscoveryImportRequest, request: R
             })
             continue
 
-        test_result = await asyncio.to_thread(test_camera_connection, row_payload)
+        test_result = await asyncio.to_thread(
+            test_camera_connection,
+            row_payload,
+            **_fresh_duplicate_preview_kwargs(row_payload, cfg),
+        )
         if not test_result.get("ok"):
             failed.append({
                 "fingerprint": row_payload.get("fingerprint"),

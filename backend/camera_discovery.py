@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import cv2
+import numpy as np
 import requests
 
 from capability_registry import CAPABILITY_REGISTRY
@@ -683,6 +684,12 @@ def _capture_preview(full_rtsp_url: str) -> dict[str, Any]:
     if not ok or frame is None:
         return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000)}
 
+    return _build_preview(frame, started=started)
+
+
+def _build_preview(frame: np.ndarray, *, started: float) -> dict[str, Any]:
+    """Build the small discovery preview from a decoded or cached frame."""
+
     try:
         if frame.shape[1] > 320:
             scale = 320.0 / frame.shape[1]
@@ -702,7 +709,24 @@ def _capture_preview(full_rtsp_url: str) -> dict[str, Any]:
     }
 
 
-def test_camera_connection(device: dict[str, Any]) -> dict[str, Any]:
+def _cached_jpeg_preview(frame_jpeg: bytes) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        frame = cv2.imdecode(np.frombuffer(frame_jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        frame = None
+    if frame is None:
+        return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000)}
+    return _build_preview(frame, started=started)
+
+
+def test_camera_connection(
+    device: dict[str, Any],
+    *,
+    cached_preview_jpeg: bytes | None = None,
+    cached_stream_path: str = "",
+    cached_rtsp_port: int | None = None,
+) -> dict[str, Any]:
     host = device.get("host") or device.get("ip") or ""
     rtsp_port = int(device.get("rtsp_port") or DEFAULT_RTSP_PORT)
     username = device.get("username", "") or ""
@@ -740,7 +764,11 @@ def test_camera_connection(device: dict[str, Any]) -> dict[str, Any]:
     if not stream_candidates:
         stream_candidates.extend(_ordered_curated_paths(preferred_stream))
 
-    base_auth_state = _rtsp_options_auth_state(host, rtsp_port) if host else "unknown"
+    base_auth_state = (
+        "valid"
+        if cached_preview_jpeg is not None
+        else (_rtsp_options_auth_state(host, rtsp_port) if host else "unknown")
+    )
     if auth_state == "unknown":
         auth_state = base_auth_state
 
@@ -760,7 +788,17 @@ def test_camera_connection(device: dict[str, Any]) -> dict[str, Any]:
             },
             include_credentials=True,
         )
-        preview = _capture_preview(full_rtsp_url)
+        candidate_path = normalize_stream_path(candidate.get("path", ""))
+        use_cached_preview = (
+            cached_preview_jpeg is not None
+            and candidate_path == normalize_stream_path(cached_stream_path)
+            and candidate_port == int(cached_rtsp_port or rtsp_port)
+        )
+        preview = (
+            _cached_jpeg_preview(cached_preview_jpeg)
+            if use_cached_preview
+            else _capture_preview(full_rtsp_url)
+        )
         if preview.get("ok"):
             return {
                 "ok": True,
