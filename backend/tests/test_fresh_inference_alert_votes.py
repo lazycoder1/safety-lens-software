@@ -350,6 +350,7 @@ def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inferenc
         def __init__(self):
             self.read_count = 0
             self.released = False
+            self.frames = []
 
         def isOpened(self):
             return not self.released
@@ -357,7 +358,9 @@ def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inferenc
         def read(self):
             self.read_count += 1
             if self.read_count <= 5:
-                return True, np.zeros((90, 160, 3), dtype=np.uint8)
+                frame = np.zeros((90, 160, 3), dtype=np.uint8)
+                self.frames.append(frame)
+                return True, frame
             stop_event.set()
             return False, None
 
@@ -406,6 +409,7 @@ def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inferenc
     first_persistence = Future()
     second_persistence = Future()
     persistence_submissions = []
+    snapshot_frames = []
 
     def run_inference(_camera_id, frame, *_args, **_kwargs):
         if capture.read_count == 3:
@@ -417,6 +421,10 @@ def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inferenc
     def create_alert(**_kwargs):
         persistence_submissions.append(capture.read_count)
         return first_persistence if len(persistence_submissions) == 1 else second_persistence
+
+    def encode_snapshot(_camera_id, clean_frame, *_args, **_kwargs):
+        snapshot_frames.append(clean_frame)
+        return b"annotated", b"clean"
 
     monkeypatch.setattr(video_processing, "get_config", lambda: config)
     monkeypatch.setattr(video_processing, "open_video_capture", lambda *_args, **_kwargs: capture)
@@ -438,7 +446,7 @@ def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inferenc
     monkeypatch.setattr(
         video_processing,
         "_encode_inference_snapshot_pair",
-        lambda *_args, **_kwargs: (b"annotated", b"clean"),
+        encode_snapshot,
     )
     monkeypatch.setattr(video_processing, "create_alert", create_alert)
     monkeypatch.setattr(video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None)
@@ -455,4 +463,6 @@ def test_persistence_pending_blocks_duplicates_and_failure_retries_next_inferenc
     # write fails on frame 3, the same fresh inference is immediately eligible
     # to retry. A successful second write then starts normal suppression.
     assert persistence_submissions == [1, 3]
+    assert snapshot_frames[0] is capture.frames[0]
+    assert snapshot_frames[1] is capture.frames[2]
     assert capture.released is True

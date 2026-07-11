@@ -1261,8 +1261,6 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     )
     if connection_tracker is not None:
         _publish_camera_connection_health(camera_id, connection_tracker)
-    last_detection_frame = None
-
     missing_model_keys = model_manager.missing_model_keys(execution_plan["required_model_keys"])
     if missing_model_keys:
         state.camera_runtime_status[camera_id] = "awaiting_model_install"
@@ -1407,8 +1405,6 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     annotated = frame
                     detections = []
                 last_annotated = annotated
-                if fresh_inference_result:
-                    last_detection_frame = frame.copy()
                 state.camera_detections[camera_id] = detections
                 next_inference_at = inference_scheduler.next_inference_slot(
                     camera_id,
@@ -1480,20 +1476,19 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     violation_bboxes = extract_violation_bboxes(candidate["rule"], detections, frame_w, frame_h, camera_id)
                     snapshot_jpeg = None
                     clean_snapshot_jpeg = None
-                    if last_detection_frame is not None:
-                        try:
-                            snapshot_jpeg, clean_snapshot_jpeg = _encode_inference_snapshot_pair(
-                                camera_id,
-                                last_detection_frame,
-                                detections,
-                                jpeg_quality,
-                                annotated_frame=last_annotated,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Alert snapshot encoding failed",
-                                extra={"camera_id": camera_id, "rule": candidate["rule"]},
-                            )
+                    try:
+                        snapshot_jpeg, clean_snapshot_jpeg = _encode_inference_snapshot_pair(
+                            camera_id,
+                            frame,
+                            detections,
+                            jpeg_quality,
+                            annotated_frame=last_annotated,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Alert snapshot encoding failed",
+                            extra={"camera_id": camera_id, "rule": candidate["rule"]},
+                        )
                     try:
                         submission = create_alert(
                             camera_id=candidate["camera_id"],
