@@ -382,6 +382,10 @@ def test_remote_fields_are_whitelisted_bounded_and_errors_are_generic():
         "active_path": "https://attacker.example/path",
         "runtime_path": "x" * 2_000,
         "runtime_fallback_error": "secret traceback",
+        "runtime_low_res_path": "https://attacker.example/compact.engine",
+        "runtime_low_res_fallback_error": "compact secret traceback",
+        "runtime_low_res_fixed_imgsz": 512,
+        "runtime_low_res_warmed": True,
         "unexpected": "not public",
     }
 
@@ -391,6 +395,10 @@ def test_remote_fields_are_whitelisted_bounded_and_errors_are_generic():
     assert model["active_path"] is None
     assert model["runtime_path"] is None
     assert model["runtime_fallback_error"] == "Remote model runtime fallback active"
+    assert model["runtime_low_res_path"] is None
+    assert model["runtime_low_res_fallback_error"] == "Remote low-resolution runtime fallback active"
+    assert model["runtime_low_res_fixed_imgsz"] == 512
+    assert model["runtime_low_res_warmed"] is True
     assert model["download_url"] == model_manager.MODEL_DEFINITIONS["coco_primary"]["download_url"]
     assert "unexpected" not in model
     assert "attacker" not in json.dumps(model)

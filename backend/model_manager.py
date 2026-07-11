@@ -477,6 +477,11 @@ def _remote_unavailable_model(model_key: ModelKey) -> dict[str, Any]:
         "runtime_fixed_imgsz": None,
         "runtime_fixed_classes": [],
         "runtime_fixed_class_groups": [],
+        "runtime_low_res_backend": None,
+        "runtime_low_res_path": None,
+        "runtime_low_res_fallback_error": None,
+        "runtime_low_res_fixed_imgsz": None,
+        "runtime_low_res_warmed": None,
     }
 
 
@@ -532,6 +537,19 @@ def _sanitize_remote_model(item: dict[str, Any], model_key: ModelKey) -> dict[st
     fixed_groups = _bounded_text_list(item.get("runtime_fixed_class_groups"))
     if fixed_groups is not None:
         result["runtime_fixed_class_groups"] = fixed_groups
+    low_res_backend = _bounded_text(item.get("runtime_low_res_backend"), maximum=64)
+    if low_res_backend is not None:
+        result["runtime_low_res_backend"] = low_res_backend
+    low_res_path = _bounded_text(item.get("runtime_low_res_path"), maximum=1_024)
+    if low_res_path is not None and "://" not in low_res_path:
+        result["runtime_low_res_path"] = low_res_path
+    if item.get("runtime_low_res_fallback_error") is not None:
+        result["runtime_low_res_fallback_error"] = "Remote low-resolution runtime fallback active"
+    low_res_imgsz = item.get("runtime_low_res_fixed_imgsz")
+    if type(low_res_imgsz) is int and 1 <= low_res_imgsz <= 16_384:
+        result["runtime_low_res_fixed_imgsz"] = low_res_imgsz
+    if type(item.get("runtime_low_res_warmed")) is bool:
+        result["runtime_low_res_warmed"] = item["runtime_low_res_warmed"]
     return result
 
 
@@ -919,6 +937,22 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
     state = deepcopy(_MODEL_STATES[model_key])
     active_path = state.get("active_path")
     runtime = _MODEL_RUNTIMES[model_key]
+    low_res_runtime = {
+        "runtime_low_res_backend": None,
+        "runtime_low_res_path": None,
+        "runtime_low_res_fallback_error": None,
+        "runtime_low_res_fixed_imgsz": None,
+        "runtime_low_res_warmed": None,
+    }
+    if model_key == "coco_primary":
+        with _COCO_LOW_RES_RUNTIME["lock"]:
+            low_res_runtime = {
+                "runtime_low_res_backend": _COCO_LOW_RES_RUNTIME.get("runtime_backend"),
+                "runtime_low_res_path": _COCO_LOW_RES_RUNTIME.get("runtime_path"),
+                "runtime_low_res_fallback_error": _COCO_LOW_RES_RUNTIME.get("runtime_fallback_error"),
+                "runtime_low_res_fixed_imgsz": _COCO_LOW_RES_RUNTIME.get("fixed_imgsz"),
+                "runtime_low_res_warmed": bool(_COCO_LOW_RES_RUNTIME.get("warmed")),
+            }
     return {
         "model_key": model_key,
         "display_name": definition["display_name"],
@@ -939,6 +973,7 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
         "runtime_fixed_imgsz": runtime.get("fixed_imgsz"),
         "runtime_fixed_classes": list(runtime.get("fixed_classes") or []),
         "runtime_fixed_class_groups": list(runtime.get("fixed_class_groups") or []),
+        **low_res_runtime,
     }
 
 

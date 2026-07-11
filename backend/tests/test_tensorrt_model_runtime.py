@@ -146,6 +146,26 @@ def test_low_resolution_coco_engine_is_selected_only_for_frames_that_fit(tmp_pat
     assert [call[1]["imgsz"] for call in calls] == [512, 512]
 
 
+def test_coco_model_status_exposes_low_resolution_runtime(monkeypatch):
+    runtime = model_manager._new_model_runtime()
+    runtime.update(
+        runtime_backend="tensorrt",
+        runtime_path="/models/yolo26s-512.engine",
+        runtime_fallback_error=None,
+        fixed_imgsz=512,
+        warmed=True,
+    )
+    monkeypatch.setattr(model_manager, "_COCO_LOW_RES_RUNTIME", runtime)
+
+    status = model_manager._serialize_model_state("coco_primary")
+
+    assert status["runtime_low_res_backend"] == "tensorrt"
+    assert status["runtime_low_res_path"] == "/models/yolo26s-512.engine"
+    assert status["runtime_low_res_fallback_error"] is None
+    assert status["runtime_low_res_fixed_imgsz"] == 512
+    assert status["runtime_low_res_warmed"] is True
+
+
 def test_low_resolution_coco_failure_falls_through_to_primary_runtime(tmp_path, monkeypatch):
     source, engine = _write_valid_artifacts(tmp_path, imgsz=512)
 
