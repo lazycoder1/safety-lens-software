@@ -1,6 +1,7 @@
 """Tests for video processing runtime helpers."""
 
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -509,6 +510,73 @@ def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
             "frame_h": 40,
         }
     ]
+
+
+def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
+    candidates = [
+        {
+            "camera_id": "cam1",
+            "rule": rule,
+            "severity": "P2",
+            "confidence": 0.9,
+            "description": f"{rule} detected",
+            "source": "test",
+            "threshold": 1,
+        }
+        for rule in ("Missing Helmet", "Missing Vest")
+    ]
+    encode_calls = []
+    alerts = []
+
+    monkeypatch.setattr(video_processing, "check_violations", lambda *_args: candidates)
+    monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args: [])
+    monkeypatch.setattr(
+        video_processing,
+        "_encode_inference_snapshot_pair",
+        lambda *_args, **_kwargs: encode_calls.append(True) or (b"annotated", b"clean"),
+    )
+    monkeypatch.setattr(
+        video_processing.policy_engine,
+        "evaluate_candidate",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                fallback=False,
+                output_ids=None,
+                rule_id="",
+                rule_name="Test",
+                severity="P2",
+                priority=2,
+                message=None,
+                cooldown_seconds=30,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "create_alert",
+        lambda **kwargs: alerts.append(kwargs) or {"id": f"alert-{len(alerts)}"},
+    )
+
+    video_processing._process_detection_observation(
+        "cam1",
+        np.zeros((540, 960, 3), dtype=np.uint8),
+        None,
+        [{"class": "person", "confidence": 0.9, "bbox": [1, 1, 20, 40]}],
+        None,
+        {"capabilities": [], "run_pose_specialist": False},
+        {},
+        {"global": {"jpeg_quality": 70}},
+        last_alert_by_rule={},
+        active_violations=set(),
+        violation_window={},
+        alert_cooldown=30,
+        window_size=3,
+    )
+
+    assert encode_calls == [True]
+    assert [alert["rule"] for alert in alerts] == ["Missing Helmet", "Missing Vest"]
+    assert {alert["snapshot_jpeg"] for alert in alerts} == {b"annotated"}
+    assert {alert["clean_snapshot_jpeg"] for alert in alerts} == {b"clean"}
 
 
 def test_empty_violation_observation_clears_after_fresh_absence():

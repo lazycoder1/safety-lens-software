@@ -2031,6 +2031,9 @@ def _process_detection_observation(
                 active_violations.discard(rule_key)
 
         now = time.time()
+        snapshot_jpeg = None
+        clean_snapshot_jpeg = None
+        snapshot_encoding_attempted = False
         for rule_key, candidate in current_violation_rules.items():
             if rule_key in active_violations:
                 continue
@@ -2054,21 +2057,21 @@ def _process_detection_observation(
             active_violations.add(rule_key)
             violation_window[rule_key] = []
             violation_bboxes = extract_violation_bboxes(candidate["rule"], detections, frame_w, frame_h, camera_id)
-            snapshot_jpeg = None
-            clean_snapshot_jpeg = None
-            try:
-                snapshot_jpeg, clean_snapshot_jpeg = _encode_inference_snapshot_pair(
-                    camera_id,
-                    frame,
-                    detections,
-                    int(current_cfg.get("global", {}).get("jpeg_quality", 70)),
-                    annotated_frame=annotated_frame,
-                )
-            except Exception:
-                logger.exception(
-                    "Alert snapshot encoding failed",
-                    extra={"camera_id": camera_id, "rule": candidate["rule"]},
-                )
+            if not snapshot_encoding_attempted:
+                snapshot_encoding_attempted = True
+                try:
+                    snapshot_jpeg, clean_snapshot_jpeg = _encode_inference_snapshot_pair(
+                        camera_id,
+                        frame,
+                        detections,
+                        int(current_cfg.get("global", {}).get("jpeg_quality", 70)),
+                        annotated_frame=annotated_frame,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Alert snapshot encoding failed",
+                        extra={"camera_id": camera_id, "rule": candidate["rule"]},
+                    )
             for decision in decisions:
                 alert = create_alert(
                     camera_id=candidate["camera_id"],
