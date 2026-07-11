@@ -49,8 +49,8 @@ _REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="remote-model-pair",
 )
-_REMOTE_PAIR_ADMISSION = threading.BoundedSemaphore(2)
-_REMOTE_PAIR_ADMISSION_WAIT_SECONDS = 0.05
+_REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(2)
+_REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.05
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
@@ -1969,20 +1969,29 @@ def predict_records(
     classes: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     if is_remote_inference_enabled():
-        frame_jpeg, inference_shape = _prepare_remote_inference_jpeg(frame, imgsz)
-        records = _remote_predict_records_jpeg(
-            model_key,
-            frame_jpeg,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-            classes=classes,
-        )
-        return _scale_remote_records_to_source(
-            records,
-            frame.shape,
-            inference_shape,
-        )
+        if not _REMOTE_JOB_ADMISSION.acquire(
+            timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
+        ):
+            raise RemoteInferenceOverloadedError(
+                "Remote inference is at its bounded concurrency limit"
+            )
+        try:
+            frame_jpeg, inference_shape = _prepare_remote_inference_jpeg(frame, imgsz)
+            records = _remote_predict_records_jpeg(
+                model_key,
+                frame_jpeg,
+                conf=conf,
+                device=device,
+                imgsz=imgsz,
+                classes=classes,
+            )
+            return _scale_remote_records_to_source(
+                records,
+                frame.shape,
+                inference_shape,
+            )
+        finally:
+            _REMOTE_JOB_ADMISSION.release()
 
     records = _records_from_results(
         predict(model_key, frame, conf=conf, device=device, imgsz=imgsz, classes=classes)
@@ -2049,13 +2058,12 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
     maximum_imgsz = max(item["imgsz"] for item in normalized)
     resize_required = max(frame.shape[:2]) > maximum_imgsz
     paired_request = len(normalized) == 2
-    if paired_request:
-        if not _REMOTE_PAIR_ADMISSION.acquire(
-            timeout=_REMOTE_PAIR_ADMISSION_WAIT_SECONDS
-        ):
-            raise RemoteInferenceOverloadedError(
-                "Remote paired inference is at its bounded concurrency limit"
-            )
+    if not _REMOTE_JOB_ADMISSION.acquire(
+        timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
+    ):
+        raise RemoteInferenceOverloadedError(
+            "Remote inference is at its bounded concurrency limit"
+        )
     try:
         # Preserve the existing byte path for camera frames that already fit.
         # Oversized grouped frames use the smallest higher quality that retained
@@ -2109,25 +2117,23 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
                 )
                 for item, future in zip(normalized, futures)
             }
+        return {
+            item["request_id"]: _scale_remote_records_to_source(
+                _remote_predict_records_jpeg(
+                    item["model_key"],
+                    frame_jpeg,
+                    conf=item["conf"],
+                    device=item["device"],
+                    imgsz=item["imgsz"],
+                    classes=item["classes"],
+                ),
+                frame.shape,
+                inference_shape,
+            )
+            for item in normalized
+        }
     finally:
-        if paired_request:
-            _REMOTE_PAIR_ADMISSION.release()
-
-    return {
-        item["request_id"]: _scale_remote_records_to_source(
-            _remote_predict_records_jpeg(
-                item["model_key"],
-                frame_jpeg,
-                conf=item["conf"],
-                device=item["device"],
-                imgsz=item["imgsz"],
-                classes=item["classes"],
-            ),
-            frame.shape,
-            inference_shape,
-        )
-        for item in normalized
-    }
+        _REMOTE_JOB_ADMISSION.release()
 
 
 def predict_plate_records(

@@ -186,7 +186,7 @@ def test_edge_rejects_stale_pair_before_model_request_queue(monkeypatch):
     class RejectAdmission:
         def acquire(self, **kwargs):
             assert kwargs == {
-                "timeout": model_manager._REMOTE_PAIR_ADMISSION_WAIT_SECONDS
+                "timeout": model_manager._REMOTE_JOB_ADMISSION_WAIT_SECONDS
             }
             return False
 
@@ -194,7 +194,7 @@ def test_edge_rejects_stale_pair_before_model_request_queue(monkeypatch):
             pytest.fail("Rejected admission must not release an unclaimed slot")
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_REMOTE_PAIR_ADMISSION", RejectAdmission())
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", RejectAdmission())
     monkeypatch.setattr(
         cv2,
         "imencode",
@@ -213,6 +213,35 @@ def test_edge_rejects_stale_pair_before_model_request_queue(monkeypatch):
                 {"request_id": "coco", "model_key": "coco_primary"},
                 {"request_id": "ppe", "model_key": "ppe_specialist"},
             ],
+        )
+
+
+def test_edge_rejects_stale_single_before_jpeg_encoding(monkeypatch):
+    class RejectAdmission:
+        def acquire(self, **kwargs):
+            assert kwargs == {
+                "timeout": model_manager._REMOTE_JOB_ADMISSION_WAIT_SECONDS
+            }
+            return False
+
+        def release(self):
+            pytest.fail("Rejected admission must not release an unclaimed slot")
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", RejectAdmission())
+    monkeypatch.setattr(
+        cv2,
+        "imencode",
+        lambda *_args, **_kwargs: pytest.fail("Rejected single reached JPEG encoding"),
+    )
+
+    with pytest.raises(model_manager.RemoteInferenceOverloadedError):
+        model_manager.predict_records(
+            "coco_primary",
+            np.zeros((180, 320, 3), dtype=np.uint8),
+            conf=0.3,
+            device="cuda",
+            imgsz=960,
         )
 
 
