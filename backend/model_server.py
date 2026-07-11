@@ -35,6 +35,8 @@ _DECODE_CACHE_MAX_ENTRIES = 2
 _DECODE_CACHE_TTL_SECONDS = 0.75
 _DECODE_CACHE_LOCK = threading.Lock()
 _DECODE_CACHE = OrderedDict()
+_DECODE_INFLIGHT: Dict[bytes, threading.Event] = {}
+_DECODE_SLOTS = threading.BoundedSemaphore(2)
 # The model-server process must always use local model runtimes, even if it
 # inherits edge-backend environment variables from a shared shell or container.
 model_manager.force_local_inference()
@@ -93,23 +95,47 @@ def _require_model_server_token(authorization: Optional[str]):
 
 def _decode_frame(frame_bytes: bytes):
     cache_key = hashlib.blake2b(frame_bytes, digest_size=16).digest()
-    now = time.monotonic()
-    with _DECODE_CACHE_LOCK:
-        cached = _DECODE_CACHE.pop(cache_key, None)
-        if cached is not None and now - cached[0] <= _DECODE_CACHE_TTL_SECONDS:
-            _DECODE_CACHE[cache_key] = cached
-            return cached[1]
-        try:
+    while True:
+        now = time.monotonic()
+        with _DECODE_CACHE_LOCK:
+            cached = _DECODE_CACHE.pop(cache_key, None)
+            if cached is not None and now - cached[0] <= _DECODE_CACHE_TTL_SECONDS:
+                _DECODE_CACHE[cache_key] = cached
+                return cached[1]
+            decode_complete = _DECODE_INFLIGHT.get(cache_key)
+            if decode_complete is None:
+                decode_complete = threading.Event()
+                _DECODE_INFLIGHT[cache_key] = decode_complete
+                break
+        decode_complete.wait()
+
+    try:
+        with _DECODE_SLOTS:
             arr = np.frombuffer(frame_bytes, np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
-        if frame is None:
-            raise HTTPException(status_code=400, detail="Could not decode frame")
+    except Exception as exc:
+        _finish_decode(cache_key)
+        raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
+    if frame is None:
+        _finish_decode(cache_key)
+        raise HTTPException(status_code=400, detail="Could not decode frame")
+
+    with _DECODE_CACHE_LOCK:
         _DECODE_CACHE[cache_key] = (time.monotonic(), frame)
         while len(_DECODE_CACHE) > _DECODE_CACHE_MAX_ENTRIES:
             _DECODE_CACHE.popitem(last=False)
-        return frame
+        decode_complete = _DECODE_INFLIGHT.pop(cache_key, None)
+        if decode_complete is not None:
+            decode_complete.set()
+    return frame
+
+
+def _finish_decode(cache_key: bytes) -> None:
+    """Release same-frame waiters after a failed decode so they can retry."""
+    with _DECODE_CACHE_LOCK:
+        decode_complete = _DECODE_INFLIGHT.pop(cache_key, None)
+        if decode_complete is not None:
+            decode_complete.set()
 
 
 def _clear_decode_cache() -> None:

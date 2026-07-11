@@ -1,6 +1,7 @@
 import base64
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -388,6 +389,70 @@ def test_model_server_reuses_and_bounds_identical_jpeg_decodes(monkeypatch):
     assert first is repeated
     assert decode_calls == 4
     assert len(model_server._DECODE_CACHE) == model_server._DECODE_CACHE_MAX_ENTRIES
+    model_server._clear_decode_cache()
+
+
+def test_model_server_decodes_different_jpegs_concurrently(monkeypatch):
+    model_server._clear_decode_cache()
+    real_imdecode = model_server.cv2.imdecode
+    both_decoders_entered = threading.Event()
+    release_decoders = threading.Event()
+    decode_calls = 0
+    decode_calls_lock = threading.Lock()
+
+    def blocked_decode(*args, **kwargs):
+        nonlocal decode_calls
+        with decode_calls_lock:
+            decode_calls += 1
+            if decode_calls == 2:
+                both_decoders_entered.set()
+        assert release_decoders.wait(1.0)
+        return real_imdecode(*args, **kwargs)
+
+    monkeypatch.setattr(model_server.cv2, "imdecode", blocked_decode)
+    jpeg_frames = [
+        _jpeg_bytes(np.full((120, 200, 3), value, dtype=np.uint8))
+        for value in (20, 180)
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(model_server._decode_frame, jpeg) for jpeg in jpeg_frames]
+        assert both_decoders_entered.wait(0.5)
+        release_decoders.set()
+        decoded = [future.result() for future in futures]
+
+    assert decode_calls == 2
+    assert [int(frame[0, 0, 0]) for frame in decoded] == [20, 180]
+    model_server._clear_decode_cache()
+
+
+def test_model_server_singleflights_concurrent_duplicate_jpeg(monkeypatch):
+    model_server._clear_decode_cache()
+    real_imdecode = model_server.cv2.imdecode
+    decoder_entered = threading.Event()
+    release_decoder = threading.Event()
+    decode_calls = 0
+
+    def blocked_decode(*args, **kwargs):
+        nonlocal decode_calls
+        decode_calls += 1
+        decoder_entered.set()
+        assert release_decoder.wait(1.0)
+        return real_imdecode(*args, **kwargs)
+
+    monkeypatch.setattr(model_server.cv2, "imdecode", blocked_decode)
+    jpeg = _jpeg_bytes(np.full((120, 200, 3), 80, dtype=np.uint8))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(model_server._decode_frame, jpeg)
+        assert decoder_entered.wait(0.5)
+        second = pool.submit(model_server._decode_frame, jpeg)
+        release_decoder.set()
+        first_frame = first.result()
+        second_frame = second.result()
+
+    assert decode_calls == 1
+    assert first_frame is second_frame
     model_server._clear_decode_cache()
 
 
