@@ -195,6 +195,12 @@ seconds by default, accepted range 1–300). Lowering it discovers recovery
 sooner but spends more network, decoder, CPU, and log resources on a camera
 that remains unavailable.
 
+`SAFETYLENS_NVDEC_RETRY_SECONDS` caches a failed hardware-decoder open for 60
+seconds by default (accepted range 5–3600). Software reconnects continue during
+that window, but they avoid paying the same bounded NVDEC timeout until the
+cache expires. Entries are credential-safe source hashes, bounded to 128, and
+are removed immediately after a successful hardware open.
+
 ---
 
 ## Common Debug Queries

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
@@ -86,6 +87,64 @@ CAMERA_STOP_TIMEOUT_SECONDS = max(
     5.0,
     (RTSP_OPEN_TIMEOUT_MS + RTSP_READ_TIMEOUT_MS) / 1_000.0 + 2.0,
 )
+NVDEC_RETRY_SECONDS = _env_float(
+    "SAFETYLENS_NVDEC_RETRY_SECONDS",
+    60.0,
+    minimum=5.0,
+    maximum=3_600.0,
+)
+_NVDEC_RETRY_CACHE_MAX_ENTRIES = 128
+_NVDEC_RETRY_LOCK = threading.Lock()
+_NVDEC_RETRY_AFTER: dict[bytes, float] = {}
+
+
+def _nvdec_source_key(source: str) -> bytes:
+    """Hash connection details so retry state never retains credentials."""
+    return hashlib.blake2b(source.encode("utf-8"), digest_size=16).digest()
+
+
+def _nvdec_retry_allowed(source: str, *, now: float | None = None) -> bool:
+    current = time.monotonic() if now is None else float(now)
+    key = _nvdec_source_key(source)
+    with _NVDEC_RETRY_LOCK:
+        retry_after = _NVDEC_RETRY_AFTER.get(key)
+        if retry_after is None:
+            return True
+        if current >= retry_after:
+            _NVDEC_RETRY_AFTER.pop(key, None)
+            return True
+        return False
+
+
+def _record_nvdec_retry(source: str, *, now: float | None = None) -> None:
+    current = time.monotonic() if now is None else float(now)
+    key = _nvdec_source_key(source)
+    with _NVDEC_RETRY_LOCK:
+        expired = [
+            cached_key
+            for cached_key, retry_after in _NVDEC_RETRY_AFTER.items()
+            if retry_after <= current
+        ]
+        for cached_key in expired:
+            _NVDEC_RETRY_AFTER.pop(cached_key, None)
+        if (
+            key not in _NVDEC_RETRY_AFTER
+            and len(_NVDEC_RETRY_AFTER) >= _NVDEC_RETRY_CACHE_MAX_ENTRIES
+        ):
+            oldest_key = min(_NVDEC_RETRY_AFTER, key=_NVDEC_RETRY_AFTER.get)
+            _NVDEC_RETRY_AFTER.pop(oldest_key, None)
+        _NVDEC_RETRY_AFTER[key] = current + NVDEC_RETRY_SECONDS
+
+
+def _clear_nvdec_retry(source: str) -> None:
+    with _NVDEC_RETRY_LOCK:
+        _NVDEC_RETRY_AFTER.pop(_nvdec_source_key(source), None)
+
+
+def _reset_nvdec_retry_cache() -> None:
+    """Clear process-local retry state for deterministic lifecycle tests."""
+    with _NVDEC_RETRY_LOCK:
+        _NVDEC_RETRY_AFTER.clear()
 
 
 def _rtsp_capture_backend() -> str:
@@ -175,14 +234,20 @@ def open_video_capture(
     if stream_type != "rtsp":
         return cv2.VideoCapture(source)
 
-    if prefer_hardware and _rtsp_capture_backend() in {"nvdec", "auto"}:
+    if (
+        prefer_hardware
+        and _rtsp_capture_backend() in {"nvdec", "auto"}
+        and _nvdec_retry_allowed(source)
+    ):
         capture = (
             _open_gstreamer_capture(source)
             if max_fps is None
             else _open_gstreamer_capture(source, max_fps=max_fps)
         )
         if capture is not None:
+            _clear_nvdec_retry(source)
             return capture
+        _record_nvdec_retry(source)
 
     bounded_open_timeout_ms = _capture_timeout_ms(
         open_timeout_ms,

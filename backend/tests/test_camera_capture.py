@@ -211,6 +211,89 @@ def test_open_rtsp_capture_falls_back_when_nvdec_runtime_is_missing(monkeypatch)
     )
 
 
+def test_nvdec_failure_cache_skips_repeated_hardware_probe(monkeypatch):
+    class FakeCapture:
+        def open(self, *_args):
+            return True
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args):
+            return True
+
+    now = [100.0]
+    hardware_calls = []
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
+    monkeypatch.setattr(camera_capture.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        camera_capture,
+        "_open_gstreamer_capture",
+        lambda source, **_kwargs: hardware_calls.append(source),
+    )
+    monkeypatch.setattr(camera_capture.cv2, "VideoCapture", FakeCapture)
+    camera_capture._reset_nvdec_retry_cache()
+
+    first = camera_capture.open_video_capture(
+        "rtsp://user:secret@camera/live",
+        stream_type="rtsp",
+    )
+    second = camera_capture.open_video_capture(
+        "rtsp://user:secret@camera/live",
+        stream_type="rtsp",
+    )
+    now[0] += camera_capture.NVDEC_RETRY_SECONDS + 0.1
+    third = camera_capture.open_video_capture(
+        "rtsp://user:secret@camera/live",
+        stream_type="rtsp",
+    )
+
+    assert first.isOpened() and second.isOpened() and third.isOpened()
+    assert hardware_calls == [
+        "rtsp://user:secret@camera/live",
+        "rtsp://user:secret@camera/live",
+    ]
+    assert all(
+        b"user" not in key and b"secret" not in key
+        for key in camera_capture._NVDEC_RETRY_AFTER
+    )
+
+
+def test_successful_nvdec_probe_clears_cached_failure(monkeypatch):
+    fallback = SimpleNamespace(
+        open=lambda *_args: True,
+        isOpened=lambda: True,
+        set=lambda *_args: True,
+    )
+    hardware_capture = object()
+    hardware_results = [None, hardware_capture, hardware_capture]
+    now = [100.0]
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "auto")
+    monkeypatch.setattr(camera_capture.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        camera_capture,
+        "_open_gstreamer_capture",
+        lambda _source, **_kwargs: hardware_results.pop(0),
+    )
+    monkeypatch.setattr(camera_capture.cv2, "VideoCapture", lambda: fallback)
+    camera_capture._reset_nvdec_retry_cache()
+
+    assert camera_capture.open_video_capture(
+        "rtsp://camera/live",
+        stream_type="rtsp",
+    ) is fallback
+    now[0] += camera_capture.NVDEC_RETRY_SECONDS + 0.1
+    assert camera_capture.open_video_capture(
+        "rtsp://camera/live",
+        stream_type="rtsp",
+    ) is hardware_capture
+    assert camera_capture.open_video_capture(
+        "rtsp://camera/live",
+        stream_type="rtsp",
+    ) is hardware_capture
+    assert camera_capture._NVDEC_RETRY_AFTER == {}
+
+
 def test_gstreamer_capture_that_does_not_open_is_released_and_falls_back(
     monkeypatch,
     caplog,
