@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +23,18 @@ EMBEDDING_DIM = 512
 MATCH_THRESHOLD = 0.42
 
 _vector_available = False
+_ACTIVE_FACES_CACHE_TTL_SECONDS = 5.0
+_active_faces_cache: tuple[dict, ...] | None = None
+_active_faces_cache_expires_at = 0.0
+_active_faces_cache_lock = threading.RLock()
+
+
+def invalidate_active_faces_cache() -> None:
+    """Make the next matcher reload enrollment state from PostgreSQL."""
+    global _active_faces_cache, _active_faces_cache_expires_at
+    with _active_faces_cache_lock:
+        _active_faces_cache = None
+        _active_faces_cache_expires_at = 0.0
 
 
 def init_db() -> None:
@@ -81,6 +95,7 @@ def init_db() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_face_logs_camera ON face_logs(camera_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_face_logs_event_type ON face_logs(event_type)")
         conn.commit()
+    invalidate_active_faces_cache()
 
 
 def save_face_photo(face_id: str, image_bytes: bytes) -> str:
@@ -141,6 +156,7 @@ def create_enrollment(
                 )
             row = cur.fetchone()
         conn.commit()
+    invalidate_active_faces_cache()
     return _face_row_to_dict(row)
 
 
@@ -158,6 +174,8 @@ def deactivate_face(face_id: str) -> dict | None:
             cur.execute("UPDATE enrolled_faces SET active = FALSE WHERE id = %s AND active = TRUE RETURNING *", (face_id,))
             row = cur.fetchone()
         conn.commit()
+    if row is not None:
+        invalidate_active_faces_cache()
     return _face_row_to_dict(row) if row else None
 
 
@@ -252,11 +270,21 @@ def query_logs(
 
 
 def _active_faces_with_embeddings() -> list[dict]:
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM enrolled_faces WHERE active = TRUE")
-            rows = cur.fetchall()
-    return [dict(row) for row in rows]
+    global _active_faces_cache, _active_faces_cache_expires_at
+    now = time.monotonic()
+    with _active_faces_cache_lock:
+        if (
+            _active_faces_cache is not None
+            and now < _active_faces_cache_expires_at
+        ):
+            return list(_active_faces_cache)
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM enrolled_faces WHERE active = TRUE")
+                rows = cur.fetchall()
+        _active_faces_cache = tuple(dict(row) for row in rows)
+        _active_faces_cache_expires_at = now + _ACTIVE_FACES_CACHE_TTL_SECONDS
+        return list(_active_faces_cache)
 
 
 def _embedding_vector_literal(embedding: list[float]) -> str:
