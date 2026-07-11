@@ -42,6 +42,12 @@ RTSP_READ_TIMEOUT_MS = _env_int(
     minimum=1_000,
     maximum=60_000,
 )
+RTSP_DECODE_THREADS = _env_int(
+    "SAFETYLENS_RTSP_DECODE_THREADS",
+    2,
+    minimum=1,
+    maximum=16,
+)
 RTSP_RECONNECT_BASE_SECONDS = _env_float(
     "SAFETYLENS_RTSP_RECONNECT_BASE_SECONDS",
     1.0,
@@ -101,6 +107,8 @@ def open_video_capture(source: str, *, stream_type: str):
         parameters.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_OPEN_TIMEOUT_MS])
     if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
         parameters.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS])
+    if hasattr(cv2, "CAP_PROP_N_THREADS"):
+        parameters.extend([cv2.CAP_PROP_N_THREADS, RTSP_DECODE_THREADS])
 
     capture = cv2.VideoCapture()
     try:

@@ -111,6 +111,8 @@ def test_open_rtsp_capture_forces_ffmpeg_and_bounded_timeouts(monkeypatch):
         camera_capture.RTSP_OPEN_TIMEOUT_MS,
         camera_capture.cv2.CAP_PROP_READ_TIMEOUT_MSEC,
         camera_capture.RTSP_READ_TIMEOUT_MS,
+        camera_capture.cv2.CAP_PROP_N_THREADS,
+        camera_capture.RTSP_DECODE_THREADS,
     ]
     assert capture.set_calls == [(camera_capture.cv2.CAP_PROP_BUFFERSIZE, 1)]
 
