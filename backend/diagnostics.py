@@ -38,6 +38,25 @@ _HEALTH_CACHE_TTL = 5.0
 _health_cache_lock = __import__("threading").Lock()
 
 
+def _capture_acceleration_health(camera: dict, connection: dict) -> dict:
+    configured_backend = os.environ.get(
+        "SAFETYLENS_RTSP_CAPTURE_BACKEND",
+        "ffmpeg",
+    ).strip().lower()
+    expected = (
+        camera.get("stream_type", "file") == "rtsp"
+        and configured_backend in {"nvdec", "auto"}
+    )
+    active = connection.get("captureBackend") == "gstreamer_nvdec"
+    return {
+        "hardwareAccelerationExpected": expected,
+        "hardwareAccelerationActive": active,
+        "hardwareFallback": (
+            expected and connection.get("captureBackend") == "ffmpeg"
+        ),
+    }
+
+
 def _registered_worker_is_alive(
     workers: dict,
     camera_id: str,
@@ -99,6 +118,7 @@ def build_health_snapshot() -> dict:
         now = time.time()
         missing_vlm_companions = 0
         active_camera_outages = 0
+        hardware_capture_fallbacks = 0
         for cam_id, cam in cfg.get("cameras", {}).items():
             enabled = bool(cam.get("enabled", True))
             worker_running = _registered_worker_is_alive(state.camera_threads, cam_id)
@@ -116,6 +136,11 @@ def build_health_snapshot() -> dict:
                 runtime_status = "stale"
             stream_stats = stream_fanout.stats(cam_id)
             connection_health = state.get_camera_connection_health(cam_id)
+            acceleration_health = _capture_acceleration_health(
+                cam,
+                connection_health,
+            )
+            connection_health.update(acceleration_health)
             if enabled:
                 enabled_cameras += 1
             if enabled and worker_running:
@@ -124,6 +149,8 @@ def build_health_snapshot() -> dict:
                 missing_vlm_companions += 1
             if enabled and connection_health["outageActive"]:
                 active_camera_outages += 1
+            if enabled and acceleration_health["hardwareFallback"]:
+                hardware_capture_fallbacks += 1
             cameras.append(
                 {
                     "id": cam_id,
@@ -177,6 +204,12 @@ def build_health_snapshot() -> dict:
             if status == "ok":
                 status = "degraded"
             reasons.append("one or more cameras have an active connection outage")
+        if hardware_capture_fallbacks:
+            if status == "ok":
+                status = "degraded"
+            reasons.append(
+                "one or more cameras fell back from NVDEC to CPU decoding"
+            )
         if (
             model_metadata.get("enabled") is True
             and model_metadata.get("status") != "healthy"

@@ -767,9 +767,15 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
     cfg = {
         "retention": {},
         "cameras": {
-            "cam1": {"enabled": True, "demo": "yolo", "name": "Camera 1"},
+            "cam1": {
+                "enabled": True,
+                "demo": "yolo",
+                "name": "Camera 1",
+                "stream_type": "rtsp",
+            },
         },
     }
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
     monkeypatch.setattr(diagnostics, "_health_cache", None)
     monkeypatch.setattr(diagnostics, "get_config", lambda: cfg)
     monkeypatch.setattr(diagnostics.db, "check_connection", lambda: True)
@@ -828,7 +834,7 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
         suppressed_failure_count=6,
         last_transition="outage",
         last_transition_monotonic=now - 12,
-        capture_backend="gstreamer_nvdec",
+        capture_backend="ffmpeg",
     )
 
     snapshot = diagnostics.build_health_snapshot()
@@ -836,6 +842,10 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
 
     assert snapshot["status"] == "degraded"
     assert "one or more cameras have an active connection outage" in snapshot["reasons"]
+    assert (
+        "one or more cameras fell back from NVDEC to CPU decoding"
+        in snapshot["reasons"]
+    )
     assert "remote model metadata unavailable" in snapshot["reasons"]
     assert snapshot["modelMetadata"]["status"] == "unavailable"
     assert connection["outageActive"] is True
@@ -853,8 +863,35 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
         "lastTransition",
         "lastTransitionAgeSeconds",
         "captureBackend",
+        "hardwareAccelerationExpected",
+        "hardwareAccelerationActive",
+        "hardwareFallback",
     }
-    assert connection["captureBackend"] == "gstreamer_nvdec"
+    assert connection["captureBackend"] == "ffmpeg"
+    assert connection["hardwareAccelerationExpected"] is True
+    assert connection["hardwareAccelerationActive"] is False
+    assert connection["hardwareFallback"] is True
+
+
+def test_health_identifies_requested_nvdec_cpu_fallback(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
+
+    assert diagnostics._capture_acceleration_health(
+        {"stream_type": "rtsp"},
+        {"captureBackend": "ffmpeg"},
+    ) == {
+        "hardwareAccelerationExpected": True,
+        "hardwareAccelerationActive": False,
+        "hardwareFallback": True,
+    }
+    assert diagnostics._capture_acceleration_health(
+        {"stream_type": "rtsp"},
+        {"captureBackend": "gstreamer_nvdec"},
+    ) == {
+        "hardwareAccelerationExpected": True,
+        "hardwareAccelerationActive": True,
+        "hardwareFallback": False,
+    }
 
 
 def test_clear_camera_observation_discards_stale_frame_and_detection_state(monkeypatch):
