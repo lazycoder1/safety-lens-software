@@ -98,10 +98,12 @@ docker compose \
 ```
 
 The override uses a JetPack-compatible Ubuntu 20.04 GStreamer runtime, enables
-`SAFETYLENS_RTSP_CAPTURE_BACKEND=nvdec`, and mounts the NVIDIA GStreamer plugins
-and matching Tegra driver libraries read-only from the host. The capture factory
-falls back to bounded FFmpeg capture when the in-process NVDEC runtime is not
-available. It also defaults `SAFETYLENS_RTSP_MAX_DIMENSION` to `960`; NVDEC keeps
+`SAFETYLENS_RTSP_CAPTURE_BACKEND=nvdec`, and mounts the NVIDIA GStreamer, V4L2,
+and matching Tegra driver libraries read-only from the host. The V4L2 plug-in
+mount is required for `nvv4l2decoder` to route `/dev/nvhost-nvdec` through
+NVIDIA's codec implementation. The capture factory falls back to bounded FFmpeg
+capture when the in-process NVDEC runtime is not available. It also defaults
+`SAFETYLENS_RTSP_MAX_DIMENSION` to `960`; NVDEC keeps
 the source aspect ratio and leaves smaller feeds at native resolution before
 copying frames into Python. Set it to `0` when a deployment explicitly requires
 full-resolution face, plate, or forensic imagery. Before deployment, verify the
@@ -110,6 +112,7 @@ host provides:
 ```bash
 gst-inspect-1.0 nvv4l2decoder
 gst-inspect-1.0 nvvidconv
+test -d /usr/lib/aarch64-linux-gnu/libv4l/plugins/nv
 test -e /dev/nvhost-nvdec
 ```
 
