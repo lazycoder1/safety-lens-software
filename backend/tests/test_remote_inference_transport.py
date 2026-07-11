@@ -314,6 +314,34 @@ def test_model_server_accepts_raw_jpeg_and_metadata(monkeypatch):
     }
 
 
+def test_model_server_reuses_and_bounds_identical_jpeg_decodes(monkeypatch):
+    model_server._clear_decode_cache()
+    decode_calls = 0
+    real_imdecode = model_server.cv2.imdecode
+
+    def counted_decode(*args, **kwargs):
+        nonlocal decode_calls
+        decode_calls += 1
+        return real_imdecode(*args, **kwargs)
+
+    monkeypatch.setattr(model_server.cv2, "imdecode", counted_decode)
+    jpeg_frames = [
+        _jpeg_bytes(np.full((120, 200, 3), value, dtype=np.uint8))
+        for value in (0, 80, 160)
+    ]
+
+    first = model_server._decode_frame(jpeg_frames[0])
+    repeated = model_server._decode_frame(jpeg_frames[0])
+    model_server._decode_frame(jpeg_frames[1])
+    model_server._decode_frame(jpeg_frames[2])
+    model_server._decode_frame(jpeg_frames[0])
+
+    assert first is repeated
+    assert decode_calls == 4
+    assert len(model_server._DECODE_CACHE) == model_server._DECODE_CACHE_MAX_ENTRIES
+    model_server._clear_decode_cache()
+
+
 def test_model_server_rejects_invalid_raw_jpeg(monkeypatch):
     monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
     client = TestClient(model_server.app, raise_server_exceptions=False)

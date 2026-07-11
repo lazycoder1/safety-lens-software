@@ -7,9 +7,13 @@ frames here and keep local streaming, alerting, config, and frontend APIs intact
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import threading
+import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
@@ -27,6 +31,10 @@ logger = logging.getLogger("rakshak_lens.model_server")
 
 app = FastAPI(title="Rakshak Lens Model Server")
 MODEL_SERVER_TOKEN = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
+_DECODE_CACHE_MAX_ENTRIES = 2
+_DECODE_CACHE_TTL_SECONDS = 0.75
+_DECODE_CACHE_LOCK = threading.Lock()
+_DECODE_CACHE = OrderedDict()
 # The model-server process must always use local model runtimes, even if it
 # inherits edge-backend environment variables from a shared shell or container.
 model_manager.force_local_inference()
@@ -84,14 +92,29 @@ def _require_model_server_token(authorization: Optional[str]):
 
 
 def _decode_frame(frame_bytes: bytes):
-    try:
-        arr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
-    if frame is None:
-        raise HTTPException(status_code=400, detail="Could not decode frame")
-    return frame
+    cache_key = hashlib.blake2b(frame_bytes, digest_size=16).digest()
+    now = time.monotonic()
+    with _DECODE_CACHE_LOCK:
+        cached = _DECODE_CACHE.pop(cache_key, None)
+        if cached is not None and now - cached[0] <= _DECODE_CACHE_TTL_SECONDS:
+            _DECODE_CACHE[cache_key] = cached
+            return cached[1]
+        try:
+            arr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JPEG frame") from exc
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Could not decode frame")
+        _DECODE_CACHE[cache_key] = (time.monotonic(), frame)
+        while len(_DECODE_CACHE) > _DECODE_CACHE_MAX_ENTRIES:
+            _DECODE_CACHE.popitem(last=False)
+        return frame
+
+
+def _clear_decode_cache() -> None:
+    with _DECODE_CACHE_LOCK:
+        _DECODE_CACHE.clear()
 
 
 def _run_inference_frame(
