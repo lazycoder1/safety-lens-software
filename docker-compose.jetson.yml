@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.edge-jetson
     environment:
       SAFETYLENS_RTSP_CAPTURE_BACKEND: nvdec
+      SAFETYLENS_RTSP_MAX_DIMENSION: ${SAFETYLENS_RTSP_MAX_DIMENSION:-960}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
       LD_LIBRARY_PATH: /usr/lib/aarch64-linux-gnu/tegra

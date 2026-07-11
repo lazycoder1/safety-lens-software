@@ -171,6 +171,27 @@ def test_invalid_capture_backend_defaults_to_ffmpeg(monkeypatch):
     assert camera_capture._rtsp_capture_backend() == "ffmpeg"
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("", 0),
+        ("invalid", 0),
+        ("-1", 0),
+        ("100", 320),
+        ("960", 960),
+        ("99999", 4096),
+    ],
+)
+def test_rtsp_max_dimension_is_disabled_or_safely_bounded(
+    monkeypatch,
+    configured,
+    expected,
+):
+    monkeypatch.setenv("SAFETYLENS_RTSP_MAX_DIMENSION", configured)
+
+    assert camera_capture._rtsp_max_dimension() == expected
+
+
 def test_open_rtsp_capture_does_not_fall_back_after_ffmpeg_error(monkeypatch):
     class FailedCapture:
         def __init__(self):

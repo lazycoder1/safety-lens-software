@@ -101,7 +101,11 @@ The override uses a JetPack-compatible Ubuntu 20.04 GStreamer runtime, enables
 `SAFETYLENS_RTSP_CAPTURE_BACKEND=nvdec`, and mounts the NVIDIA GStreamer plugins
 and matching Tegra driver libraries read-only from the host. The capture factory
 falls back to bounded FFmpeg capture when the in-process NVDEC runtime is not
-available. Before deployment, verify the host provides:
+available. It also defaults `SAFETYLENS_RTSP_MAX_DIMENSION` to `960`; NVDEC keeps
+the source aspect ratio and leaves smaller feeds at native resolution before
+copying frames into Python. Set it to `0` when a deployment explicitly requires
+full-resolution face, plate, or forensic imagery. Before deployment, verify the
+host provides:
 
 ```bash
 gst-inspect-1.0 nvv4l2decoder

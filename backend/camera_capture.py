@@ -94,6 +94,16 @@ def _rtsp_capture_backend() -> str:
     return normalized if normalized in {"ffmpeg", "nvdec", "auto"} else "ffmpeg"
 
 
+def _rtsp_max_dimension() -> int:
+    try:
+        value = int(os.environ.get("SAFETYLENS_RTSP_MAX_DIMENSION", "0"))
+    except (TypeError, ValueError):
+        return 0
+    if value <= 0:
+        return 0
+    return min(4_096, max(320, value))
+
+
 def _open_gstreamer_capture(source: str):
     """Return a Jetson NVDEC capture, or None when the runtime is unavailable."""
     try:
@@ -108,6 +118,7 @@ def _open_gstreamer_capture(source: str):
             source,
             open_timeout_ms=RTSP_OPEN_TIMEOUT_MS,
             read_timeout_ms=RTSP_READ_TIMEOUT_MS,
+            max_dimension=_rtsp_max_dimension(),
         )
     except Exception:
         # Never include the source or exception text here: both GStreamer and

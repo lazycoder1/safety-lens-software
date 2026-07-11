@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import cv2
@@ -34,6 +35,21 @@ def nvdec_runtime_available() -> bool:
     return all(Gst.ElementFactory.find(name) is not None for name in _REQUIRED_ELEMENTS)
 
 
+def _bounded_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
+    """Return an even, aspect-preserving size bounded by max_dimension."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    maximum = max(0, int(max_dimension))
+    if maximum <= 0 or max(width, height) <= maximum:
+        return width, height
+    scale = maximum / max(width, height)
+    target_width = max(2, int(round(width * scale)))
+    target_height = max(2, int(round(height * scale)))
+    target_width -= target_width % 2
+    target_height -= target_height % 2
+    return target_width, target_height
+
+
 class GStreamerCapture:
     """Small cv2.VideoCapture-compatible wrapper around a latest-frame appsink."""
 
@@ -46,6 +62,7 @@ class GStreamerCapture:
         *,
         open_timeout_ms: int,
         read_timeout_ms: int,
+        max_dimension: int = 0,
     ) -> None:
         if not nvdec_runtime_available():
             raise RuntimeError("Jetson NVDEC GStreamer runtime is unavailable")
@@ -59,27 +76,32 @@ class GStreamerCapture:
         self._pipeline: Any = None
         self._sink: Any = None
         self._bus: Any = None
+        self._scale_filter: Any = None
 
         tcp_timeout_us = max(1_000_000, int(read_timeout_ms) * 1_000)
         pipeline = Gst.parse_launch(
             "rtspsrc name=source protocols=tcp latency=100 drop-on-latency=true "
             f"tcp-timeout={tcp_timeout_us} "
-            "! decodebin ! nvvidconv ! video/x-raw,format=BGRx "
+            "! decodebin ! nvvidconv ! capsfilter name=scale_caps "
             "! videoconvert ! video/x-raw,format=BGR "
             "! appsink name=sink sync=false max-buffers=1 drop=true"
         )
         source_element = pipeline.get_by_name("source")
+        scale_filter = pipeline.get_by_name("scale_caps")
         sink = pipeline.get_by_name("sink")
-        if source_element is None or sink is None:
+        if source_element is None or scale_filter is None or sink is None:
             pipeline.set_state(Gst.State.NULL)
             raise RuntimeError("GStreamer RTSP pipeline is incomplete")
 
         # Set the URL as a property, not in the parse string, so parse errors
         # can never echo credentials embedded in the source.
         source_element.set_property("location", source)
+        base_caps = Gst.Caps.from_string("video/x-raw,format=BGRx")
+        scale_filter.set_property("caps", base_caps)
         self._pipeline = pipeline
         self._sink = sink
         self._bus = pipeline.get_bus()
+        self._scale_filter = scale_filter
         transition = pipeline.set_state(Gst.State.PLAYING)
         if transition == Gst.StateChangeReturn.FAILURE:
             self.release()
@@ -89,8 +111,51 @@ class GStreamerCapture:
         if first_frame is None:
             self.release()
             return
+        first_frame = self._renegotiate_output_size(
+            first_frame,
+            max_dimension=max_dimension,
+            open_timeout_ms=open_timeout_ms,
+            base_caps=base_caps,
+        )
         self._pending_frame = first_frame
         self._opened = True
+
+    def _renegotiate_output_size(
+        self,
+        first_frame: np.ndarray,
+        *,
+        max_dimension: int,
+        open_timeout_ms: int,
+        base_caps: Any,
+    ) -> np.ndarray:
+        source_height, source_width = first_frame.shape[:2]
+        target_width, target_height = _bounded_dimensions(
+            source_width,
+            source_height,
+            max_dimension,
+        )
+        if (target_width, target_height) == (source_width, source_height):
+            return first_frame
+
+        target_caps = Gst.Caps.from_string(
+            "video/x-raw,format=BGRx,"
+            f"width={target_width},height={target_height}"
+        )
+        self._scale_filter.set_property("caps", target_caps)
+        deadline = time.monotonic() + max(0.001, open_timeout_ms / 1_000.0)
+        while time.monotonic() < deadline:
+            remaining_ns = int((deadline - time.monotonic()) * Gst.SECOND)
+            candidate = self._pull_frame(max(0, remaining_ns))
+            if candidate is None:
+                break
+            if candidate.shape[:2] == (target_height, target_width):
+                return candidate
+
+        # Scaling is an optimization, not a reason to reject a healthy stream.
+        self._scale_filter.set_property("caps", base_caps)
+        self._width = source_width
+        self._height = source_height
+        return first_frame
 
     def isOpened(self) -> bool:
         return self._opened
@@ -183,5 +248,6 @@ class GStreamerCapture:
         self._pipeline = None
         self._sink = None
         self._bus = None
+        self._scale_filter = None
         if pipeline is not None and Gst is not None:
             pipeline.set_state(Gst.State.NULL)
