@@ -1,6 +1,7 @@
 """Tests for video processing runtime helpers."""
 
 from datetime import datetime
+from concurrent.futures import Future
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,37 @@ import numpy as np
 import camera_planner
 import state
 import video_processing
+
+
+def test_policy_timestamp_waits_for_successful_alert_persistence(monkeypatch):
+    calls = []
+    submission = Future()
+    monkeypatch.setattr(
+        video_processing.policy_engine,
+        "mark_rule_triggered",
+        lambda rule_id: calls.append(rule_id),
+    )
+
+    video_processing._persist_policy_trigger_after_alert(submission, "rule-1")
+    assert calls == []
+
+    submission.set_result({"id": "alert-1"})
+    assert calls == ["rule-1"]
+
+
+def test_policy_timestamp_is_not_written_after_failed_persistence(monkeypatch):
+    calls = []
+    submission = Future()
+    monkeypatch.setattr(
+        video_processing.policy_engine,
+        "mark_rule_triggered",
+        lambda rule_id: calls.append(rule_id),
+    )
+
+    video_processing._persist_policy_trigger_after_alert(submission, "rule-1")
+    submission.set_exception(RuntimeError("persistence failed"))
+
+    assert calls == []
 
 
 def _face_event(event_type="face_unknown", *, matched_face_id=None):

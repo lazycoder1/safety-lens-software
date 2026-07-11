@@ -117,8 +117,7 @@ def mark_rule_triggered(
     """Start cooldown after queue admission and persist UI visibility."""
     if not rule_id:
         return
-    if camera_id:
-        _last_triggered_by_key[f"{camera_id}:{rule_id}"] = time.monotonic()
+    start_rule_cooldown(rule_id, camera_id=camera_id)
     timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     try:
         mark_automation_rule_triggered(rule_id, timestamp)
@@ -126,6 +125,12 @@ def mark_rule_triggered(
         # Alert creation should not fail because the UI timestamp could not
         # be persisted.
         pass
+
+
+def start_rule_cooldown(rule_id: str, *, camera_id: str | None) -> None:
+    """Record queue admission without waiting for UI timestamp persistence."""
+    if rule_id and camera_id:
+        _last_triggered_by_key[f"{camera_id}:{rule_id}"] = time.monotonic()
 
 
 def render_template(template: str, data: dict[str, Any]) -> str:

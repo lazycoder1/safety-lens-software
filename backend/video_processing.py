@@ -1247,6 +1247,27 @@ def create_alert(
     )
 
 
+def _persist_policy_trigger_after_alert(submission, rule_id: str) -> None:
+    """Persist a UI rule timestamp only after its alert becomes durable."""
+    if not rule_id:
+        return
+    add_done_callback = getattr(submission, "add_done_callback", None)
+    if not callable(add_done_callback):
+        if isinstance(submission, Mapping):
+            policy_engine.mark_rule_triggered(rule_id)
+        return
+
+    def persist_after_success(completed) -> None:
+        try:
+            persisted = completed.result()
+        except Exception:
+            return
+        if isinstance(persisted, Mapping):
+            policy_engine.mark_rule_triggered(rule_id)
+
+    add_done_callback(persist_after_success)
+
+
 async def broadcast_alert(msg: dict):
     subscribers = tuple(state.alert_subscribers)
     if not subscribers:
@@ -2262,10 +2283,13 @@ def _process_detection_observation(
                 if alert:
                     submitted_alert = True
                     if decision.rule_id:
-                        policy_engine.mark_rule_triggered(
+                        policy_engine.start_rule_cooldown(
                             decision.rule_id,
                             camera_id=camera_id,
-                            cfg=current_cfg,
+                        )
+                        _persist_policy_trigger_after_alert(
+                            alert,
+                            decision.rule_id,
                         )
                     logger.debug(
                         "Detection alert queued",
