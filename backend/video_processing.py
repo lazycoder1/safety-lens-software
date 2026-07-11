@@ -140,6 +140,7 @@ EMPTY_SCENE_CHANGED_PIXEL_DELTA = 8
 EMPTY_SCENE_CHANGED_FRACTION = 0.001
 EMPTY_SCENE_MAX_INFERENCE_INTERVAL_SECONDS = 1.0
 UNCHANGED_STREAM_MAX_INTERVAL_SECONDS = 1.0
+STREAM_CLEAN_CACHE_MAX_AGE_SECONDS = 1.0
 
 
 def _positive_fps(value, fallback: float) -> float:
@@ -390,7 +391,9 @@ def _publish_stream_frame(
     jpeg_quality: int,
     source_annotated: np.ndarray | None = None,
     annotation_required: bool = True,
-) -> None:
+    cached_clean_jpeg: bytes | None = None,
+) -> tuple[bytes, bool]:
+    clean_jpeg_encoded = True
     if not annotation_required:
         clean_view = _resize_for_stream(frame)
         clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
@@ -398,7 +401,11 @@ def _publish_stream_frame(
     elif source_annotated is None:
         annotated_view, clean_view = _render_stream_views(camera_id, frame, detections)
         annotated_jpeg = _encode_stream_jpeg(annotated_view, jpeg_quality)
-        clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+        if cached_clean_jpeg is None:
+            clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+        else:
+            clean_jpeg = cached_clean_jpeg
+            clean_jpeg_encoded = False
     else:
         clean_view = _resize_for_stream(frame)
         clean_height, clean_width = clean_view.shape[:2]
@@ -407,11 +414,28 @@ def _publish_stream_frame(
         else:
             annotated_view = cv2.resize(source_annotated, (clean_width, clean_height))
         annotated_jpeg = _encode_stream_jpeg(annotated_view, jpeg_quality)
-        clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+        if cached_clean_jpeg is None:
+            clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+        else:
+            clean_jpeg = cached_clean_jpeg
+            clean_jpeg_encoded = False
     state.camera_frames[camera_id] = annotated_jpeg
     state.camera_clean_frames[camera_id] = clean_jpeg
     state.camera_frame_updated_at[camera_id] = time.time()
     stream_fanout.publish(camera_id, annotated_jpeg)
+    return clean_jpeg, clean_jpeg_encoded
+
+
+def _stream_clean_cache_due(
+    cached_clean_jpeg: bytes | None,
+    last_encoded_at: float,
+    now: float,
+) -> bool:
+    return (
+        cached_clean_jpeg is None
+        or last_encoded_at <= 0.0
+        or now - last_encoded_at >= STREAM_CLEAN_CACHE_MAX_AGE_SECONDS
+    )
 
 
 def _clear_camera_observation(camera_id: str) -> None:
@@ -2351,8 +2375,10 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         )
         last_stream_checked_at = 0.0
         last_stream_published_at = 0.0
+        last_clean_stream_encoded_at = 0.0
         stream_had_subscribers = False
         last_stream_signature = None
+        cached_clean_stream_jpeg = None
         last_annotated = None
         last_inference_signature = None
         last_inference_submitted_at = None
@@ -2498,8 +2524,16 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         last_annotated,
                         execution_plan,
                     )
+                    refresh_clean_stream_cache = _stream_clean_cache_due(
+                        cached_clean_stream_jpeg,
+                        last_clean_stream_encoded_at,
+                        stream_now,
+                    )
                     try:
-                        _publish_stream_frame(
+                        (
+                            cached_clean_stream_jpeg,
+                            clean_stream_jpeg_encoded,
+                        ) = _publish_stream_frame(
                             camera_id,
                             frame,
                             detections,
@@ -2510,11 +2544,18 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                 or bool(detections)
                                 or source_annotated is not None
                             ),
+                            cached_clean_jpeg=(
+                                None
+                                if refresh_clean_stream_cache
+                                else cached_clean_stream_jpeg
+                            ),
                         )
                     except Exception:
                         logger.exception("Stream frame encoding failed", extra={"camera_id": camera_id})
                     else:
                         last_stream_published_at = stream_now
+                        if clean_stream_jpeg_encoded:
+                            last_clean_stream_encoded_at = stream_now
                         if stream_signature is not None:
                             last_stream_signature = stream_signature
                 now = time.monotonic()

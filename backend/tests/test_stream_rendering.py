@@ -268,6 +268,44 @@ def test_publish_stream_frame_notifies_fanout_after_both_caches_update(monkeypat
     ]
 
 
+def test_publish_stream_frame_reuses_fresh_clean_cache(monkeypatch):
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    encode_calls = []
+
+    monkeypatch.setattr(
+        video_processing,
+        "_render_stream_views",
+        lambda *_args: (frame, frame),
+    )
+
+    def encode_annotated(_frame, _jpeg_quality):
+        encode_calls.append(True)
+        return b"new-annotated"
+
+    monkeypatch.setattr(video_processing, "_encode_stream_jpeg", encode_annotated)
+
+    clean_jpeg, clean_encoded = video_processing._publish_stream_frame(
+        "cam1",
+        frame,
+        [],
+        jpeg_quality=70,
+        cached_clean_jpeg=b"cached-clean",
+    )
+
+    assert encode_calls == [True]
+    assert clean_jpeg == b"cached-clean"
+    assert clean_encoded is False
+    assert state.camera_frames["cam1"] == b"new-annotated"
+    assert state.camera_clean_frames["cam1"] == b"cached-clean"
+
+
+def test_stream_clean_cache_refreshes_at_one_second():
+    assert video_processing._stream_clean_cache_due(None, 10.0, 10.25) is True
+    assert video_processing._stream_clean_cache_due(b"clean", 0.0, 10.25) is True
+    assert video_processing._stream_clean_cache_due(b"clean", 10.0, 10.99) is False
+    assert video_processing._stream_clean_cache_due(b"clean", 10.0, 11.0) is True
+
+
 def test_idle_empty_publication_encodes_clean_frame_once(monkeypatch):
     frame = np.zeros((900, 1600, 3), dtype=np.uint8)
     encode_calls = []
@@ -289,15 +327,18 @@ def test_idle_empty_publication_encodes_clean_frame_once(monkeypatch):
         lambda camera_id, jpeg: publications.append((camera_id, jpeg)),
     )
 
-    video_processing._publish_stream_frame(
+    clean_jpeg, clean_encoded = video_processing._publish_stream_frame(
         "cam1",
         frame,
         [],
         jpeg_quality=70,
         annotation_required=False,
+        cached_clean_jpeg=b"stale-clean",
     )
 
     assert encode_calls == [((480, 854, 3), 70)]
+    assert clean_jpeg == b"shared-clean"
+    assert clean_encoded is True
     assert state.camera_frames["cam1"] == b"shared-clean"
     assert state.camera_clean_frames["cam1"] == b"shared-clean"
     assert publications == [("cam1", b"shared-clean")]
