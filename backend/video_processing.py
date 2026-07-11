@@ -1880,53 +1880,6 @@ def _is_live_frame_fresh(camera_id: str) -> bool:
     return frame_bytes is not None and age is not None and age <= state.CAMERA_FRAME_STALE_SECONDS
 
 
-_STATUS_FRAME_CACHE: dict[tuple[str, str], bytes] = {}
-
-
-def _status_frame(camera_id: str, status: str, *, jpeg_quality: int = 70) -> bytes:
-    cache_key = (camera_id, status)
-    cached = _STATUS_FRAME_CACHE.get(cache_key)
-    if cached:
-        return cached
-    image = np.zeros((480, 854, 3), dtype=np.uint8)
-    image[:] = (28, 31, 36)
-    label = status.replace("_", " ").title()
-    title = f"{camera_id} - {label}"
-    subtitle = "Waiting for fresh camera frames"
-    cv2.putText(image, title, (36, 216), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (236, 239, 244), 2, cv2.LINE_AA)
-    cv2.putText(image, subtitle, (36, 262), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (156, 163, 175), 2, cv2.LINE_AA)
-    _, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-    encoded = buffer.tobytes()
-    _STATUS_FRAME_CACHE[cache_key] = encoded
-    return encoded
-
-
-def _publish_live_frame(camera_id: str, frame: np.ndarray, *, jpeg_quality: int) -> None:
-    """Publish the newest camera frame without waiting for model inference."""
-    detections = [
-        detection
-        for detection in state.camera_detections.get(camera_id, [])
-        if isinstance(detection.get("bbox"), list) and len(detection["bbox"]) == 4
-    ]
-    try:
-        annotated, _ = draw_detection_records(frame, detections, camera_id, show_overlay=False)
-    except Exception:
-        logger.debug("Could not draw cached detections on live frame", extra={"camera_id": camera_id}, exc_info=True)
-        annotated = frame.copy()
-    annotated = apply_camera_overlay(
-        annotated,
-        camera_id=camera_id,
-        detection_count=len(detections),
-    )
-    clean_resized = _resize_for_stream(frame)
-    annotated_resized = _resize_for_stream(annotated)
-    _, buffer = cv2.imencode(".jpg", annotated_resized, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-    state.camera_frames[camera_id] = buffer.tobytes()
-    _, clean_buffer = cv2.imencode(".jpg", clean_resized, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-    state.camera_clean_frames[camera_id] = clean_buffer.tobytes()
-    state.camera_frame_updated_at[camera_id] = time.time()
-
-
 def _run_detection_job(
     camera_id: str,
     frame: np.ndarray,
