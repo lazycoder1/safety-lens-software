@@ -481,7 +481,7 @@ def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
     monkeypatch.setattr(video_processing, "check_yoloe_violations", fake_check_yoloe_violations)
     monkeypatch.setattr(video_processing, "check_violations", lambda detections, camera_id: [])
 
-    video_processing._process_detection_observation(
+    confirmation_required = video_processing._process_detection_observation(
         "cam_candidate",
         np.zeros((40, 60, 3), dtype=np.uint8),
         None,
@@ -510,6 +510,7 @@ def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
             "frame_h": 40,
         }
     ]
+    assert confirmation_required is False
 
 
 def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
@@ -527,6 +528,7 @@ def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
     ]
     encode_calls = []
     alerts = []
+    active_violations = set()
 
     monkeypatch.setattr(video_processing, "check_violations", lambda *_args: candidates)
     monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args: [])
@@ -557,7 +559,7 @@ def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
         lambda **kwargs: alerts.append(kwargs) or {"id": f"alert-{len(alerts)}"},
     )
 
-    video_processing._process_detection_observation(
+    confirmation_required = video_processing._process_detection_observation(
         "cam1",
         np.zeros((540, 960, 3), dtype=np.uint8),
         None,
@@ -567,7 +569,7 @@ def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
         {},
         {"global": {"jpeg_quality": 70}},
         last_alert_by_rule={},
-        active_violations=set(),
+        active_violations=active_violations,
         violation_window={},
         alert_cooldown=30,
         window_size=3,
@@ -577,6 +579,8 @@ def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
     assert [alert["rule"] for alert in alerts] == ["Missing Helmet", "Missing Vest"]
     assert {alert["snapshot_jpeg"] for alert in alerts} == {b"annotated"}
     assert {alert["clean_snapshot_jpeg"] for alert in alerts} == {b"clean"}
+    assert active_violations == {"Missing Helmet", "Missing Vest"}
+    assert confirmation_required is True
 
 
 def test_failed_alert_submission_does_not_activate_or_cool_down_incident(monkeypatch):

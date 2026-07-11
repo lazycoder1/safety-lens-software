@@ -183,20 +183,20 @@ def _stream_publication_due(
     return due, has_subscribers
 
 
-def _empty_scene_inference_decision(
+def _motion_adaptive_inference_decision(
     frame: np.ndarray,
     previous_signature: np.ndarray | None,
     *,
     last_submitted_at: float | None,
     now: float,
-    detections: list[dict],
+    alert_confirmation_required: bool,
 ) -> tuple[bool, np.ndarray, float]:
-    """Skip unchanged empty-scene frames, while forcing a one-second refresh."""
+    """Skip unchanged frames without slowing alert confirmation or clearing."""
     signature = _frame_change_signature(frame)
     changed_fraction = _signature_changed_fraction(signature, previous_signature)
     if previous_signature is None:
         return True, signature, changed_fraction
-    if detections:
+    if alert_confirmation_required:
         return True, signature, changed_fraction
     if (
         last_submitted_at is None
@@ -919,6 +919,16 @@ def _record_empty_violation_observation(
         if sum(violation_window[rule_key]) == 0:
             violation_window.pop(rule_key, None)
             active_violations.discard(rule_key)
+
+
+def _alert_confirmation_required(
+    active_violations: set[str],
+    violation_window: dict[str, list[bool]],
+) -> bool:
+    """Keep inference full-rate while an incident is confirming or clearing."""
+    return bool(active_violations) or any(
+        any(observations) for observations in violation_window.values()
+    )
 
 
 def _normalize_detection_batch(detections: list[dict], model_family: str) -> list[dict]:
@@ -1680,7 +1690,7 @@ def _run_face_recognition(
 def _publish_camera_connection_health(
     camera_id: str,
     tracker: CameraConnectionTracker,
-) -> None:
+) -> bool:
     state.update_camera_connection_health(
         camera_id,
         outage_active=tracker.outage_active,
@@ -2252,6 +2262,7 @@ def _process_detection_observation(
             fresh_detection_evaluated=True,
             fresh_fall_evaluated=fresh_fall_evaluated,
         )
+    return _alert_confirmation_required(active_violations, violation_window)
 
 
 def video_processor(camera_id: str, stop_event: threading.Event):
@@ -2384,6 +2395,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         last_inference_submitted_at = None
         pending_inference_signature = None
         pending_inference_submitted_at = None
+        alert_confirmation_required = False
         received_frame = False
         try:
             while cap.isOpened() and not stop_event.is_set():
@@ -2471,7 +2483,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             schedule_state=result["schedule_state"],
                             model_invocations=result["model_invocations"],
                         )
-                        _process_detection_observation(
+                        alert_confirmation_required = _process_detection_observation(
                             camera_id,
                             result["frame"],
                             result.get("annotated_frame"),
@@ -2568,12 +2580,12 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     )
                 if pending_inference is None and now >= next_inference_at:
                     should_submit, inference_signature, _changed_fraction = (
-                        _empty_scene_inference_decision(
+                        _motion_adaptive_inference_decision(
                             frame,
                             last_inference_signature,
                             last_submitted_at=last_inference_submitted_at,
                             now=now,
-                            detections=state.camera_detections.get(camera_id, []),
+                            alert_confirmation_required=alert_confirmation_required,
                         )
                     )
                     if not should_submit:

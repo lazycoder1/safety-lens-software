@@ -118,21 +118,21 @@ def test_idle_stream_schedule_cuts_publication_work_by_three_quarters(monkeypatc
     assert publication_count(active=False) == 8
 
 
-def test_empty_scene_inference_skips_unchanged_frame_before_refresh():
+def test_motion_adaptive_inference_skips_unchanged_frame_before_refresh():
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    first_due, signature, _score = video_processing._empty_scene_inference_decision(
+    first_due, signature, _score = video_processing._motion_adaptive_inference_decision(
         frame,
         None,
         last_submitted_at=None,
         now=10.0,
-        detections=[],
+        alert_confirmation_required=False,
     )
-    next_due, _next_signature, score = video_processing._empty_scene_inference_decision(
+    next_due, _next_signature, score = video_processing._motion_adaptive_inference_decision(
         frame.copy(),
         signature,
         last_submitted_at=10.0,
         now=10.25,
-        detections=[],
+        alert_confirmation_required=False,
     )
 
     assert first_due is True
@@ -140,57 +140,64 @@ def test_empty_scene_inference_skips_unchanged_frame_before_refresh():
     assert score == 0.0
 
 
-def test_empty_scene_inference_runs_on_small_visual_change():
+def test_motion_adaptive_inference_runs_on_small_visual_change():
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    _due, signature, _score = video_processing._empty_scene_inference_decision(
+    _due, signature, _score = video_processing._motion_adaptive_inference_decision(
         frame,
         None,
         last_submitted_at=None,
         now=10.0,
-        detections=[],
+        alert_confirmation_required=False,
     )
     changed = frame.copy()
     changed[70:110, 140:180] = 255
 
-    due, _signature, score = video_processing._empty_scene_inference_decision(
+    due, _signature, score = video_processing._motion_adaptive_inference_decision(
         changed,
         signature,
         last_submitted_at=10.0,
         now=10.25,
-        detections=[],
+        alert_confirmation_required=False,
     )
 
     assert due is True
     assert score > video_processing.EMPTY_SCENE_CHANGED_FRACTION
 
 
-def test_empty_scene_inference_forces_refresh_and_keeps_active_scenes_full_rate():
+def test_motion_adaptive_inference_forces_refresh_and_alert_confirmation():
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
-    _due, signature, _score = video_processing._empty_scene_inference_decision(
+    _due, signature, _score = video_processing._motion_adaptive_inference_decision(
         frame,
         None,
         last_submitted_at=None,
         now=10.0,
-        detections=[],
+        alert_confirmation_required=False,
     )
 
-    refresh_due, _signature, _score = video_processing._empty_scene_inference_decision(
+    refresh_due, _signature, _score = video_processing._motion_adaptive_inference_decision(
         frame,
         signature,
         last_submitted_at=10.0,
         now=11.0,
-        detections=[],
+        alert_confirmation_required=False,
     )
-    active_due, _signature, _score = video_processing._empty_scene_inference_decision(
+    confirmation_due, _signature, _score = video_processing._motion_adaptive_inference_decision(
         frame,
         signature,
         last_submitted_at=10.0,
         now=10.25,
-        detections=[{"class": "person"}],
+        alert_confirmation_required=True,
     )
 
     assert refresh_due is True
-    assert active_due is True
+    assert confirmation_due is True
+
+
+def test_alert_confirmation_required_tracks_positive_and_active_windows():
+    assert video_processing._alert_confirmation_required(set(), {}) is False
+    assert video_processing._alert_confirmation_required(set(), {"rule": [False]}) is False
+    assert video_processing._alert_confirmation_required(set(), {"rule": [False, True]}) is True
+    assert video_processing._alert_confirmation_required({"rule"}, {"rule": []}) is True
 
 
 def test_active_stream_skips_unchanged_empty_frame_before_heartbeat():
