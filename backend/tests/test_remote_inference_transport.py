@@ -74,6 +74,39 @@ def test_edge_uses_raw_jpeg_transport(monkeypatch):
     assert detections is expected
 
 
+def test_edge_resizes_oversized_remote_frame_and_restores_source_coordinates(monkeypatch):
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    captured = {}
+    remote_records = [
+        {"class_id": 0, "confidence": 0.9, "bbox": [100, 50, 900, 500]}
+    ]
+
+    def fake_remote_post_jpeg(path, frame_jpeg, *, params):
+        captured.update(path=path, frame_jpeg=frame_jpeg, params=params)
+        return {"detections": remote_records}
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(model_manager, "_remote_post_jpeg", fake_remote_post_jpeg)
+
+    detections = model_manager.predict_records(
+        "coco_primary",
+        frame,
+        conf=0.25,
+        device="cuda",
+        imgsz=960,
+    )
+
+    decoded = cv2.imdecode(
+        np.frombuffer(captured["frame_jpeg"], np.uint8),
+        cv2.IMREAD_COLOR,
+    )
+    assert decoded.shape == (540, 960, 3)
+    assert detections == [
+        {"class_id": 0, "confidence": 0.9, "bbox": [200, 100, 1800, 1000]}
+    ]
+    assert remote_records[0]["bbox"] == [100, 50, 900, 500]
+
+
 def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
     frame = np.zeros((90, 160, 3), dtype=np.uint8)
     captured = {}

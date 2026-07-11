@@ -1855,6 +1855,61 @@ def _remote_predict_records_jpeg(
     return _remote_post("/api/infer", payload).get("detections", [])
 
 
+def _prepare_remote_inference_jpeg(frame, imgsz: int) -> tuple[bytes, tuple[int, ...]]:
+    """Encode no more pixels than the remote model can consume."""
+    import cv2
+
+    source_shape = frame.shape
+    source_height, source_width = source_shape[:2]
+    maximum_dimension = max(source_height, source_width)
+    target_dimension = max(1, int(imgsz))
+    inference_frame = frame
+    if maximum_dimension > target_dimension:
+        scale = target_dimension / maximum_dimension
+        inference_frame = cv2.resize(
+            frame,
+            (
+                max(1, round(source_width * scale)),
+                max(1, round(source_height * scale)),
+            ),
+        )
+    ok, buffer = cv2.imencode(
+        ".jpg",
+        inference_frame,
+        [cv2.IMWRITE_JPEG_QUALITY, 85],
+    )
+    if not ok:
+        raise RuntimeError("Could not encode frame for remote inference")
+    return buffer.tobytes(), inference_frame.shape
+
+
+def _scale_remote_records_to_source(
+    records: list[dict[str, Any]],
+    source_shape: tuple[int, ...],
+    inference_shape: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    if source_shape[:2] == inference_shape[:2]:
+        return records
+    source_height, source_width = source_shape[:2]
+    inference_height, inference_width = inference_shape[:2]
+    scale_x = source_width / inference_width
+    scale_y = source_height / inference_height
+    scaled: list[dict[str, Any]] = []
+    for record in records:
+        item = dict(record)
+        bbox = item.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            x1, y1, x2, y2 = bbox
+            item["bbox"] = [
+                min(source_width, max(0, round(float(x1) * scale_x))),
+                min(source_height, max(0, round(float(y1) * scale_y))),
+                min(source_width, max(0, round(float(x2) * scale_x))),
+                min(source_height, max(0, round(float(y2) * scale_y))),
+            ]
+        scaled.append(item)
+    return scaled
+
+
 def predict_records(
     model_key: ModelKey,
     frame,
@@ -1865,17 +1920,19 @@ def predict_records(
     classes: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     if is_remote_inference_enabled():
-        import cv2
-        ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ok:
-            raise RuntimeError("Could not encode frame for remote inference")
-        return _remote_predict_records_jpeg(
+        frame_jpeg, inference_shape = _prepare_remote_inference_jpeg(frame, imgsz)
+        records = _remote_predict_records_jpeg(
             model_key,
-            buffer.tobytes(),
+            frame_jpeg,
             conf=conf,
             device=device,
             imgsz=imgsz,
             classes=classes,
+        )
+        return _scale_remote_records_to_source(
+            records,
+            frame.shape,
+            inference_shape,
         )
 
     records = _records_from_results(
