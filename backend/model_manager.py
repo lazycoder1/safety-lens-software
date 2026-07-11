@@ -44,6 +44,8 @@ _REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="remote-model-pair",
 )
+_REMOTE_JPEG_QUALITY = 85
+_RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
 _REMOTE_MODEL_CACHE_LOCK = threading.RLock()
 _REMOTE_MODEL_CACHE: dict[str, Any] = {
@@ -1860,7 +1862,12 @@ def _remote_predict_records_jpeg(
     return _remote_post("/api/infer", payload).get("detections", [])
 
 
-def _prepare_remote_inference_jpeg(frame, imgsz: int) -> tuple[bytes, tuple[int, ...]]:
+def _prepare_remote_inference_jpeg(
+    frame,
+    imgsz: int,
+    *,
+    jpeg_quality: int = _REMOTE_JPEG_QUALITY,
+) -> tuple[bytes, tuple[int, ...]]:
     """Encode no more pixels than the remote model can consume."""
     import cv2
 
@@ -1881,7 +1888,7 @@ def _prepare_remote_inference_jpeg(frame, imgsz: int) -> tuple[bytes, tuple[int,
     ok, buffer = cv2.imencode(
         ".jpg",
         inference_frame,
-        [cv2.IMWRITE_JPEG_QUALITY, 85],
+        [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
     )
     if not ok:
         raise RuntimeError("Could not encode frame for remote inference")
@@ -2002,12 +2009,20 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
             for item in normalized
         }
 
-    import cv2
-
-    ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ok:
-        raise RuntimeError("Could not encode frame for remote inference")
-    frame_jpeg = buffer.tobytes()
+    maximum_imgsz = max(item["imgsz"] for item in normalized)
+    resize_required = max(frame.shape[:2]) > maximum_imgsz
+    # Preserve the existing byte path for camera frames that already fit.
+    # Oversized grouped frames use the smallest higher quality that retained
+    # operational class presence across the Jetson validation corpus.
+    frame_jpeg, inference_shape = _prepare_remote_inference_jpeg(
+        frame,
+        maximum_imgsz,
+        jpeg_quality=(
+            _RESIZED_GROUPED_REMOTE_JPEG_QUALITY
+            if resize_required
+            else _REMOTE_JPEG_QUALITY
+        ),
+    )
     if len(normalized) == 2:
         futures = [
             _REMOTE_PAIR_EXECUTOR.submit(
@@ -2022,7 +2037,11 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
             for item in normalized
         ]
         return {
-            item["request_id"]: future.result()
+            item["request_id"]: _scale_remote_records_to_source(
+                future.result(),
+                frame.shape,
+                inference_shape,
+            )
             for item, future in zip(normalized, futures)
         }
     response = _remote_post_jpeg_batch(
@@ -2034,16 +2053,27 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
         results = response.get("results")
         if not isinstance(results, dict) or set(results) != request_ids:
             raise RuntimeError("Model server returned an incomplete inference batch")
-        return results
+        return {
+            request_id: _scale_remote_records_to_source(
+                records,
+                frame.shape,
+                inference_shape,
+            )
+            for request_id, records in results.items()
+        }
 
     return {
-        item["request_id"]: _remote_predict_records_jpeg(
-            item["model_key"],
-            frame_jpeg,
-            conf=item["conf"],
-            device=item["device"],
-            imgsz=item["imgsz"],
-            classes=item["classes"],
+        item["request_id"]: _scale_remote_records_to_source(
+            _remote_predict_records_jpeg(
+                item["model_key"],
+                frame_jpeg,
+                conf=item["conf"],
+                device=item["device"],
+                imgsz=item["imgsz"],
+                classes=item["classes"],
+            ),
+            frame.shape,
+            inference_shape,
         )
         for item in normalized
     }

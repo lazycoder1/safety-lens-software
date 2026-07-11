@@ -137,6 +137,7 @@ def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
 def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
     jpeg_objects = []
+    encode_parameters = []
     encode_calls = 0
     barrier = threading.Barrier(2)
     real_imencode = cv2.imencode
@@ -144,6 +145,7 @@ def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
     def counted_imencode(*args, **kwargs):
         nonlocal encode_calls
         encode_calls += 1
+        encode_parameters.append(args[2])
         return real_imencode(*args, **kwargs)
 
     def fake_single(model_key, frame_jpeg, **_kwargs):
@@ -161,11 +163,45 @@ def test_edge_runs_model_pairs_concurrently_with_one_jpeg_encode(monkeypatch):
     ])
 
     assert encode_calls == 1
+    assert encode_parameters == [[cv2.IMWRITE_JPEG_QUALITY, 85]]
     assert jpeg_objects[0] is jpeg_objects[1]
     assert results == {
         "coco": [{"model_key": "coco_primary"}],
         "ppe": [{"model_key": "ppe_specialist"}],
     }
+
+
+def test_edge_bounds_grouped_transport_and_restores_source_coordinates(monkeypatch):
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    decoded_shapes = []
+    encode_parameters = []
+    real_imencode = cv2.imencode
+
+    def capture_imencode(*args, **kwargs):
+        encode_parameters.append(args[2])
+        return real_imencode(*args, **kwargs)
+
+    def fake_single(model_key, frame_jpeg, **_kwargs):
+        decoded = cv2.imdecode(
+            np.frombuffer(frame_jpeg, np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+        decoded_shapes.append(decoded.shape)
+        return [{"model_key": model_key, "bbox": [100, 50, 900, 500]}]
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(cv2, "imencode", capture_imencode)
+    monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
+
+    results = model_manager.predict_record_batches(frame, [
+        {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
+        {"request_id": "ppe", "model_key": "ppe_specialist", "imgsz": 960},
+    ])
+
+    assert encode_parameters == [[cv2.IMWRITE_JPEG_QUALITY, 90]]
+    assert decoded_shapes == [(540, 960, 3), (540, 960, 3)]
+    assert results["coco"][0]["bbox"] == [200, 100, 1800, 1000]
+    assert results["ppe"][0]["bbox"] == [200, 100, 1800, 1000]
 
 
 def test_edge_uses_batch_route_for_more_than_two_models(monkeypatch):
