@@ -1009,11 +1009,12 @@ def _rule_confidence_for_model_family(camera_id: str, model_family: str, default
 def _capabilities_for_model_key(execution_plan: dict, model_key: str) -> list[str]:
     overrides = execution_plan.get("capability_model_overrides") or {}
     if not isinstance(overrides, dict):
-        return []
+        overrides = {}
     return [
         capability
         for capability in execution_plan.get("capabilities") or []
-        if overrides.get(capability) == model_key
+        if model_key
+        in required_model_keys_for_capabilities([capability], overrides)
     ]
 
 
@@ -1125,6 +1126,46 @@ def _scheduled_execution_plan(execution_plan: dict, schedule_state: dict) -> dic
     ) if scheduled["run_yoloe_long_tail"] else []
     scheduled["schedule_state"] = schedule_state
     return scheduled
+
+
+def _context_gated_execution_plan(
+    execution_plan: dict,
+    previous_detections: list[dict],
+) -> dict:
+    """Skip rider-only PPE until COCO has fresh rider-vehicle context."""
+    if not (
+        execution_plan.get("run_coco_primary")
+        and execution_plan.get("run_ppe_specialist")
+    ):
+        return execution_plan
+    ppe_capabilities = set(
+        _capabilities_for_model_key(execution_plan, "ppe_specialist")
+    )
+    if ppe_capabilities != {"rider_helmet_required"}:
+        return execution_plan
+    has_rider_vehicle = any(
+        detection.get("model_family") == "coco_primary"
+        and str(detection.get("class") or "").lower() in {
+            "motorcycle",
+            "motorbike",
+            "scooter",
+        }
+        for detection in previous_detections
+    )
+    if has_rider_vehicle:
+        return execution_plan
+
+    gated = deepcopy(execution_plan)
+    gated["run_ppe_specialist"] = False
+    gated["ppe_prompt_terms"] = []
+    gated["required_model_keys"] = [
+        model_key
+        for model_key in gated.get("required_model_keys", [])
+        if model_key != "ppe_specialist"
+    ]
+    gated["runtime_suppressed_model_keys"] = ["ppe_specialist"]
+    gated["runtime_suppression_reason"] = "awaiting_rider_vehicle_context"
+    return gated
 
 
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
@@ -2651,12 +2692,16 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             now=now + inference_interval / 2,
                         )
                     else:
+                        runtime_plan = _context_gated_execution_plan(
+                            scheduled_plan,
+                            state.camera_detections.get(camera_id, []),
+                        )
                         try:
                             pending_inference = inference_executor.submit(
                                 _run_detection_job,
                                 camera_id,
                                 frame.copy(),
-                                scheduled_plan,
+                                runtime_plan,
                                 schedule_state,
                                 current_cam,
                                 current_cfg,

@@ -3,6 +3,67 @@ import numpy as np
 import video_processing
 
 
+def _rider_plan():
+    return {
+        "capabilities": ["animal_presence", "rider_helmet_required"],
+        "required_model_keys": ["coco_primary", "ppe_specialist"],
+        "run_coco_primary": True,
+        "run_ppe_specialist": True,
+        "ppe_prompt_terms": ["motorcycle helmet", "rider helmet", "helmet"],
+    }
+
+
+def test_rider_only_ppe_waits_for_coco_vehicle_context():
+    plan = _rider_plan()
+
+    gated = video_processing._context_gated_execution_plan(plan, [])
+
+    assert gated is not plan
+    assert gated["run_coco_primary"] is True
+    assert gated["run_ppe_specialist"] is False
+    assert gated["required_model_keys"] == ["coco_primary"]
+    assert gated["ppe_prompt_terms"] == []
+    assert gated["runtime_suppression_reason"] == "awaiting_rider_vehicle_context"
+    assert plan["run_ppe_specialist"] is True
+
+
+def test_rider_only_ppe_runs_after_coco_motorcycle_detection():
+    plan = _rider_plan()
+
+    result = video_processing._context_gated_execution_plan(
+        plan,
+        [
+            {
+                "class": "motorcycle",
+                "model_family": "coco_primary",
+                "confidence": 0.9,
+            }
+        ],
+    )
+
+    assert result is plan
+
+
+def test_rider_gate_ignores_vehicle_label_from_non_coco_model():
+    plan = _rider_plan()
+
+    gated = video_processing._context_gated_execution_plan(
+        plan,
+        [{"class": "motorcycle", "model_family": "ppe_specialist"}],
+    )
+
+    assert gated["run_ppe_specialist"] is False
+
+
+def test_rider_gate_does_not_suppress_other_ppe_capabilities():
+    plan = _rider_plan()
+    plan["capabilities"].append("helmet_required")
+
+    result = video_processing._context_gated_execution_plan(plan, [])
+
+    assert result is plan
+
+
 def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch):
     captured = {}
 
