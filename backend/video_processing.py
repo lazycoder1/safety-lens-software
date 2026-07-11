@@ -88,6 +88,15 @@ def _is_executor_shutdown_error(exc: RuntimeError) -> bool:
         or "cannot schedule new futures after interpreter shutdown" in message
     )
 
+
+def _drain_inference_executor(executor: ThreadPoolExecutor, pending_inference) -> None:
+    """Prevent reconnects from leaving an uncancellable inference job behind."""
+    if pending_inference is not None:
+        pending_inference.cancel()
+    # Future.cancel() cannot stop a task that is already running. Waiting here
+    # keeps a flapping camera from accumulating one model request per reconnect.
+    executor.shutdown(wait=True, cancel_futures=True)
+
 _COCO_CLASS_TO_CAPABILITIES = {
     "person": ["person_presence", "zone_intrusion"],
     "cell phone": ["mobile_phone"],
@@ -2431,9 +2440,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                 if sleep_time > 0:
                     time.sleep(sleep_time)
         finally:
-            if pending_inference:
-                pending_inference.cancel()
-            inference_executor.shutdown(wait=False, cancel_futures=True)
+            _drain_inference_executor(inference_executor, pending_inference)
 
         _clear_camera_observation(camera_id)
         active_violations.clear()

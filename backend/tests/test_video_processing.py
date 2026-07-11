@@ -20,6 +20,26 @@ def test_executor_shutdown_error_classifier_is_narrow():
     assert not video_processing._is_executor_shutdown_error(RuntimeError("camera inference submit failed"))
 
 
+def test_drain_inference_executor_waits_for_uncancellable_work():
+    calls = []
+
+    class PendingInference:
+        def cancel(self):
+            calls.append(("cancel",))
+            return False
+
+    class InferenceExecutor:
+        def shutdown(self, **kwargs):
+            calls.append(("shutdown", kwargs))
+
+    video_processing._drain_inference_executor(InferenceExecutor(), PendingInference())
+
+    assert calls == [
+        ("cancel",),
+        ("shutdown", {"wait": True, "cancel_futures": True}),
+    ]
+
+
 class _FakeCapture:
     def __init__(self, frames):
         self.frames = list(frames)
