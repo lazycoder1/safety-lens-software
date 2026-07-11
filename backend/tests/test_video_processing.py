@@ -110,6 +110,94 @@ def test_face_recognition_skips_snapshot_encoding_during_log_cooldown(monkeypatc
     assert len(detections) == 1
 
 
+def test_plate_recognition_skips_snapshot_encoding_without_candidates(monkeypatch):
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_plate_records",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        video_processing.cv2,
+        "imencode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty plate analysis encoded a snapshot")
+        ),
+    )
+
+    annotated, detections = video_processing._run_plate_recognition(
+        "cam1",
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        {"name": "Gate"},
+        {},
+        [],
+        conf=0.25,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert annotated.shape == (120, 200, 3)
+    assert detections == []
+
+
+def test_plate_recognition_reuses_one_snapshot_for_multiple_reads(monkeypatch):
+    candidates = [
+        {
+            "plateText": plate,
+            "normalizedPlate": plate,
+            "bbox": bbox,
+            "confidence": 0.9,
+            "qualityReason": "OCR confidence is low",
+        }
+        for plate, bbox in (
+            ("KA01AA1111", {"x1": 10, "y1": 20, "x2": 70, "y2": 60}),
+            ("KA01AA2222", {"x1": 80, "y1": 30, "x2": 150, "y2": 75}),
+        )
+    ]
+    encoded_shapes = []
+    logged = []
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_plate_records",
+        lambda *_args, **_kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        video_processing.plate_store,
+        "normalize_plate_text",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        video_processing.plate_store,
+        "log_plate_read",
+        lambda **kwargs: logged.append(kwargs),
+    )
+
+    def fake_encode(_extension, image, _options):
+        encoded_shapes.append(image.shape)
+        return True, np.frombuffer(b"jpeg", dtype=np.uint8)
+
+    monkeypatch.setattr(video_processing.cv2, "imencode", fake_encode)
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+
+    _annotated, detections = video_processing._run_plate_recognition(
+        "cam1",
+        frame,
+        frame.copy(),
+        {"name": "Gate"},
+        {},
+        [],
+        conf=0.25,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert len(detections) == 2
+    assert encoded_shapes.count(frame.shape) == 1
+    assert len(encoded_shapes) == 3
+    assert len(logged) == 2
+    assert all(item["snapshot_jpeg"] == b"jpeg" for item in logged)
+
+
 def test_executor_shutdown_error_classifier_is_narrow():
     assert video_processing._is_executor_shutdown_error(
         RuntimeError("cannot schedule new futures after shutdown")

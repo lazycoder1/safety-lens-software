@@ -1804,10 +1804,10 @@ def _run_plate_recognition(
         logger.exception("Plate recognition failed", extra={"camera_id": camera_id})
         return annotated, []
 
-    _, snapshot_buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    snapshot_jpeg = snapshot_buffer.tobytes()
     now = time.time()
     detections: list[dict] = []
+    snapshot_jpeg: bytes | None = None
+    snapshot_encode_attempted = False
     frame_h, frame_w = frame.shape[:2]
 
     for candidate in candidates:
@@ -1864,6 +1864,21 @@ def _run_plate_recognition(
         if now - last_plate_log_by_key.get(dedupe_key, 0) < PLATE_LOG_COOLDOWN_SECONDS:
             continue
         last_plate_log_by_key[dedupe_key] = now
+
+        if not snapshot_encode_attempted:
+            snapshot_encode_attempted = True
+            snapshot_ok, snapshot_buffer = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, 85],
+            )
+            if snapshot_ok:
+                snapshot_jpeg = snapshot_buffer.tobytes()
+            else:
+                logger.warning(
+                    "Plate read snapshot encoding failed; persisting without snapshot",
+                    extra={"camera_id": camera_id},
+                )
 
         crop_jpeg = None
         crop = frame[y1:y2, x1:x2]
