@@ -41,7 +41,7 @@ TMP_MODELS_ROOT = Path(tempfile.gettempdir()) / "rakshak-lens-models"
 _JOB_POLL_FINAL_STATES = {"ready", "failed"}
 _REMOTE_SESSION_LOCAL = threading.local()
 _REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
+    max_workers=4,
     thread_name_prefix="remote-model-pair",
 )
 _REMOTE_JPEG_QUALITY = 85
