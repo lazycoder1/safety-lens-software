@@ -61,7 +61,7 @@ class InferenceBatchItem(BaseModel):
     conf: float = Field(default=0.35, ge=0.0, le=1.0)
     device: str = "cuda"
     imgsz: int = Field(default=960, gt=0)
-    classes: list[str] = Field(default_factory=list)
+    classes: List[str] = Field(default_factory=list)
 
 
 class ModelInstallRequest(BaseModel):
@@ -101,8 +101,8 @@ def _run_inference_frame(
     conf: float,
     device: str,
     imgsz: int,
-    classes: list[str],
-) -> dict[str, Any]:
+    classes: List[str],
+) -> Dict[str, Any]:
     if model_key not in model_manager.MODEL_DEFINITIONS:
         raise HTTPException(status_code=404, detail=f"Unknown model key: {model_key}")
 
@@ -129,8 +129,8 @@ def _run_inference(
     conf: float,
     device: str,
     imgsz: int,
-    classes: list[str],
-) -> dict[str, Any]:
+    classes: List[str],
+) -> Dict[str, Any]:
     return _run_inference_frame(
         model_key=model_key,
         frame=_decode_frame(frame_bytes),
@@ -256,9 +256,9 @@ def infer_jpeg(
     conf: float = Query(0.35),
     device: str = Query("cuda"),
     imgsz: int = Query(960, gt=0),
-    classes: list[str] = Query(default=[]),
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
+    classes: List[str] = Query(default=[]),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     _require_model_server_token(authorization)
     return _run_inference(
         model_key=model_key,
@@ -274,8 +274,8 @@ def infer_jpeg(
 def infer_jpeg_batch(
     frame_jpeg: bytes = Body(..., media_type="image/jpeg"),
     batch_json: str = Header(..., alias="X-Rakshak-Inference-Batch"),
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
     _require_model_server_token(authorization)
     if len(batch_json) > 16_384:
         raise HTTPException(status_code=413, detail="Inference batch metadata is too large")

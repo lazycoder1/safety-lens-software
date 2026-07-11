@@ -10,6 +10,7 @@ RUN python3 -m pip install --no-cache-dir -r requirements-model-server-jetson.tx
 
 COPY backend/model_server.py ./backend/model_server.py
 COPY backend/model_manager.py ./backend/model_manager.py
+COPY backend/tensorrt_engine.py ./backend/tensorrt_engine.py
 COPY backend/logging_config.py ./backend/logging_config.py
 COPY backend/capability_registry.py ./backend/capability_registry.py
 COPY backend/constants.py ./backend/constants.py
