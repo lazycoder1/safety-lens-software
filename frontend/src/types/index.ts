@@ -52,7 +52,7 @@ export interface ModelStatus {
   active_path: string | null
   download_url: string
   warmup_behavior: string
-  status: "ready" | "not_downloaded" | "installing" | "failed"
+  status: "ready" | "not_downloaded" | "installing" | "failed" | "remote_unavailable"
   error: string | null
   job_id: string | null
   shared_asset_key: string

@@ -592,6 +592,15 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
     )
     monkeypatch.setattr(diagnostics.model_manager, "list_models", lambda: [])
     monkeypatch.setattr(
+        diagnostics.model_manager,
+        "remote_model_metadata_health",
+        lambda: {
+            "enabled": True,
+            "status": "unavailable",
+            "cache_fresh": False,
+        },
+    )
+    monkeypatch.setattr(
         diagnostics.stream_fanout,
         "stats",
         lambda _cam_id: {
@@ -629,6 +638,8 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
 
     assert snapshot["status"] == "degraded"
     assert "one or more cameras have an active connection outage" in snapshot["reasons"]
+    assert "remote model metadata unavailable" in snapshot["reasons"]
+    assert snapshot["modelMetadata"]["status"] == "unavailable"
     assert connection["outageActive"] is True
     assert connection["failureCount"] == 7
     assert connection["totalFailureCount"] == 9
@@ -783,6 +794,34 @@ def test_runtime_status_does_not_report_a_dead_registered_worker_online(monkeypa
     status = camera_runtime.derive_camera_runtime_status("cam1", {"enabled": True})
 
     assert status == "offline"
+
+
+def test_runtime_status_preserves_lifecycle_model_revalidation(monkeypatch):
+    class ExitingThread:
+        def is_alive(self):
+            return True
+
+    monkeypatch.setattr(
+        state,
+        "camera_threads",
+        {"cam1": (ExitingThread(), threading.Event())},
+    )
+    monkeypatch.setattr(state, "camera_frames", {})
+    monkeypatch.setattr(
+        state,
+        "camera_runtime_status",
+        {"cam1": "awaiting_model_install"},
+    )
+
+    status = camera_runtime.derive_camera_runtime_status(
+        "cam1",
+        {"enabled": True},
+        # Simulate an older API admission snapshot that said the model was
+        # ready before start_camera performed its defensive revalidation.
+        missing_models=False,
+    )
+
+    assert status == "awaiting_model_install"
 
 
 def test_restart_does_not_spawn_duplicate_when_worker_is_still_alive(monkeypatch):

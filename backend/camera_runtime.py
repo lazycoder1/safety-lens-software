@@ -22,12 +22,17 @@ def derive_camera_runtime_status(
         return "awaiting_model_install"
     if not camera.get("enabled", True):
         return "offline"
+    stored_status = state.camera_runtime_status.get(camera_id)
+    # A worker can publish this fail-closed state just before its thread exits.
+    # Preserve it even during that short liveness window; a successful future
+    # start replaces it with "starting" before publishing its new owner.
+    if stored_status == "awaiting_model_install":
+        return "awaiting_model_install"
     if not camera_worker_running(camera_id):
         return "offline"
     if state.camera_frames.get(camera_id) is not None:
         return "running"
 
-    stored_status = state.camera_runtime_status.get(camera_id)
     if stored_status in {"starting", "reconnecting", "stopping"}:
         return stored_status
     return "starting"

@@ -7,6 +7,7 @@ import os
 import base64
 import gc
 import json
+import queue
 import shutil
 import tempfile
 import threading
@@ -19,7 +20,17 @@ from typing import Any
 import numpy as np
 
 from capability_registry import ALL_PPE_PROMPT_TERMS, CLASS_TERM_TO_CAPABILITY, ModelKey
-from constants import MODEL_SERVER_TIMEOUT_SECONDS, MODEL_SERVER_TOKEN, MODEL_SERVER_URL, PROJECT_ROOT
+from constants import (
+    MODEL_METADATA_BREAKER_INITIAL_SECONDS,
+    MODEL_METADATA_BREAKER_MAX_SECONDS,
+    MODEL_METADATA_LOG_REMINDER_SECONDS,
+    MODEL_METADATA_TIMEOUT_SECONDS,
+    MODEL_METADATA_TTL_SECONDS,
+    MODEL_SERVER_TIMEOUT_SECONDS,
+    MODEL_SERVER_TOKEN,
+    MODEL_SERVER_URL,
+    PROJECT_ROOT,
+)
 from tensorrt_engine import validate_engine
 
 logger = logging.getLogger("safetylens.models")
@@ -136,6 +147,25 @@ _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
 _INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _ACTIVE_JOB_ID: str | None = None
 _REMOTE_SESSION_LOCAL = threading.local()
+_REMOTE_MODEL_CATALOG_CONDITION = threading.Condition()
+_REMOTE_MODEL_CATALOG: list[dict[str, Any]] | None = None
+_REMOTE_MODEL_CATALOG_EXPIRES_AT = 0.0
+_REMOTE_MODEL_CATALOG_REFRESHING = False
+_REMOTE_MODEL_CATALOG_EPOCH = 0
+_REMOTE_MODEL_CATALOG_FAILURE_COUNT = 0
+_REMOTE_MODEL_CATALOG_NEXT_RETRY_AT = 0.0
+_REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT: float | None = None
+_REMOTE_MODEL_CATALOG_LAST_LOGGED_AT: float | None = None
+_REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT: float | None = None
+_REMOTE_MODEL_CATALOG_LAST_FAILURE_AT: float | None = None
+_REMOTE_MODEL_CATALOG_MAX_BYTES = 256 * 1024
+_REMOTE_MODEL_CATALOG_CHUNK_BYTES = 16 * 1024
+_REMOTE_MODEL_TRANSPORT_LOCK = threading.Lock()
+_REMOTE_MODEL_TRANSPORT_THREAD: threading.Thread | None = None
+
+
+class _RemoteModelCatalogError(RuntimeError):
+    """Internal marker whose details must never cross the public boundary."""
 
 
 def is_remote_inference_enabled() -> bool:
@@ -176,6 +206,381 @@ def _remote_get(path: str) -> dict[str, Any]:
     )
     response.raise_for_status()
     return response.json()
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _bounded_text(value: Any, *, maximum: int) -> str | None:
+    if not isinstance(value, str) or len(value) > maximum:
+        return None
+    return value
+
+
+def _bounded_text_list(value: Any, *, maximum_items: int = 128) -> list[str] | None:
+    if not isinstance(value, list) or len(value) > maximum_items:
+        return None
+    result: list[str] = []
+    for item in value:
+        text = _bounded_text(item, maximum=256)
+        if text is None:
+            return None
+        result.append(text)
+    return result
+
+
+def _remote_unavailable_model(model_key: ModelKey) -> dict[str, Any]:
+    """Build a compatibility-shaped, credential-safe fail-closed record."""
+    definition = MODEL_DEFINITIONS[model_key]
+    return {
+        "model_key": model_key,
+        "display_name": definition["display_name"],
+        "filename": definition["filename"],
+        "local_path": str(definition["local_path"]),
+        "active_path": None,
+        "download_url": definition["download_url"],
+        "warmup_behavior": definition["warmup_behavior"],
+        "status": "remote_unavailable",
+        "error": "Remote model metadata unavailable",
+        "job_id": None,
+        "shared_asset_key": definition["shared_asset_key"],
+        "is_ready": False,
+        "is_downloaded": False,
+        "runtime_backend": None,
+        "runtime_path": None,
+        "runtime_fallback_error": None,
+        "runtime_fixed_imgsz": None,
+        "runtime_fixed_classes": [],
+        "runtime_fixed_class_groups": [],
+    }
+
+
+def _unavailable_remote_catalog() -> list[dict[str, Any]]:
+    return [_remote_unavailable_model(model_key) for model_key in MODEL_DEFINITIONS]
+
+
+def _sanitize_remote_model(item: dict[str, Any], model_key: ModelKey) -> dict[str, Any]:
+    """Whitelist bounded catalogue fields while retaining the public shape."""
+    result = _remote_unavailable_model(model_key)
+    is_ready = item["is_ready"]
+    result["is_ready"] = is_ready
+
+    status = _bounded_text(item.get("status"), maximum=64)
+    allowed_statuses = {
+        "ready",
+        "not_downloaded",
+        "installing",
+        "failed",
+    }
+    if is_ready:
+        result["status"] = "ready"
+        result["error"] = None
+    else:
+        result["status"] = status if status in allowed_statuses - {"ready"} else "not_downloaded"
+        # Do not proxy arbitrary exception text from another process.
+        result["error"] = "Remote model reported an error" if item.get("error") is not None else None
+
+    active_path = _bounded_text(item.get("active_path"), maximum=1_024)
+    if active_path is not None and "://" not in active_path:
+        result["active_path"] = active_path
+    job_id = _bounded_text(item.get("job_id"), maximum=128)
+    if job_id is not None:
+        result["job_id"] = job_id
+    if type(item.get("is_downloaded")) is bool:
+        result["is_downloaded"] = item["is_downloaded"]
+
+    runtime_backend = _bounded_text(item.get("runtime_backend"), maximum=64)
+    if runtime_backend is not None:
+        result["runtime_backend"] = runtime_backend
+    runtime_path = _bounded_text(item.get("runtime_path"), maximum=1_024)
+    if runtime_path is not None and "://" not in runtime_path:
+        result["runtime_path"] = runtime_path
+    if item.get("runtime_fallback_error") is not None:
+        result["runtime_fallback_error"] = "Remote model runtime fallback active"
+
+    fixed_imgsz = item.get("runtime_fixed_imgsz")
+    if type(fixed_imgsz) is int and 1 <= fixed_imgsz <= 16_384:
+        result["runtime_fixed_imgsz"] = fixed_imgsz
+    fixed_classes = _bounded_text_list(item.get("runtime_fixed_classes"))
+    if fixed_classes is not None:
+        result["runtime_fixed_classes"] = fixed_classes
+    fixed_groups = _bounded_text_list(item.get("runtime_fixed_class_groups"))
+    if fixed_groups is not None:
+        result["runtime_fixed_class_groups"] = fixed_groups
+    return result
+
+
+def _validate_remote_model_catalog(payload: Any) -> list[dict[str, Any]]:
+    if (
+        type(payload) is not dict
+        or "models" not in payload
+        or len(payload) > 16
+        or any(not isinstance(key, str) or len(key) > 128 for key in payload)
+    ):
+        raise _RemoteModelCatalogError("invalid catalogue envelope")
+    raw_models = payload["models"]
+    if not isinstance(raw_models, list) or len(raw_models) > 32:
+        raise _RemoteModelCatalogError("invalid model collection")
+
+    models_by_key: dict[ModelKey, dict[str, Any]] = {}
+    for item in raw_models:
+        if type(item) is not dict:
+            raise _RemoteModelCatalogError("invalid model item")
+        model_key = item.get("model_key")
+        if not isinstance(model_key, str) or len(model_key) > 128:
+            raise _RemoteModelCatalogError("invalid model key")
+        # Bounded future model keys are ignored until this edge version knows
+        # how to route them. Known keys remain strict and duplicate-free.
+        if model_key not in MODEL_DEFINITIONS:
+            continue
+        if model_key in models_by_key:
+            raise _RemoteModelCatalogError("duplicate model key")
+        if type(item.get("is_ready")) is not bool:
+            raise _RemoteModelCatalogError("invalid readiness value")
+        models_by_key[model_key] = _sanitize_remote_model(item, model_key)
+
+    return [
+        models_by_key.get(model_key, _remote_unavailable_model(model_key))
+        for model_key in MODEL_DEFINITIONS
+    ]
+
+
+def _decode_catalog_json(raw: bytes) -> Any:
+    try:
+        text = raw.decode("utf-8")
+
+        def reject_constant(_value: str):
+            raise ValueError("non-finite JSON constant")
+
+        return json.loads(text, parse_constant=reject_constant)
+    except (UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise _RemoteModelCatalogError("invalid catalogue JSON") from exc
+
+
+def _fetch_remote_model_catalog_blocking() -> list[dict[str, Any]]:
+    """Perform the bounded HTTP exchange inside an isolated daemon thread."""
+    deadline = time.monotonic() + MODEL_METADATA_TIMEOUT_SECONDS
+    read_timeout = min(0.5, MODEL_METADATA_TIMEOUT_SECONDS)
+    response = _remote_session().get(
+        f"{MODEL_SERVER_URL}/api/models",
+        headers=_remote_headers(),
+        timeout=(MODEL_METADATA_TIMEOUT_SECONDS, read_timeout),
+        allow_redirects=False,
+        stream=True,
+    )
+    try:
+        if time.monotonic() >= deadline:
+            raise _RemoteModelCatalogError("catalogue deadline exceeded")
+        if 300 <= response.status_code < 400:
+            raise _RemoteModelCatalogError("redirect rejected")
+        response.raise_for_status()
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError) as exc:
+                raise _RemoteModelCatalogError("invalid content length") from exc
+            if declared_length < 0 or declared_length > _REMOTE_MODEL_CATALOG_MAX_BYTES:
+                raise _RemoteModelCatalogError("catalogue response too large")
+
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=_REMOTE_MODEL_CATALOG_CHUNK_BYTES):
+            if time.monotonic() >= deadline:
+                raise _RemoteModelCatalogError("catalogue deadline exceeded")
+            if not chunk:
+                continue
+            body.extend(chunk)
+            if len(body) > _REMOTE_MODEL_CATALOG_MAX_BYTES:
+                raise _RemoteModelCatalogError("catalogue response too large")
+        return _validate_remote_model_catalog(_decode_catalog_json(bytes(body)))
+    finally:
+        response.close()
+
+
+def _fetch_remote_model_catalog() -> list[dict[str, Any]]:
+    """Fetch metadata with a hard caller deadline, including DNS and headers.
+
+    Requests cannot bound DNS resolution. A single daemon transport thread
+    contains that gap: callers return at the configured deadline, and no new
+    transport thread is launched while a timed-out one is still alive. Once it
+    exits, the breaker may probe again normally.
+    """
+    global _REMOTE_MODEL_TRANSPORT_THREAD
+
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    with _REMOTE_MODEL_TRANSPORT_LOCK:
+        current = _REMOTE_MODEL_TRANSPORT_THREAD
+        if current is not None and current.is_alive():
+            raise _RemoteModelCatalogError("catalogue transport still in flight")
+
+        def run_transport() -> None:
+            global _REMOTE_MODEL_TRANSPORT_THREAD
+            outcome: tuple[str, Any] = (
+                "error",
+                _RemoteModelCatalogError("catalogue transport aborted"),
+            )
+            try:
+                outcome = ("ok", _fetch_remote_model_catalog_blocking())
+            except Exception as exc:
+                outcome = ("error", exc)
+            finally:
+                with _REMOTE_MODEL_TRANSPORT_LOCK:
+                    if _REMOTE_MODEL_TRANSPORT_THREAD is threading.current_thread():
+                        _REMOTE_MODEL_TRANSPORT_THREAD = None
+            # Publish only after clearing the in-flight marker so an immediate
+            # caller can never observe a completed thread as still active.
+            result_queue.put(outcome)
+
+        transport = threading.Thread(
+            target=run_transport,
+            name="model-metadata-http",
+            daemon=True,
+        )
+        _REMOTE_MODEL_TRANSPORT_THREAD = transport
+        transport.start()
+
+    try:
+        outcome, value = result_queue.get(timeout=MODEL_METADATA_TIMEOUT_SECONDS)
+    except queue.Empty as exc:
+        raise _RemoteModelCatalogError("catalogue deadline exceeded") from exc
+    if outcome == "error":
+        raise value
+    return value
+
+
+def _catalog_backoff_seconds(failure_count: int) -> float:
+    exponent = min(30, max(0, failure_count - 1))
+    return min(
+        MODEL_METADATA_BREAKER_MAX_SECONDS,
+        MODEL_METADATA_BREAKER_INITIAL_SECONDS * (2**exponent),
+    )
+
+
+def _catalog_log_fields(now: float) -> dict[str, Any]:
+    outage_started = _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT
+    return {
+        "failure_count": _REMOTE_MODEL_CATALOG_FAILURE_COUNT,
+        "retry_after_seconds": round(max(0.0, _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT - now), 3),
+        "outage_duration_seconds": round(max(0.0, now - outage_started), 3)
+        if outage_started is not None
+        else 0.0,
+    }
+
+
+def _log_catalog_unavailable(*, transition: bool, reminder: bool, now: float) -> None:
+    if transition:
+        logger.warning("Remote model metadata became unavailable", extra=_catalog_log_fields(now))
+    elif reminder:
+        logger.warning("Remote model metadata remains unavailable", extra=_catalog_log_fields(now))
+
+
+def _get_remote_model_catalog() -> list[dict[str, Any]]:
+    """Return one fail-closed catalogue using a process-wide singleflight."""
+    global _REMOTE_MODEL_CATALOG
+    global _REMOTE_MODEL_CATALOG_EXPIRES_AT
+    global _REMOTE_MODEL_CATALOG_REFRESHING
+    global _REMOTE_MODEL_CATALOG_FAILURE_COUNT
+    global _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT
+    global _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT
+    global _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT
+    global _REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT
+    global _REMOTE_MODEL_CATALOG_LAST_FAILURE_AT
+
+    now = _monotonic()
+    reminder = False
+    with _REMOTE_MODEL_CATALOG_CONDITION:
+        if _REMOTE_MODEL_CATALOG is not None and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT:
+            return deepcopy(_REMOTE_MODEL_CATALOG)
+
+        if _REMOTE_MODEL_CATALOG_REFRESHING:
+            # A stuck leader must not strand camera/API callers indefinitely.
+            wait_deadline = time.monotonic() + MODEL_METADATA_TIMEOUT_SECONDS + 0.25
+            while _REMOTE_MODEL_CATALOG_REFRESHING:
+                remaining = wait_deadline - time.monotonic()
+                if remaining <= 0:
+                    return _unavailable_remote_catalog()
+                _REMOTE_MODEL_CATALOG_CONDITION.wait(timeout=remaining)
+            now = _monotonic()
+            if _REMOTE_MODEL_CATALOG is not None and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT:
+                return deepcopy(_REMOTE_MODEL_CATALOG)
+            if now < _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT:
+                return _unavailable_remote_catalog()
+
+        if now < _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT:
+            if (
+                _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT is not None
+                and (
+                    _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT is None
+                    or now - _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT >= MODEL_METADATA_LOG_REMINDER_SECONDS
+                )
+            ):
+                _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT = now
+                reminder = True
+            catalog = _unavailable_remote_catalog()
+            epoch = None
+        else:
+            _REMOTE_MODEL_CATALOG_REFRESHING = True
+            epoch = _REMOTE_MODEL_CATALOG_EPOCH
+            catalog = None
+
+    if reminder:
+        _log_catalog_unavailable(transition=False, reminder=True, now=now)
+    if catalog is not None:
+        return catalog
+
+    try:
+        fetched = _fetch_remote_model_catalog()
+    except Exception:
+        now = _monotonic()
+        with _REMOTE_MODEL_CATALOG_CONDITION:
+            if epoch != _REMOTE_MODEL_CATALOG_EPOCH:
+                _REMOTE_MODEL_CATALOG_CONDITION.notify_all()
+                return _unavailable_remote_catalog()
+            _REMOTE_MODEL_CATALOG_REFRESHING = False
+            _REMOTE_MODEL_CATALOG = None
+            _REMOTE_MODEL_CATALOG_EXPIRES_AT = 0.0
+            _REMOTE_MODEL_CATALOG_FAILURE_COUNT += 1
+            _REMOTE_MODEL_CATALOG_LAST_FAILURE_AT = now
+            _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT = now + _catalog_backoff_seconds(
+                _REMOTE_MODEL_CATALOG_FAILURE_COUNT
+            )
+            transition = _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT is None
+            if transition:
+                _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT = now
+            reminder = not transition and (
+                _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT is None
+                or now - _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT >= MODEL_METADATA_LOG_REMINDER_SECONDS
+            )
+            if transition or reminder:
+                _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT = now
+            _REMOTE_MODEL_CATALOG_CONDITION.notify_all()
+        _log_catalog_unavailable(transition=transition, reminder=reminder, now=now)
+        return _unavailable_remote_catalog()
+
+    now = _monotonic()
+    with _REMOTE_MODEL_CATALOG_CONDITION:
+        if epoch != _REMOTE_MODEL_CATALOG_EPOCH:
+            _REMOTE_MODEL_CATALOG_CONDITION.notify_all()
+            return _unavailable_remote_catalog()
+        _REMOTE_MODEL_CATALOG_REFRESHING = False
+        recovery_started = _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT
+        _REMOTE_MODEL_CATALOG = deepcopy(fetched)
+        _REMOTE_MODEL_CATALOG_EXPIRES_AT = now + MODEL_METADATA_TTL_SECONDS
+        _REMOTE_MODEL_CATALOG_FAILURE_COUNT = 0
+        _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT = 0.0
+        _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT = None
+        _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT = None
+        _REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT = now
+        _REMOTE_MODEL_CATALOG_LAST_FAILURE_AT = None
+        _REMOTE_MODEL_CATALOG_CONDITION.notify_all()
+    if recovery_started is not None:
+        logger.info(
+            "Remote model metadata recovered",
+            extra={"outage_duration_seconds": round(max(0.0, now - recovery_started), 3)},
+        )
+    return deepcopy(fetched)
 
 
 def _remote_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -301,19 +706,7 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
 
 def list_models() -> list[dict[str, Any]]:
     if is_remote_inference_enabled():
-        try:
-            return _remote_get("/api/models").get("models", [])
-        except Exception as exc:
-            logger.warning("Remote model list unavailable", extra={"model_server_url": MODEL_SERVER_URL, "error": str(exc)})
-            return [
-                {
-                    **_serialize_model_state(model_key),
-                    "status": "remote_unavailable",
-                    "error": str(exc),
-                    "is_ready": False,
-                }
-                for model_key in MODEL_DEFINITIONS
-            ]
+        return _get_remote_model_catalog()
     with _MODEL_LOCK:
         return [_serialize_model_state(model_key) for model_key in MODEL_DEFINITIONS]
 
@@ -330,29 +723,123 @@ def get_model(model_key: str) -> dict[str, Any]:
         return _serialize_model_state(model_key)  # type: ignore[arg-type]
 
 
-def missing_model_keys(model_keys: list[str]) -> list[ModelKey]:
+def model_readiness_snapshot(model_keys: list[str] | None = None) -> dict[str, bool]:
+    """Return one isolated readiness mapping suitable for request-wide reuse."""
+    requested = list(MODEL_DEFINITIONS) if model_keys is None else list(model_keys)
+    if not requested:
+        return {}
+    known_requested = [key for key in requested if key in MODEL_DEFINITIONS]
+    readiness = {key: False for key in requested if key not in MODEL_DEFINITIONS}
+    if not known_requested:
+        return readiness
     if is_remote_inference_enabled():
-        try:
-            models = {
-                item.get("model_key"): item
-                for item in _remote_get("/api/models").get("models", [])
-            }
-            return [
-                model_key  # type: ignore[misc]
-                for model_key in model_keys
-                if not models.get(model_key, {}).get("is_ready")
-            ]
-        except Exception as exc:
-            logger.warning("Remote model readiness check failed", extra={"model_server_url": MODEL_SERVER_URL, "error": str(exc)})
-            return list(model_keys)  # type: ignore[return-value]
-    missing: list[ModelKey] = []
+        ready_by_key = {
+            item["model_key"]: item["is_ready"] is True
+            for item in _get_remote_model_catalog()
+        }
+        readiness.update({
+            model_key: model_key in MODEL_DEFINITIONS and ready_by_key.get(model_key) is True
+            for model_key in known_requested
+        })
+        return readiness
     with _MODEL_LOCK:
-        for model_key in model_keys:
-            if model_key not in MODEL_DEFINITIONS:
-                continue
-            if _MODEL_STATES[model_key]["status"] != "ready":
-                missing.append(model_key)  # type: ignore[arg-type]
-    return missing
+        readiness.update({
+            model_key: (
+                model_key in MODEL_DEFINITIONS
+                and _MODEL_STATES[model_key]["status"] == "ready"
+            )
+            for model_key in known_requested
+        })
+        return readiness
+
+
+def missing_model_keys(
+    model_keys: list[str],
+    readiness: dict[str, bool] | None = None,
+) -> list[ModelKey]:
+    snapshot = readiness if readiness is not None else model_readiness_snapshot(model_keys)
+    return [
+        model_key  # type: ignore[misc]
+        for model_key in model_keys
+        if snapshot.get(model_key) is not True
+    ]
+
+
+def remote_model_metadata_health() -> dict[str, Any]:
+    """Expose safe cache/breaker state without URLs or exception details."""
+    if not is_remote_inference_enabled():
+        return {
+            "enabled": False,
+            "status": "disabled",
+            "cache_fresh": False,
+            "refresh_in_flight": False,
+            "failure_count": 0,
+            "retry_after_seconds": 0.0,
+            "outage_age_seconds": None,
+            "last_success_age_seconds": None,
+        }
+    now = _monotonic()
+    with _REMOTE_MODEL_CATALOG_CONDITION:
+        cache_fresh = (
+            _REMOTE_MODEL_CATALOG is not None
+            and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT
+        )
+        if cache_fresh:
+            status = "healthy"
+        elif _REMOTE_MODEL_CATALOG_REFRESHING:
+            status = "refreshing"
+        else:
+            status = "unavailable"
+        return {
+            "enabled": True,
+            "status": status,
+            "cache_fresh": cache_fresh,
+            "refresh_in_flight": _REMOTE_MODEL_CATALOG_REFRESHING,
+            "failure_count": _REMOTE_MODEL_CATALOG_FAILURE_COUNT,
+            "retry_after_seconds": round(
+                max(0.0, _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT - now),
+                3,
+            ),
+            "outage_age_seconds": round(
+                max(0.0, now - _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT),
+                3,
+            )
+            if _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT is not None
+            else None,
+            "last_success_age_seconds": round(
+                max(0.0, now - _REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT),
+                3,
+            )
+            if _REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT is not None
+            else None,
+        }
+
+
+def invalidate_remote_model_catalog() -> None:
+    """Invalidate cached metadata and reset its breaker; fence in-flight work."""
+    global _REMOTE_MODEL_CATALOG
+    global _REMOTE_MODEL_CATALOG_EXPIRES_AT
+    global _REMOTE_MODEL_CATALOG_REFRESHING
+    global _REMOTE_MODEL_CATALOG_EPOCH
+    global _REMOTE_MODEL_CATALOG_FAILURE_COUNT
+    global _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT
+    global _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT
+    global _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT
+    global _REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT
+    global _REMOTE_MODEL_CATALOG_LAST_FAILURE_AT
+
+    with _REMOTE_MODEL_CATALOG_CONDITION:
+        _REMOTE_MODEL_CATALOG = None
+        _REMOTE_MODEL_CATALOG_EXPIRES_AT = 0.0
+        _REMOTE_MODEL_CATALOG_EPOCH += 1
+        _REMOTE_MODEL_CATALOG_REFRESHING = False
+        _REMOTE_MODEL_CATALOG_FAILURE_COUNT = 0
+        _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT = 0.0
+        _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT = None
+        _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT = None
+        _REMOTE_MODEL_CATALOG_LAST_SUCCESS_AT = None
+        _REMOTE_MODEL_CATALOG_LAST_FAILURE_AT = None
+        _REMOTE_MODEL_CATALOG_CONDITION.notify_all()
 
 
 def get_install_job(job_id: str) -> dict[str, Any] | None:
@@ -396,7 +883,7 @@ def _copy_to_local_fs(model_key: ModelKey, source_path: Path) -> Path:
     return target
 
 
-def _set_open_vocab_classes(handle: YOLO, classes: list[str]):
+def _set_open_vocab_classes(handle: Any, classes: list[str]):
     tmp_models_dir = TMP_MODELS_ROOT
     tmp_models_dir.mkdir(parents=True, exist_ok=True)
     mobileclip_source = _resolve_mobileclip_source()
@@ -683,7 +1170,9 @@ def _asset_keys_for_models(model_keys: list[ModelKey]) -> list[str]:
 
 def install_models(model_keys: list[str]) -> dict[str, Any]:
     if is_remote_inference_enabled():
-        return _remote_post("/api/models/install", {"model_keys": model_keys})
+        job = _remote_post("/api/models/install", {"model_keys": model_keys})
+        invalidate_remote_model_catalog()
+        return job
 
     normalized_keys: list[ModelKey] = []
     for raw_key in model_keys:
@@ -734,7 +1223,9 @@ def retry_install_job(job_id: str) -> dict[str, Any]:
     if not job:
         raise KeyError("Install job not found")
     if is_remote_inference_enabled():
-        return _remote_post(f"/api/models/install/{job_id}/retry", {})
+        retried = _remote_post(f"/api/models/install/{job_id}/retry", {})
+        invalidate_remote_model_catalog()
+        return retried
     return install_models(job.get("model_keys", []))
 
 

@@ -259,7 +259,7 @@ async def _deferred_model_startup():
     logger.info("Models loaded, starting cameras")
     cfg = get_config()
     _ensure_safety_rules(cfg)
-    failed_cameras = _start_configured_cameras(cfg)
+    failed_cameras = await asyncio.to_thread(_start_configured_cameras, cfg)
     logger.info(
         "Camera startup pass complete",
         extra={"failed_camera_count": len(failed_cameras)},

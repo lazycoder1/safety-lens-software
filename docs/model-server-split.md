@@ -48,6 +48,28 @@ python -m uvicorn server:app --app-dir backend --host 0.0.0.0 --port 8000
 
 If `SAFETYLENS_MODEL_SERVER_URL` is empty, the backend behaves like the original all-in-one process and loads models locally.
 
+Model readiness uses a separate control-plane budget from frame inference. The
+edge fetches `/api/models` at most once per five-second cache window, shares one
+in-flight fetch across camera, health, and API callers, and gives that fetch a
+two-second timeout. After failures it probes at 1, 2, 4, 8, then 10-second
+intervals. An expired or malformed catalogue is fail-closed: cameras cannot be
+started from stale readiness data, and health reports `remote model metadata
+unavailable` without exposing the remote exception or token.
+
+The defaults can be tuned with:
+
+```bash
+SAFETYLENS_MODEL_METADATA_TIMEOUT_SECONDS=2
+SAFETYLENS_MODEL_METADATA_TTL_SECONDS=5
+SAFETYLENS_MODEL_METADATA_BREAKER_INITIAL_SECONDS=1
+SAFETYLENS_MODEL_METADATA_BREAKER_MAX_SECONDS=10
+SAFETYLENS_MODEL_METADATA_LOG_REMINDER_SECONDS=60
+```
+
+Keep the metadata timeout shorter than the UI polling interval. The frame
+inference request budget remains independently controlled by
+`SAFETYLENS_MODEL_SERVER_TIMEOUT_SECONDS`.
+
 ## Docker Compose
 
 For a local split stack:

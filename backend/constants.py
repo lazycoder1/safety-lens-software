@@ -3,7 +3,26 @@ SafetyLens constants — paths, class maps, color palettes, public routes.
 """
 
 from pathlib import Path
+import math
 import os
+
+
+def _finite_env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Read a finite, bounded float without allowing invalid startup state."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    if not math.isfinite(value):
+        value = default
+    return min(maximum, max(minimum, value))
+
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 
@@ -20,7 +39,49 @@ VLM_TIMEOUT_SECONDS = min(300.0, max(5.0, VLM_TIMEOUT_SECONDS))
 FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
 MODEL_SERVER_URL = os.environ.get("SAFETYLENS_MODEL_SERVER_URL", "").rstrip("/")
 MODEL_SERVER_TOKEN = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
-MODEL_SERVER_TIMEOUT_SECONDS = float(os.environ.get("SAFETYLENS_MODEL_SERVER_TIMEOUT_SECONDS", "30"))
+MODEL_SERVER_TIMEOUT_SECONDS = _finite_env_float(
+    "SAFETYLENS_MODEL_SERVER_TIMEOUT_SECONDS",
+    30.0,
+    minimum=0.1,
+    maximum=300.0,
+)
+
+
+# Model catalogue calls sit on camera-start and health paths, so they use a
+# short, dedicated budget instead of the much larger inference timeout.
+MODEL_METADATA_TIMEOUT_SECONDS = _finite_env_float(
+    "SAFETYLENS_MODEL_METADATA_TIMEOUT_SECONDS",
+    2.0,
+    minimum=0.1,
+    maximum=30.0,
+)
+MODEL_METADATA_TTL_SECONDS = _finite_env_float(
+    "SAFETYLENS_MODEL_METADATA_TTL_SECONDS",
+    5.0,
+    minimum=0.1,
+    maximum=300.0,
+)
+MODEL_METADATA_BREAKER_INITIAL_SECONDS = _finite_env_float(
+    "SAFETYLENS_MODEL_METADATA_BREAKER_INITIAL_SECONDS",
+    1.0,
+    minimum=0.1,
+    maximum=60.0,
+)
+MODEL_METADATA_BREAKER_MAX_SECONDS = max(
+    MODEL_METADATA_BREAKER_INITIAL_SECONDS,
+    _finite_env_float(
+        "SAFETYLENS_MODEL_METADATA_BREAKER_MAX_SECONDS",
+        10.0,
+        minimum=0.1,
+        maximum=300.0,
+    ),
+)
+MODEL_METADATA_LOG_REMINDER_SECONDS = _finite_env_float(
+    "SAFETYLENS_MODEL_METADATA_LOG_REMINDER_SECONDS",
+    60.0,
+    minimum=1.0,
+    maximum=86_400.0,
+)
 
 # ── COCO class names (80 classes) ───────────────────────────────────────────
 
