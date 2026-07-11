@@ -1,5 +1,5 @@
 """
-SafetyLens edge licensing — verify signed license files and heartbeat tokens,
+Rakshak Lens edge licensing — verify signed license files and heartbeat tokens,
 compute current license state, and persist uploaded licenses to disk.
 
 This module is intentionally side-effect free at import time. Call
@@ -29,7 +29,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-logger = logging.getLogger("safetylens.licensing")
+logger = logging.getLogger("rakshak_lens.licensing")
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 
@@ -467,14 +467,27 @@ def _load_license_from_disk() -> Optional[License]:
         return None
 
 
-def _load_heartbeat_from_disk(license_id: str) -> Optional[Heartbeat]:
+def _load_heartbeat_from_disk(
+    license_id: str,
+    *,
+    license_issued_at: datetime | None = None,
+) -> Optional[Heartbeat]:
     if not HEARTBEAT_PATH.is_file():
         return None
     try:
-        return verify_heartbeat(HEARTBEAT_PATH.read_bytes(), license_id)
+        heartbeat = verify_heartbeat(HEARTBEAT_PATH.read_bytes(), license_id)
     except InvalidHeartbeat as e:
         logger.error("Stored heartbeat at %s failed verification: %s", HEARTBEAT_PATH, e)
         return None
+    if license_issued_at is not None and heartbeat.valid_until < license_issued_at:
+        logger.info(
+            "Ignoring stale heartbeat for %s: heartbeat valid_until=%s is before license issued_at=%s",
+            license_id,
+            heartbeat.valid_until.isoformat(),
+            license_issued_at.isoformat(),
+        )
+        return None
+    return heartbeat
 
 
 def save_license(blob: bytes) -> License:
@@ -488,7 +501,10 @@ def save_license(blob: bytes) -> License:
         _atomic_write(LICENSE_PATH, blob)
         # Reload heartbeat against the new license_id; if the old heartbeat
         # was for a different license, it will be ignored.
-        heartbeat = _load_heartbeat_from_disk(license.license_id)
+        heartbeat = _load_heartbeat_from_disk(
+            license.license_id,
+            license_issued_at=license.issued_at,
+        )
         global _cached_status
         _cached_status = compute_status(license, heartbeat)
         logger.info(
@@ -529,7 +545,11 @@ def init_licensing() -> LicenseStatus:
     with _lock:
         _public_key = _load_public_key()
         license = _load_license_from_disk()
-        heartbeat = _load_heartbeat_from_disk(license.license_id) if license else None
+        heartbeat = (
+            _load_heartbeat_from_disk(license.license_id, license_issued_at=license.issued_at)
+            if license
+            else None
+        )
         _cached_status = compute_status(license, heartbeat)
         logger.info(
             "Licensing initialized: state=%s reason=%s",
@@ -614,7 +634,7 @@ def _attempt_heartbeat_refresh() -> bool:
             url,
             json={"license_id": license_id},
             timeout=HEARTBEAT_REFRESH_HTTP_TIMEOUT,
-            headers={"User-Agent": "SafetyLens-Edge/1.0"},
+            headers={"User-Agent": "Rakshak Lens-Edge/1.0"},
         )
     except requests.RequestException as e:
         logger.warning("Heartbeat refresh network error for %s: %s", license_id, e)

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { Plus, SearchCheck } from "lucide-react"
+import { AlertTriangle, Plus, RefreshCw, SearchCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { getCameras, deleteCamera, getSafetyRules } from "@/lib/api"
 import { useAuthStore } from "@/stores/authStore"
@@ -9,7 +9,7 @@ import { CameraCard } from "@/components/cameras/CameraCard"
 import { SearchInput } from "@/components/ui/SearchInput"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Card } from "@/components/ui/card"
-import { getConfiguredDetectionKeys, usesZoneIntrusion } from "@/components/cameras/detectionCatalog"
+import { getConfiguredDetectionKeys, usesConfiguredZones } from "@/components/cameras/detectionCatalog"
 
 export function CameraConfig() {
   const navigate = useNavigate()
@@ -19,14 +19,16 @@ export function CameraConfig() {
   const [cameras, setCameras] = useState<Camera[]>([])
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const fetchData = useCallback(async () => {
+    setError(null)
     try {
       const [cameraData, ruleData]: [Camera[], SafetyRule[]] = await Promise.all([getCameras(), getSafetyRules()])
       setCameras(cameraData)
       setSafetyRules(ruleData)
-    } catch {
-      // silently fail for now
+    } catch (err: any) {
+      setError(err?.message || "Could not load cameras")
     } finally {
       setLoading(false)
     }
@@ -139,20 +141,36 @@ export function CameraConfig() {
         className="max-w-sm"
       />
 
+      {error && (
+        <Card className="flex flex-col gap-3 border-[var(--color-warning)] bg-amber-50 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+            <div>
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">Could not load cameras</p>
+              <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{error}</p>
+            </div>
+          </div>
+          <Button variant="secondary" onClick={fetchData}>
+            <RefreshCw className="h-4 w-4" />
+            Retry
+          </Button>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {filtered.map((camera) => (
           <CameraCard
             key={camera.id}
             camera={camera}
             safetyRules={safetyRules}
-            zoneCount={usesZoneIntrusion(getConfiguredDetectionKeys(camera, safetyRules)) ? (camera.zones?.length ?? 0) : null}
+            zoneCount={usesConfiguredZones(getConfiguredDetectionKeys(camera, safetyRules)) ? (camera.zones?.length ?? 0) : null}
             canEdit={isAdmin}
             onView={() => navigate(`/configure/cameras/${camera.id}`)}
             onEdit={() => navigate(`/configure/cameras/${camera.id}/edit`)}
             onDelete={() => handleDelete(camera.id)}
           />
         ))}
-        {filtered.length === 0 && (
+        {!error && filtered.length === 0 && (
           <p className="col-span-full py-12 text-center text-sm text-[var(--color-text-tertiary)]">
             {cameras.length === 0
               ? "No cameras configured yet."

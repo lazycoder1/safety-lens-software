@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { AlertTriangle, CheckCircle2, ShieldAlert, TrendingUp, TrendingDown, Minus } from "lucide-react"
+import { AlertTriangle, CheckCircle2, ShieldAlert, TrendingUp, TrendingDown, Minus, RefreshCw } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useAlertStore } from "@/stores/alertStore"
@@ -120,9 +120,11 @@ export function Dashboard() {
   const [accuracy, setAccuracy] = useState<{ total: number; fp: number; rate: number } | null>(null)
   const [heatmapData, setHeatmapData] = useState<{ zones: string[]; buckets: string[]; cells: { zone: string; bucket: string; count: number }[]; maxCount: number } | null>(null)
   const [spatialData, setSpatialData] = useState<{ gridSize: number; cells: number[][]; maxCount: number; totalDetections: number } | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const loadData = async (hours: TimeRange = timeRange, camId: string = selectedCamera) => {
     try {
+      setLoadError(null)
       await fetchAlerts()
       const cameraFilter = camId || undefined
       const [s, cams, ts, comp] = await Promise.all([
@@ -177,8 +179,8 @@ export function Dashboard() {
       }
 
       setLastUpdated(new Date())
-    } catch {
-      // stats may not be available yet
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load dashboard")
     }
   }
 
@@ -302,6 +304,26 @@ export function Dashboard() {
 
   const maxZoneCount = violationsByZone[0]?.count || 1
   const maxCameraCount = violationsByCamera[0]?.count || 1
+
+  if (loadError && !stats && !compliance) {
+    return (
+      <div className="flex min-h-[420px] items-center justify-center p-6">
+        <Card className="max-w-md text-center">
+          <AlertTriangle className="mx-auto mb-3 h-7 w-7 text-[var(--color-critical)]" />
+          <h1 className="text-base font-semibold text-[var(--color-text-primary)]">Dashboard could not load</h1>
+          <p className="mt-2 text-sm text-[var(--color-text-secondary)]">{loadError}</p>
+          <button
+            type="button"
+            onClick={() => void loadData(timeRange, selectedCamera)}
+            className="mt-4 inline-flex items-center gap-2 rounded-[var(--radius-md)] bg-[var(--color-text-primary)] px-3 py-2 text-sm font-medium text-[var(--color-bg-primary)]"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Retry
+          </button>
+        </Card>
+      </div>
+    )
+  }
 
   if (!stats || !compliance) {
     return (

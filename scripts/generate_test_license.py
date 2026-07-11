@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate a signed SafetyLens license for local development and testing.
+"""Generate a signed Rakshak Lens license for local development and testing.
 
 Until License Hub is built, this script is the only way to produce a valid
-.lic file. Reads the private key from ``~/.safetylens/license_private.pem``
+.lic file. Reads the private key from ``~/.rakshak-lens/license_private.pem``
 (must be the matching pair to ``backend/keys/license_pub.pem``).
 
 Examples
@@ -36,7 +36,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-DEFAULT_PRIVATE_KEY = Path.home() / ".safetylens" / "license_private.pem"
+DEFAULT_PRIVATE_KEY = Path.home() / ".rakshak-lens" / "license_private.pem"
 SCHEMA_VERSION = 1
 
 
@@ -82,7 +82,7 @@ def main() -> int:
     if not args.private_key.is_file():
         print(f"ERROR: Private key not found at {args.private_key}", file=sys.stderr)
         print(
-            "Generate one with: openssl genpkey -algorithm Ed25519 -out ~/.safetylens/license_private.pem",
+            "Generate one with: openssl genpkey -algorithm Ed25519 -out ~/.rakshak-lens/license_private.pem",
             file=sys.stderr,
         )
         return 1

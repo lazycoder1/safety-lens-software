@@ -1,5 +1,5 @@
 """
-SafetyLens API routers.
+Rakshak Lens API routers.
 """
 
 from fastapi import FastAPI
@@ -14,6 +14,7 @@ from routers.stream import router as stream_router
 from routers.safety_rules import router as safety_rules_router
 from routers.automation_rules import router as automation_rules_router
 from routers.faces import router as faces_router
+from routers.plates import router as plates_router
 from routers.license import router as license_router
 from routers.models import router as models_router
 from routers.misc import router as misc_router
@@ -32,6 +33,7 @@ def register_routers(app: FastAPI):
     app.include_router(safety_rules_router)
     app.include_router(automation_rules_router)
     app.include_router(faces_router)
+    app.include_router(plates_router)
     app.include_router(license_router)
     app.include_router(models_router)
     app.include_router(misc_router)

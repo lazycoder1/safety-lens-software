@@ -1,5 +1,5 @@
 """
-SafetyLens FastAPI dependency functions.
+Rakshak Lens FastAPI dependency functions.
 """
 
 from fastapi import Request, HTTPException

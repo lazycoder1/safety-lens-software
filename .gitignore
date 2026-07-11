@@ -13,6 +13,7 @@ frontend/node_modules/
 *.onnx
 *.engine
 mobileclip_blt.ts
+mobileclip2_b.ts
 
 # Videos and datasets
 test-videos/
@@ -23,6 +24,8 @@ runs/
 backend/snapshots/
 backend/face_photos/
 backend/face_snapshots/
+backend/plate_snapshots/
+backend/plate_crops/
 backend/logs/
 backend/alerts.db
 backend/__pycache__/
@@ -54,3 +57,4 @@ frontend/dist/
 
 # Claude
 .claude/
+.gstack/

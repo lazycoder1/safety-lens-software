@@ -9,10 +9,13 @@ import {
   Grid3x3,
   ChevronLeft,
   ChevronRight,
+  FileText,
+  Clock,
+  Armchair,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
-import { API_BASE, getCameras as fetchCameras, getToken } from "@/lib/api"
+import { API_BASE, STREAM_BASE, getCameraOccupancy, getCameras as fetchCameras, getToken } from "@/lib/api"
 import { useAlertStore } from "@/stores/alertStore"
 import { useAlertConnection } from "@/components/AlertProvider"
 
@@ -22,7 +25,42 @@ interface CameraInfo {
   zone: string
   rules: string[]
   status: string
+  runtime_status: string
+  enabled: boolean
   detectionsCount: number
+  capabilities?: string[]
+}
+
+interface OccupancyChair {
+  id: string
+  name: string
+  status: "occupied" | "empty"
+  occupied: boolean
+  sampleSeconds: number
+  reportReady: boolean
+  emptyEvents: number
+  longAbsenceEvents: number
+  emptyForSeconds: number
+}
+
+interface OccupancyReport {
+  cameraId: string
+  title: string
+  sessionSeconds: number
+  sampleSeconds: number
+  reportReady: boolean
+  workHours: { start: string; end: string }
+  excludedWindows: { label: string; start: string; end: string }[]
+  gracePeriodSeconds: number
+  chairs: OccupancyChair[]
+}
+
+const formatDuration = (seconds: number) => {
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
 }
 
 export function LiveView() {
@@ -30,7 +68,10 @@ export function LiveView() {
   const focusedCamId = searchParams.get("cam")
   const [gridCols, setGridCols] = useState(3)
   const [cameras, setCameras] = useState<CameraInfo[]>([])
+  const [camerasLoading, setCamerasLoading] = useState(true)
+  const [cameraError, setCameraError] = useState<string | null>(null)
   const [vlmResult, setVlmResult] = useState<{ text: string; timestamp: string; elapsed: number } | null>(null)
+  const [occupancyReport, setOccupancyReport] = useState<OccupancyReport | null>(null)
   const [page, setPage] = useState(0)
   const connected = useAlertConnection((s) => s.connected)
   const alerts = useAlertStore((s) => s.alerts)
@@ -42,6 +83,13 @@ export function LiveView() {
   const totalPages = Math.ceil(cameras.length / pageSize)
   const pagedCameras = cameras.slice(page * pageSize, (page + 1) * pageSize)
   const displayedCameras = focusedCamId ? cameras.filter((c) => c.id === focusedCamId) : pagedCameras
+  const focusedCamera = focusedCamId ? cameras.find((c) => c.id === focusedCamId) : null
+  const showOccupancyPanel = Boolean(
+    focusedCamera?.capabilities?.includes("office_occupancy") && occupancyReport
+  )
+  const occupancyChairs = occupancyReport?.chairs ?? []
+  const occupiedChairCount = occupancyChairs.filter((chair) => chair.occupied).length
+  const emptyChairCount = occupancyChairs.length - occupiedChairCount
 
   // Clamp page when camera count or grid size shrinks the pagination
   useEffect(() => {
@@ -51,15 +99,45 @@ export function LiveView() {
   // Fetch cameras on mount + poll so newly-added cameras appear without a reload
   useEffect(() => {
     let cancelled = false
-    const load = () => {
-      fetchCameras()
-        .then((data) => { if (!cancelled) setCameras(data) })
-        .catch(() => { if (!cancelled) setCameras([]) })
+    const load = async () => {
+      try {
+        const data = await fetchCameras()
+        if (!cancelled) {
+          setCameras(data)
+          setCameraError(null)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setCameraError(err instanceof Error ? err.message : "Could not load cameras")
+        }
+      } finally {
+        if (!cancelled) setCamerasLoading(false)
+      }
     }
-    load()
+    void load()
     const interval = setInterval(load, 10000)
     return () => { cancelled = true; clearInterval(interval) }
   }, [])
+
+  useEffect(() => {
+    if (!focusedCamera?.capabilities?.includes("office_occupancy")) {
+      setOccupancyReport(null)
+      return
+    }
+
+    let cancelled = false
+    const load = async () => {
+      try {
+        const report = await getCameraOccupancy(focusedCamera.id)
+        if (!cancelled) setOccupancyReport(report)
+      } catch {
+        if (!cancelled) setOccupancyReport(null)
+      }
+    }
+    void load()
+    const interval = setInterval(load, 3000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [focusedCamera?.id, focusedCamera?.capabilities])
 
   // Poll VLM result (backend returns { cam_id: { text, timestamp, elapsed } })
   useEffect(() => {
@@ -86,6 +164,15 @@ export function LiveView() {
   }, [])
 
   const activeAlerts = alerts.filter((a) => a.status === "active")
+
+  const isCameraLive = (cam: CameraInfo) => cam.enabled && cam.status === "online" && cam.runtime_status === "running"
+  const statusLabel = (cam: CameraInfo) => {
+    if (!cam.enabled) return "Disabled"
+    if (cam.runtime_status === "awaiting_model_install") return "Waiting for model"
+    if (cam.runtime_status === "starting") return "Starting"
+    if (cam.status === "online" && cam.runtime_status === "running") return "Live"
+    return "Offline"
+  }
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -157,7 +244,7 @@ export function LiveView() {
 
         {/* Camera grid */}
         <div className="flex-1 overflow-auto p-4 bg-[var(--color-bg-secondary)]">
-          {cameras.length === 0 ? (
+          {camerasLoading ? (
             <div
               className="grid gap-3 h-full"
               style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))` }}
@@ -174,12 +261,44 @@ export function LiveView() {
                 </div>
               ))}
             </div>
+          ) : cameraError ? (
+            <div className="h-full min-h-[360px] flex items-center justify-center">
+              <div className="max-w-md rounded-[var(--radius-lg)] border border-[var(--color-border-default)] bg-[var(--color-bg-primary)] p-6 text-center shadow-sm">
+                <WifiOff className="mx-auto mb-3 h-7 w-7 text-[var(--color-critical)]" />
+                <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Live view could not load cameras</h2>
+                <p className="mt-2 text-sm text-[var(--color-text-secondary)]">{cameraError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCamerasLoading(true)
+                    setCameraError(null)
+                    fetchCameras()
+                      .then((data) => setCameras(data))
+                      .catch((err) => setCameraError(err instanceof Error ? err.message : "Could not load cameras"))
+                      .finally(() => setCamerasLoading(false))
+                  }}
+                  className="mt-4 inline-flex items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-text-primary)] px-3 py-2 text-sm font-medium text-[var(--color-bg-primary)]"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          ) : cameras.length === 0 ? (
+            <div className="h-full min-h-[360px] flex items-center justify-center">
+              <div className="max-w-md rounded-[var(--radius-lg)] border border-[var(--color-border-default)] bg-[var(--color-bg-primary)] p-6 text-center shadow-sm">
+                <h2 className="text-base font-semibold text-[var(--color-text-primary)]">No cameras configured</h2>
+                <p className="mt-2 text-sm text-[var(--color-text-secondary)]">Add or enable a camera to show live streams here.</p>
+              </div>
+            </div>
           ) : (
             <div
               className="grid gap-3 content-start"
               style={{ gridTemplateColumns: `repeat(${focusedCamId ? 1 : gridCols}, minmax(0, 1fr))` }}
             >
               {displayedCameras.map((cam) => (
+                (() => {
+                  const live = isCameraLive(cam)
+                  return (
                 <div
                   key={cam.id}
                   className={cn(
@@ -190,18 +309,27 @@ export function LiveView() {
                 >
                   {/* MJPEG stream */}
                   <div className="relative flex-1 min-h-0 aspect-video">
-                    <img
-                      src={`${API_BASE}/api/stream/${cam.id}`}
-                      alt={cam.name}
-                      className="w-full h-full object-contain bg-black"
-                    />
+                    {live ? (
+                      <img
+                        src={`${STREAM_BASE}/api/stream/${cam.id}`}
+                        alt={cam.name}
+                        className="w-full h-full object-contain bg-black"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-black text-xs text-neutral-400">
+                        {statusLabel(cam)}
+                      </div>
+                    )}
 
                     {/* Camera name overlay */}
                     <div className="absolute top-0 left-0 right-0 p-2.5 space-y-1">
                       <div className="inline-flex items-center gap-2 bg-black/70 backdrop-blur-sm rounded-md px-2.5 py-1">
                         <span className="relative flex h-2 w-2">
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                          {live && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
+                          <span className={cn(
+                            "relative inline-flex h-2 w-2 rounded-full",
+                            live ? "bg-emerald-500" : "bg-neutral-500"
+                          )} />
                         </span>
                         <span className="text-white text-xs font-medium">{cam.name}</span>
                       </div>
@@ -243,6 +371,8 @@ export function LiveView() {
                     </div>
                   </div>
                 </div>
+                  )
+                })()
               ))}
             </div>
           )}
@@ -264,6 +394,87 @@ export function LiveView() {
           </div>
         )}
       </div>
+
+      {showOccupancyPanel && occupancyReport && (
+        <aside className="hidden xl:flex w-[380px] shrink-0 flex-col border-l border-[var(--color-border-default)] bg-[var(--color-bg-primary)]">
+          <div className="border-b border-[var(--color-border-default)] px-4 py-3">
+            <div className="flex items-center gap-2">
+              <FileText size={17} className="text-[var(--color-accent)]" />
+              <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Chair Occupancy Snapshot</h2>
+            </div>
+            <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+              Work hours {occupancyReport.workHours.start}-{occupancyReport.workHours.end}; lunch excluded.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 border-b border-[var(--color-border-default)] p-4">
+            <div className="rounded-[var(--radius-md)] border border-[var(--color-border-default)] p-3">
+              <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                <Armchair size={14} />
+                Occupied chairs
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-[var(--color-text-primary)]">
+                {occupiedChairCount}/{occupancyChairs.length}
+              </div>
+            </div>
+            <div className="rounded-[var(--radius-md)] border border-[var(--color-border-default)] p-3">
+              <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                <Clock size={14} />
+                Empty chairs
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-[var(--color-text-primary)]">
+                {emptyChairCount}
+              </div>
+            </div>
+          </div>
+
+          <div className="border-b border-[var(--color-border-default)] px-4 py-3">
+            <div className="rounded-[var(--radius-md)] bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Current chair status is live. Day-end utilization should be generated from persisted work-hour samples, not from this short live snapshot.
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-auto p-4">
+            <div className="space-y-2">
+              {occupancyReport.chairs.map((chair) => (
+                <div
+                  key={chair.id}
+                  className="rounded-[var(--radius-md)] border border-[var(--color-border-default)] p-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-[var(--color-text-primary)]">{chair.name}</div>
+                      <div className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                        {chair.occupied ? "Person detected in chair zone" : `Empty for ${formatDuration(chair.emptyForSeconds)}`}
+                      </div>
+                    </div>
+                    <span
+                      className={cn(
+                        "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                        chair.occupied
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-amber-100 text-amber-700"
+                      )}
+                    >
+                      {chair.status}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs text-[var(--color-text-secondary)]">
+                    <span>sample {formatDuration(chair.sampleSeconds)}</span>
+                    <span>current snapshot</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--color-border-default)] p-4">
+            <div className="rounded-[var(--radius-md)] bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
+              End-of-day export would summarize occupied time, empty time, and long absence events for each marked chair after work-hour samples are persisted.
+            </div>
+          </div>
+        </aside>
+      )}
 
     </div>
   )

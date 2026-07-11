@@ -1,6 +1,6 @@
-# SafetyLens Edge / Model Server Split
+# Rakshak Lens Edge / Model Server Split
 
-SafetyLens can run as two processes:
+Rakshak Lens can run as two processes:
 
 - **Edge backend + frontend** on the client laptop. This process owns camera/video decoding, RTSP reconnects, config, alerting, MJPEG streams, WebSocket alerts, snapshots, and the React frontend.
 - **Model server** on a GPU host. This process owns YOLO/YOLOE model loading and frame inference.
@@ -45,7 +45,14 @@ export SAFETYLENS_MODEL_SERVER_TOKEN='change-me'
 python -m uvicorn server:app --app-dir backend --host 0.0.0.0 --port 8000
 ```
 
-If `SAFETYLENS_MODEL_SERVER_URL` is empty, the backend behaves like the original all-in-one process and loads models locally.
+`SAFETYLENS_MODEL_SERVER_URL` and `SAFETYLENS_MODEL_SERVER_TOKEN` are now first-boot defaults. Admins can change the active model server from **System Settings -> Model Server** without changing environment variables or rebuilding the edge container. If the saved model-server URL is empty or remote inference is disabled, the backend behaves like the original all-in-one process and loads models locally.
+
+The admin setting accepts either a full URL or an IP/host with port:
+
+```text
+https://models.example.com
+203.0.113.10:8100
+```
 
 ## Docker Compose
 
@@ -55,7 +62,7 @@ For a local split stack:
 docker compose -f docker-compose.split.yml up --build
 ```
 
-For a real sales laptop deployment, run only the `edge` service on the laptop and point `SAFETYLENS_MODEL_SERVER_URL` at the hosted GPU model server.
+For a real sales laptop deployment, run only the `edge` service on the laptop and set the hosted GPU model server in the admin UI. `SAFETYLENS_MODEL_SERVER_URL` can still be used to pre-seed that value for first boot.
 
 ## Current Boundary
 

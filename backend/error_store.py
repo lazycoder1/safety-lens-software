@@ -1,5 +1,5 @@
 """
-Persistent error log for SafetyLens — stores frontend and backend errors
+Persistent error log for Rakshak Lens — stores frontend and backend errors
 in PostgreSQL so they can be queried remotely via the admin API.
 """
 
@@ -11,7 +11,7 @@ from psycopg2.extras import RealDictCursor, Json
 
 from db import get_conn
 
-logger = logging.getLogger("safetylens.errors")
+logger = logging.getLogger("rakshak_lens.errors")
 
 
 def init_db():

@@ -79,3 +79,9 @@ export const useAuthStore = create<AuthStore>((set) => ({
 
   clearError: () => set({ error: null }),
 }))
+
+if (typeof window !== "undefined") {
+  window.addEventListener("rakshak-lens:auth-cleared", () => {
+    useAuthStore.setState({ token: null, user: null, loading: false, error: null })
+  })
+}

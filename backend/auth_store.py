@@ -1,5 +1,5 @@
 """
-User authentication and management for SafetyLens backend.
+User authentication and management for Rakshak Lens backend.
 """
 
 import json
@@ -16,7 +16,7 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_conn
 
-logger = logging.getLogger("safetylens.auth")
+logger = logging.getLogger("rakshak_lens.auth")
 
 
 def _load_jwt_secret() -> str:

@@ -1,4 +1,4 @@
-# SafetyLens Backend Deployment
+# Rakshak Lens Backend Deployment
 
 This repo now includes a backend deployment helper:
 
@@ -14,7 +14,7 @@ What it does:
 - creates `backend/config.json` from `backend/config.example.json` if needed
 - validates that `backend/server.py` imports cleanly
 - generates a systemd unit in `.deploy/`
-- optionally installs and starts the `safetylens-backend` service
+- optionally installs and starts the `rakshak-lens-backend` service
 
 ## Deployment Split
 
@@ -87,7 +87,7 @@ Required GitHub repository secrets:
 - `VAST_HOST`
 - `VAST_PORT` (optional, defaults to `22`)
 - `VAST_USER` (optional, defaults to `root`)
-- `VAST_DEPLOY_PATH` (optional, defaults to `/opt/safetylens/video-analytics`)
+- `VAST_DEPLOY_PATH` (optional, defaults to `/opt/rakshak-lens/video-analytics`)
 - `VAST_SSH_PRIVATE_KEY`
 - `VIDEO_ANALYTICS_BACKEND_ENV` for the remote `.env` contents
 
@@ -97,7 +97,6 @@ The backend GitHub deploy intentionally does not ship:
 
 - `test-videos/`
 - `models/`
-- root-level model weights such as `yolo26n.pt`
 - `backend/config.json`
 
 Those files are gitignored and should stay out of the repo.
@@ -114,8 +113,6 @@ By default it uploads:
 - `backend/config.json`
 - `test-videos/`
 - `models/`
-- `yolo26n.pt`
-- `yoloe-11s-seg.pt`
 
 Add `--with-env` only if you also want to copy the local `.env` to the host instead of relying on the GitHub secret.
 
@@ -123,6 +120,6 @@ Add `--with-env` only if you also want to copy the local `.env` to the host inst
 
 - The backend entrypoint currently needs to run from `backend/`, so the service starts `uvicorn server:app` with `WorkingDirectory=.../backend`.
 - The backend imports `bcrypt`, `jwt`, and file-upload support at runtime, so those packages are included in `requirements.txt`.
-- If `yolo26n.pt` or `yoloe-11s-seg.pt` are missing, the backend can still boot, but cameras that need those models stay paused until the models are installed.
+- If `models/coco_primary/yolo26n.pt` or `models/yoloe_open_vocab/yoloe-26s-seg.pt` are missing, the backend can still boot, but cameras that need those models stay paused until the models are installed.
 - For a Vercel-hosted frontend, put Caddy or Nginx in front of the backend so the browser gets TLS and WebSockets on a stable public hostname.
 - The current `test-videos/` folder is about `1.5 GB`, so keeping it out of Git and syncing it directly is the right shape for the demo backend.

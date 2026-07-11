@@ -1,5 +1,5 @@
 """
-Alert persistence with PostgreSQL for SafetyLens backend.
+Alert persistence with PostgreSQL for Rakshak Lens backend.
 """
 
 import asyncio
@@ -13,7 +13,7 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_conn
 
-logger = logging.getLogger("safetylens.alerts")
+logger = logging.getLogger("rakshak_lens.alerts")
 
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 _get_conn = get_conn
@@ -49,6 +49,11 @@ def init_db():
             # Migration: add columns for violation bboxes and clean snapshots
             cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS bboxes JSONB DEFAULT '[]'")
             cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS clean_snapshot_path TEXT")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS delivery_results JSONB DEFAULT '[]'")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS policy_id TEXT")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS priority INTEGER")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS message TEXT")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)")
@@ -72,6 +77,10 @@ def create_alert(
     snapshot_jpeg: bytes | None = None,
     bboxes: list[dict] | None = None,
     clean_snapshot_jpeg: bytes | None = None,
+    policy_id: str | None = None,
+    priority: int | None = None,
+    message: str | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     alert_id = str(uuid4())[:8]
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -100,9 +109,14 @@ def create_alert(
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO alerts
-                   (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path)
-                   VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (alert_id, severity, rule, camera_id, camera_name, zone, round(confidence, 2), timestamp, source, description, snapshot_path, json.dumps(bboxes), clean_snapshot_path),
+                   (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path, policy_id, priority, message, metadata)
+                   VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    alert_id, severity, rule, camera_id, camera_name, zone,
+                    round(confidence, 2), timestamp, source, description,
+                    snapshot_path, json.dumps(bboxes), clean_snapshot_path,
+                    policy_id, priority, message, json.dumps(metadata or {}),
+                ),
             )
         conn.commit()
 
@@ -112,6 +126,7 @@ def create_alert(
         alert_id, severity, "active", rule, camera_id, camera_name, zone,
         round(confidence, 2), timestamp, source, description, snapshot_path,
         bboxes=bboxes, clean_snapshot_path=clean_snapshot_path,
+        policy_id=policy_id, priority=priority, message=message, metadata=metadata or {},
     )
 
 
@@ -195,6 +210,18 @@ def mark_false_positive(alert_id: str) -> dict | None:
             cur.execute(
                 "UPDATE alerts SET status = 'resolved', resolved_at = %s, false_positive = TRUE WHERE id = %s",
                 (now, alert_id),
+            )
+        conn.commit()
+    return get_alert(alert_id)
+
+
+def update_delivery_results(alert_id: str, results: list[dict]) -> dict | None:
+    """Persist per-output alert delivery results."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE alerts SET delivery_results = %s WHERE id = %s",
+                (json.dumps(results), alert_id),
             )
         conn.commit()
     return get_alert(alert_id)
@@ -528,6 +555,20 @@ def _row_to_dict(row: dict) -> dict:
         bboxes = raw_bboxes
     else:
         bboxes = []
+    raw_delivery_results = row.get("delivery_results")
+    if isinstance(raw_delivery_results, str):
+        delivery_results = json.loads(raw_delivery_results)
+    elif isinstance(raw_delivery_results, list):
+        delivery_results = raw_delivery_results
+    else:
+        delivery_results = []
+    raw_metadata = row.get("metadata")
+    if isinstance(raw_metadata, str):
+        metadata = json.loads(raw_metadata)
+    elif isinstance(raw_metadata, dict):
+        metadata = raw_metadata
+    else:
+        metadata = {}
     return _build_dict(
         row["id"], row["severity"], row["status"], row["rule"],
         row["camera_id"], row["camera_name"], row["zone"],
@@ -536,6 +577,9 @@ def _row_to_dict(row: dict) -> dict:
         row.get("acknowledged_by"), row.get("acknowledged_at"),
         row.get("resolved_at"), row.get("snoozed_until"), bool(row.get("false_positive", False)),
         bboxes=bboxes, clean_snapshot_path=row.get("clean_snapshot_path"),
+        delivery_results=delivery_results,
+        policy_id=row.get("policy_id"), priority=row.get("priority"),
+        message=row.get("message"), metadata=metadata,
     )
 
 
@@ -544,7 +588,8 @@ def _build_dict(
     confidence, timestamp, source, description, snapshot_path=None,
     acknowledged_by=None, acknowledged_at=None, resolved_at=None,
     snoozed_until=None, false_positive=False,
-    bboxes=None, clean_snapshot_path=None,
+    bboxes=None, clean_snapshot_path=None, delivery_results=None,
+    policy_id=None, priority=None, message=None, metadata=None,
 ) -> dict:
     return {
         "id": id,
@@ -561,6 +606,11 @@ def _build_dict(
         "snapshotUrl": f"/api/snapshots/{snapshot_path}" if snapshot_path else None,
         "cleanSnapshotUrl": f"/api/snapshots/{clean_snapshot_path}" if clean_snapshot_path else None,
         "bboxes": bboxes or [],
+        "deliveryResults": delivery_results or [],
+        "policyId": policy_id,
+        "priority": priority,
+        "message": message,
+        "metadata": metadata or {},
         "acknowledgedBy": acknowledged_by,
         "acknowledgedAt": acknowledged_at,
         "resolvedAt": resolved_at,

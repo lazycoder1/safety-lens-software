@@ -118,7 +118,7 @@ export function Sidebar() {
         <div className="w-7 h-7 rounded-[var(--radius-md)] bg-[var(--color-text-primary)] flex items-center justify-center shrink-0">
           <ShieldCheck className="w-4 h-4 text-white" />
         </div>
-        {!collapsed && <span className="font-semibold text-sm tracking-tight">SafetyLens</span>}
+        {!collapsed && <span className="font-bold text-[15px] leading-none">Rakshak Lens</span>}
       </NavLink>
 
       <nav className="flex-1 overflow-y-auto py-3">

@@ -11,6 +11,7 @@ interface DetectionChecklistProps {
   safetyRules: SafetyRule[]
   selectedKeys: CameraDetectionKey[]
   onChange: (keys: CameraDetectionKey[]) => void
+  allowCustomDetection?: boolean
 }
 
 const GROUP_ORDER = ["Core Monitoring", "Safety Events", "PPE", "Advanced"] as const
@@ -19,9 +20,12 @@ export function DetectionChecklist({
   safetyRules,
   selectedKeys,
   onChange,
+  allowCustomDetection = false,
 }: DetectionChecklistProps) {
   const selected = new Set(selectedKeys)
-  const options = getDetectionOptions(safetyRules)
+  const options = getDetectionOptions(safetyRules).filter(
+    (option) => allowCustomDetection || option.key !== "custom_long_tail"
+  )
   const availableKeys = options.filter((option) => option.available).map((option) => option.key)
 
   function toggleKey(key: CameraDetectionKey) {
@@ -48,7 +52,7 @@ export function DetectionChecklist({
             Choose one, many, or all detections for this camera.
           </p>
           <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-            These options map directly to the capability planner and the installed model stack.
+            The camera runs only the detections selected here.
           </p>
         </div>
         <div className="flex items-center gap-2">

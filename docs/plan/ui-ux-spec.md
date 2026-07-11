@@ -1,4 +1,4 @@
-# SafetyLens UI/UX Specification
+# Rakshak Lens UI/UX Specification
 
 **Platform:** Video Analytics Safety Monitoring for Industrial Manufacturing
 **Customer:** TMEIC (UPS Manufacturing Unit)
@@ -93,7 +93,7 @@ This is not a hackathon dashboard or a government portal. It is a professional o
 
 ```
 +----------------------------------------------------------+
-| [Logo] SafetyLens    [Zone Filter v]  [Search]  [Bell] [Avatar] |
+| [Logo] Rakshak Lens    [Zone Filter v]  [Search]  [Bell] [Avatar] |
 +-------+--------------------------------------------------+
 |       |                                                  |
 | Side  |              Main Content Area                   |

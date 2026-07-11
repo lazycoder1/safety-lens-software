@@ -33,6 +33,51 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     profileHints: ["general_safety", "work_zone_ppe"],
   },
   {
+    key: "office_occupancy",
+    label: "Office Occupancy",
+    description: "Mark chairs or seats and monitor whether people are present in those work zones.",
+    group: "Core Monitoring",
+    preferredRuleIds: [],
+    matchTerms: ["office occupancy", "chair occupancy", "seat occupancy", "desk occupancy", "workstation"],
+    profileHints: ["office_occupancy"],
+  },
+  {
+    key: "crowd_count_threshold",
+    label: "Crowd Count",
+    description: "Count visible people and evaluate the configured crowd threshold.",
+    group: "Core Monitoring",
+    preferredRuleIds: [],
+    matchTerms: ["crowd count", "people count", "person count", "crowding"],
+    profileHints: ["general_safety", "office_occupancy"],
+  },
+  {
+    key: "queue_monitoring",
+    label: "Queue Monitoring",
+    description: "Measure people, duration, and waiting activity inside queue zones.",
+    group: "Core Monitoring",
+    preferredRuleIds: [],
+    matchTerms: ["queue monitoring", "queue", "waiting line"],
+    profileHints: ["general_safety", "office_occupancy"],
+  },
+  {
+    key: "route_obstruction",
+    label: "Route Obstruction",
+    description: "Monitor gangways and keep-clear zones for blocking people, vehicles, or objects.",
+    group: "Core Monitoring",
+    preferredRuleIds: [],
+    matchTerms: ["route obstruction", "gangway blockage", "keep clear", "obstruction"],
+    profileHints: ["general_safety", "work_zone_ppe"],
+  },
+  {
+    key: "object_lifecycle",
+    label: "Object Lifecycle",
+    description: "Detect when watched objects remain in or are removed from a configured zone.",
+    group: "Core Monitoring",
+    preferredRuleIds: [],
+    matchTerms: ["object lifecycle", "object removed", "object dwell", "unattended object", "watched object"],
+    profileHints: ["general_safety"],
+  },
+  {
     key: "vehicle_presence",
     label: "Vehicles",
     description: "Track cars, trucks, and other vehicles.",
@@ -69,6 +114,15 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     profileHints: ["general_safety", "work_zone_ppe"],
   },
   {
+    key: "fall_detection",
+    label: "Fall / Man Down",
+    description: "Detect a person in a fallen or man-down posture using temporal confirmation.",
+    group: "Safety Events",
+    preferredRuleIds: ["alert_fall_detection"],
+    matchTerms: ["fall detection", "fall detected", "person fall", "man down", "fallen person"],
+    profileHints: ["demo_advanced", "general_safety"],
+  },
+  {
     key: "helmet_required",
     label: "Helmet",
     description: "Check whether workers are wearing helmets.",
@@ -76,6 +130,15 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     preferredRuleIds: ["ppe_helmet"],
     matchTerms: ["helmet", "hard hat", "safety helmet"],
     profileHints: ["work_zone_ppe"],
+  },
+  {
+    key: "rider_helmet_required",
+    label: "Rider Helmet",
+    description: "Check helmets only for people riding motorcycles or site vehicles.",
+    group: "PPE",
+    preferredRuleIds: ["ppe_rider_helmet"],
+    matchTerms: ["rider helmet", "motorcycle helmet", "helmet on vehicle", "helmet while riding"],
+    profileHints: ["general_safety", "work_zone_ppe"],
   },
   {
     key: "vest_required",
@@ -109,8 +172,17 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     label: "Face Mask",
     description: "Check whether workers are wearing face masks.",
     group: "PPE",
-    preferredRuleIds: ["ppe_facemask"],
-    matchTerms: ["face mask", "mask"],
+    preferredRuleIds: ["ppe_face_mask", "ppe_facemask"],
+    matchTerms: ["face mask", "surgical mask", "medical mask", "mask", "respirator"],
+    profileHints: ["work_zone_ppe"],
+  },
+  {
+    key: "face_shield_required",
+    label: "Face Shield",
+    description: "Check whether workers are wearing face shields.",
+    group: "PPE",
+    preferredRuleIds: ["ppe_face_shield"],
+    matchTerms: ["face shield", "protective face shield", "clear face shield", "visor", "protective visor"],
     profileHints: ["work_zone_ppe"],
   },
   {
@@ -128,7 +200,16 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     description: "Check whether workers are wearing safety boots.",
     group: "PPE",
     preferredRuleIds: ["ppe_boots"],
-    matchTerms: ["safety boots", "steel-toe boots", "boots"],
+    matchTerms: ["safety boots", "steel-toe boots", "work boots", "protective boots", "rubber boots", "boots"],
+    profileHints: ["work_zone_ppe"],
+  },
+  {
+    key: "harness_required",
+    label: "Safety Harness",
+    description: "Check whether workers are wearing safety harnesses.",
+    group: "PPE",
+    preferredRuleIds: ["ppe_harness"],
+    matchTerms: ["safety harness", "fall arrest harness", "body harness", "harness"],
     profileHints: ["work_zone_ppe"],
   },
   {
@@ -158,6 +239,24 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     matchTerms: ["face recognition", "face"],
     profileHints: ["demo_advanced"],
   },
+  {
+    key: "plate_recognition",
+    label: "Plate Recognition",
+    description: "Read vehicle number plates on gate cameras.",
+    group: "Advanced",
+    preferredRuleIds: [],
+    matchTerms: ["plate recognition", "license plate", "number plate", "anpr"],
+    profileHints: ["demo_advanced"],
+  },
+  {
+    key: "custom_long_tail",
+    label: "Custom Detection",
+    description: "Detect configured site-specific visible objects or conditions.",
+    group: "Advanced",
+    preferredRuleIds: [],
+    matchTerms: ["custom detection", "custom long tail", "long tail"],
+    profileHints: ["demo_advanced"],
+  },
 ]
 
 const LEGACY_ALERT_TO_KEY: Partial<Record<string, CapabilityKey>> = {
@@ -170,6 +269,23 @@ const LEGACY_ALERT_TO_KEY: Partial<Record<string, CapabilityKey>> = {
 
 const CLASS_TO_KEY: Partial<Record<string, CapabilityKey>> = {
   "cell phone": "mobile_phone",
+  "office occupancy": "office_occupancy",
+  "desk occupancy": "office_occupancy",
+  workstation: "office_occupancy",
+  "chair occupancy": "office_occupancy",
+  "seat occupancy": "office_occupancy",
+  "crowd count": "crowd_count_threshold",
+  "people count": "crowd_count_threshold",
+  "person count": "crowd_count_threshold",
+  "queue monitoring": "queue_monitoring",
+  queue: "queue_monitoring",
+  "route obstruction": "route_obstruction",
+  "gangway blockage": "route_obstruction",
+  "keep clear": "route_obstruction",
+  "object lifecycle": "object_lifecycle",
+  "object removed": "object_lifecycle",
+  "object dwell": "object_lifecycle",
+  "unattended object": "object_lifecycle",
   dog: "animal_presence",
   cat: "animal_presence",
   deer: "animal_presence",
@@ -179,22 +295,50 @@ const CLASS_TO_KEY: Partial<Record<string, CapabilityKey>> = {
   motorcycle: "vehicle_presence",
   "hard hat": "helmet_required",
   "safety helmet": "helmet_required",
+  "rider helmet": "rider_helmet_required",
+  "motorcycle helmet": "rider_helmet_required",
+  "helmet on vehicle": "rider_helmet_required",
+  "helmet while riding": "rider_helmet_required",
   "safety vest": "vest_required",
   "high visibility vest": "vest_required",
   "fluorescent vest": "vest_required",
   gloves: "gloves_required",
   hairnet: "hairnet_required",
   "face mask": "face_mask_required",
+  "surgical mask": "face_mask_required",
+  "medical mask": "face_mask_required",
+  mask: "face_mask_required",
+  respirator: "face_mask_required",
+  "face shield": "face_shield_required",
+  "protective face shield": "face_shield_required",
+  "clear face shield": "face_shield_required",
+  visor: "face_shield_required",
+  "protective visor": "face_shield_required",
   apron: "apron_required",
   "safety boots": "boots_required",
   "steel toe boots": "boots_required",
   "steel-toe boots": "boots_required",
+  "work boots": "boots_required",
+  "protective boots": "boots_required",
+  "rubber boots": "boots_required",
+  "safety harness": "harness_required",
+  "fall arrest harness": "harness_required",
+  "body harness": "harness_required",
+  harness: "harness_required",
   "safety goggles": "goggles_required",
   "protective eyewear": "goggles_required",
   fire: "fire_smoke",
   smoke: "fire_smoke",
   flames: "fire_smoke",
+  "fall detection": "fall_detection",
+  "fall detected": "fall_detection",
+  "person fall": "fall_detection",
+  "man down": "fall_detection",
   "face recognition": "face_recognition",
+  "plate recognition": "plate_recognition",
+  "license plate": "plate_recognition",
+  "number plate": "plate_recognition",
+  anpr: "plate_recognition",
 }
 
 function normalizeText(value: string) {
@@ -254,7 +398,7 @@ function inferDetectionKeyFromText(value: string): CapabilityKey | null {
 export function getSelectedDetectionKeys(ruleIds: string[], rules: SafetyRule[]): CapabilityKey[] {
   const selected = new Set(ruleIds)
   return getDetectionOptions(rules)
-    .filter((option) => option.ruleId && selected.has(option.ruleId))
+    .filter((option) => (option.ruleId && selected.has(option.ruleId)) || option.preferredRuleIds.some((ruleId) => selected.has(ruleId)))
     .map((option) => option.key)
 }
 
@@ -297,8 +441,8 @@ export function getSelectedRuleIds(keys: CapabilityKey[], rules: SafetyRule[]): 
 export function getUnmappedRuleIds(ruleIds: string[], rules: SafetyRule[]) {
   const mappedRuleIds = new Set(
     getDetectionOptions(rules)
-      .filter((option) => option.ruleId)
-      .map((option) => option.ruleId as string)
+      .flatMap((option) => [option.ruleId, ...option.preferredRuleIds])
+      .filter(Boolean) as string[]
   )
   return ruleIds.filter((ruleId) => !mappedRuleIds.has(ruleId))
 }
@@ -342,10 +486,18 @@ export function usesZoneIntrusion(keys: CapabilityKey[]) {
   return keys.includes("zone_intrusion")
 }
 
+export function usesConfiguredZones(keys: CapabilityKey[]) {
+  return keys.some((key) =>
+    ["zone_intrusion", "office_occupancy", "queue_monitoring", "route_obstruction", "object_lifecycle"].includes(key)
+  )
+}
+
 export function deriveCameraPurpose(keys: CapabilityKey[]) {
   if (keys.length === 0) return "Monitoring only"
   if (keys.length === 1 && keys[0] === "animal_presence") return "Animal monitoring"
   if (keys.length === 1 && keys[0] === "zone_intrusion") return "Restricted zone monitoring"
+  if (keys.includes("office_occupancy")) return "Office occupancy"
+  if (keys.includes("plate_recognition")) return "Vehicle access monitoring"
   if (keys.every((key) => key.endsWith("_required"))) return "PPE compliance"
   if (keys.includes("fire_smoke")) return "Advanced monitoring"
   return "Custom monitoring"
@@ -367,7 +519,7 @@ export function deriveConfiguredCameraPurpose(camera: CameraLike, rules: SafetyR
 
 export function getDetectionModeForKeys(keys: CapabilityKey[]) {
   if (hasPpeDetections(keys) || keys.includes("fire_smoke")) {
-    return keys.some((key) => ["person_presence", "vehicle_presence", "animal_presence", "mobile_phone", "zone_intrusion"].includes(key))
+    return keys.some((key) => ["person_presence", "vehicle_presence", "animal_presence", "mobile_phone", "zone_intrusion", "rider_helmet_required"].includes(key))
       ? "yolo+yoloe"
       : "yoloe"
   }

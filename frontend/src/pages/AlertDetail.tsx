@@ -168,6 +168,27 @@ export function AlertDetail() {
         </div>
       </Card>
 
+      {alert.deliveryResults && alert.deliveryResults.length > 0 && (
+        <Card>
+          <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3 uppercase tracking-wider">
+            Delivery
+          </h3>
+          <div className="space-y-2">
+            {alert.deliveryResults.map((result) => (
+              <div key={`${result.outputId}-${result.timestamp}`} className="flex items-center justify-between gap-3 text-sm">
+                <div>
+                  <p className="font-medium text-[var(--color-text-primary)]">{result.outputName}</p>
+                  <p className="text-xs text-[var(--color-text-secondary)]">{result.message}</p>
+                </div>
+                <Badge variant={result.status === "failed" ? "critical" : result.status === "simulated" ? "info" : "success"} className="capitalize">
+                  {result.status}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* Bounding boxes info */}
       {alert.bboxes && alert.bboxes.length > 0 && (
         <Card>

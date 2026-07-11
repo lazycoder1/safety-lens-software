@@ -345,6 +345,32 @@ class TestPersistence:
         with pytest.raises(licensing.InvalidHeartbeat, match="does not match"):
             licensing.save_heartbeat(wrong_hb)
 
+    def test_save_renewed_license_ignores_heartbeat_expired_before_issue(self, configured_module):
+        private_key, _ = configured_module
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        stale_valid_until = now - timedelta(days=1)
+
+        licensing.HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        licensing.HEARTBEAT_PATH.write_bytes(
+            _sign_heartbeat(
+                private_key,
+                valid_until=stale_valid_until.isoformat().replace("+00:00", "Z"),
+                issued_at=(stale_valid_until - timedelta(days=35)).isoformat().replace("+00:00", "Z"),
+            )
+        )
+
+        licensing.save_license(
+            _sign_license(
+                private_key,
+                issued_at=now.isoformat().replace("+00:00", "Z"),
+                expires_at=(now + timedelta(days=365)).isoformat().replace("+00:00", "Z"),
+            )
+        )
+
+        status = licensing.get_status()
+        assert status.state == licensing.LicenseState.VALID
+        assert status.heartbeat is None
+
 
 # ── Public API ──────────────────────────────────────────────────────────────
 

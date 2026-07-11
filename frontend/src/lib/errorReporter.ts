@@ -3,7 +3,8 @@
  * Never throws, never blocks. Silently drops if the server is unreachable.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || ""
+const DEV_API_HOST = window.location.hostname || "localhost"
+const API_BASE = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? `http://${DEV_API_HOST}:8000` : "")
 
 export function reportError(
   error: unknown,

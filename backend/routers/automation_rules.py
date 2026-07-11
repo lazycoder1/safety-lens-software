@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from config_manager import get_config, save_config
 
-logger = logging.getLogger("safetylens.automation_rules")
+logger = logging.getLogger("rakshak_lens.automation_rules")
 
 router = APIRouter(prefix="/api", tags=["automation-rules"])
 
@@ -161,6 +161,10 @@ class AutomationRuleCreate(BaseModel):
     elseActions: list[ActionModel] = []
     cooldownSeconds: int = 60
     priority: int = 5
+    severity: Optional[str] = None
+    outputIds: list[str] = []
+    messageTemplate: str = ""
+    schedule: Optional[dict] = None
     preset: Optional[str] = None
 
 
@@ -175,6 +179,10 @@ class AutomationRuleUpdate(BaseModel):
     elseActions: Optional[list[ActionModel]] = None
     cooldownSeconds: Optional[int] = None
     priority: Optional[int] = None
+    severity: Optional[str] = None
+    outputIds: Optional[list[str]] = None
+    messageTemplate: Optional[str] = None
+    schedule: Optional[dict] = None
     preset: Optional[str] = None
 
 

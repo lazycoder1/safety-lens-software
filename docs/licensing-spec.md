@@ -1,6 +1,6 @@
-# SafetyLens Licensing Spec
+# Rakshak Lens Licensing Spec
 
-This is the **single source of truth** for the license file format, the heartbeat token format, the signing/verification algorithm, and the enforcement state machine. Both SafetyLens edge (`video-analytics`) and License Hub (separate repo) implement against this spec.
+This is the **single source of truth** for the license file format, the heartbeat token format, the signing/verification algorithm, and the enforcement state machine. Both Rakshak Lens edge (`video-analytics`) and License Hub (separate repo) implement against this spec.
 
 ## Goals
 

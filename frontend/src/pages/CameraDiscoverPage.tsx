@@ -9,7 +9,7 @@ import { SearchInput } from "@/components/ui/SearchInput"
 import { DetectionChecklist } from "@/components/cameras/DetectionChecklist"
 import { Field } from "@/components/cameras/helpers"
 import { PROFILE_DEFAULTS, PROFILE_OPTIONS } from "@/components/cameras/profileOptions"
-import { getDetectionLabelsFromKeys, usesZoneIntrusion, type CameraDetectionKey } from "@/components/cameras/detectionCatalog"
+import { getDetectionLabelsFromKeys, usesConfiguredZones, type CameraDetectionKey } from "@/components/cameras/detectionCatalog"
 import { discoverCameras, getSafetyRules, importDiscoveredCameras, testDiscoveredCamera } from "@/lib/api"
 import type {
   CameraProfile,
@@ -87,9 +87,27 @@ export function CameraDiscoverPage() {
 
   const selectedDevices = useMemo(() => devices.filter((device) => selectedIds.includes(device.fingerprint)), [devices, selectedIds])
 
+  const selectableFilteredFingerprints = useMemo(
+    () => filteredDevices
+      .filter((device) => device.duplicate_state !== "exact")
+      .map((device) => device.fingerprint),
+    [filteredDevices]
+  )
+
+  const allVisibleSelected = selectableFilteredFingerprints.length > 0 &&
+    selectableFilteredFingerprints.every((fingerprint) => selectedIds.includes(fingerprint))
+
   const readyFingerprints = useMemo(
     () => selectedIds.filter((fingerprint) => testResults[fingerprint]?.ok),
     [selectedIds, testResults]
+  )
+
+  const missingRequiredSetupFingerprints = useMemo(
+    () => readyFingerprints.filter((fingerprint) => {
+      const override = overridesById[fingerprint]
+      return !override?.displayName.trim() || !override?.zone.trim()
+    }),
+    [readyFingerprints, overridesById]
   )
 
   const exactDuplicateCount = useMemo(
@@ -140,7 +158,7 @@ export function CameraDiscoverPage() {
       const nextDevices = (result.devices || []) as DiscoveredCamera[]
       setDevices(nextDevices)
       setWarnings(result.warnings || [])
-      setSelectedIds(nextDevices.filter((device) => device.duplicate_state !== "exact").map((device) => device.fingerprint))
+      setSelectedIds([])
       initializeOverrides(nextDevices)
       setPhase("review")
       if (nextDevices.length === 0) {
@@ -184,6 +202,14 @@ export function CameraDiscoverPage() {
         ? current.filter((item) => item !== fingerprint)
         : [...current, fingerprint]
     )
+  }
+
+  function selectVisibleCameras() {
+    setSelectedIds((current) => Array.from(new Set([...current, ...selectableFilteredFingerprints])))
+  }
+
+  function clearVisibleSelection() {
+    setSelectedIds((current) => current.filter((fingerprint) => !selectableFilteredFingerprints.includes(fingerprint)))
   }
 
   function updateOverride(fingerprint: string, patch: Partial<DiscoveryRowOverride>) {
@@ -248,29 +274,35 @@ export function CameraDiscoverPage() {
       toast.error("Test at least one camera successfully before importing")
       return
     }
+    if (missingRequiredSetupFingerprints.length > 0) {
+      toast.error("Add a display name and area/location before importing")
+      setPhase("review")
+      return
+    }
     setPhase("importing")
     try {
       const payload = readyFingerprints.map((fingerprint) => {
         const device = devices.find((item) => item.fingerprint === fingerprint)!
         const override = overridesById[fingerprint]
+        const testResult = testResults[fingerprint]
         const username = override.credentialMode === "override" ? override.username.trim() : sharedUsername.trim()
         const password = override.credentialMode === "override" ? override.password : sharedPassword
         return {
           fingerprint,
-          host: device.host,
+          host: testResult.host || device.host,
           ip: device.ip,
           name: override.displayName.trim(),
           zone: override.zone.trim(),
           profile: override.profile,
           capabilities: override.capabilities,
-          preferred_stream: override.preferredStream,
-          stream_path: override.streamPath,
+          preferred_stream: testResult.preferred_stream || override.preferredStream,
+          stream_path: testResult.stream_path || override.streamPath,
           username,
           password,
-          onvif_uuid: device.onvif_uuid || "",
+          onvif_uuid: testResult.onvif_uuid || device.onvif_uuid || "",
           onvif_xaddr: device.onvif_xaddr || "",
-          onvif_port: device.onvif_port || null,
-          rtsp_port: device.rtsp_port || null,
+          onvif_port: testResult.onvif_port || device.onvif_port || null,
+          rtsp_port: testResult.rtsp_port || device.rtsp_port || null,
         }
       })
       const result = (await importDiscoveredCameras({ devices: payload })) as DiscoveryImportResult
@@ -356,7 +388,7 @@ export function CameraDiscoverPage() {
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Scan local network</h2>
             <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-              SafetyLens will scan the server’s attached private subnets for ONVIF devices and reachable RTSP services.
+              Rakshak Lens will scan the server’s attached private subnets for ONVIF devices and reachable RTSP services.
             </p>
           </div>
 
@@ -403,14 +435,39 @@ export function CameraDiscoverPage() {
                 <div>
                   <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Discovered Devices</h2>
                   <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                    Select the cameras to review, validate, and import.
+                    Choose only the cameras you want to configure. Unselected cameras will be ignored.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge variant="info">{devices.length} found</Badge>
+                  <Badge variant="default">{selectedIds.length} selected</Badge>
                   {exactDuplicateCount > 0 && <Badge variant="warning">{exactDuplicateCount} duplicates</Badge>}
                   {needsCredentialCount > 0 && <Badge variant="warning">{needsCredentialCount} need credentials</Badge>}
                 </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 rounded-[var(--radius-md)] border bg-[var(--color-bg-tertiary)] px-3 py-3">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={selectVisibleCameras}
+                  disabled={selectableFilteredFingerprints.length === 0 || allVisibleSelected}
+                >
+                  Select Visible Cameras
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={clearVisibleSelection}
+                  disabled={selectableFilteredFingerprints.every((fingerprint) => !selectedIds.includes(fingerprint))}
+                >
+                  Clear Visible Selection
+                </Button>
+                <span className="text-sm text-[var(--color-text-secondary)]">
+                  {selectableFilteredFingerprints.length} configurable in this view
+                </span>
               </div>
 
               <SearchInput
@@ -429,20 +486,24 @@ export function CameraDiscoverPage() {
                     const selected = selectedIds.includes(device.fingerprint)
                     const override = overridesById[device.fingerprint]
                     const result = testResults[device.fingerprint]
-                    const showOverrideCredentials =
-                      override?.credentialMode === "override" ||
-                      result?.error_code === "auth_failed"
                     return (
                       <Card key={device.fingerprint} className={`space-y-4 ${selected ? "border-[var(--color-info)]" : ""}`}>
                         <div className="flex items-start justify-between gap-4">
                           <div className="flex items-start gap-3">
-                            <input
-                              type="checkbox"
-                              checked={selected}
-                              disabled={device.duplicate_state === "exact"}
-                              onChange={() => toggleSelection(device.fingerprint)}
-                              className="mt-1 h-4 w-4 rounded border-[var(--color-border-default)]"
-                            />
+                            <label className={`mt-0.5 flex items-center gap-2 rounded-[var(--radius-md)] border px-3 py-2 text-sm font-medium ${
+                              selected
+                                ? "border-[var(--color-info)] bg-[var(--color-info-bg)] text-[var(--color-info)]"
+                                : "border-[var(--color-border-default)] bg-white text-[var(--color-text-secondary)]"
+                            } ${device.duplicate_state === "exact" ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                disabled={device.duplicate_state === "exact"}
+                                onChange={() => toggleSelection(device.fingerprint)}
+                                className="h-4 w-4 rounded border-[var(--color-border-default)]"
+                              />
+                              Configure
+                            </label>
                             <div>
                               <div className="flex flex-wrap items-center gap-2">
                                 <p className="text-sm font-semibold text-[var(--color-text-primary)]">{override?.displayName || defaultDisplayName(device)}</p>
@@ -479,18 +540,28 @@ export function CameraDiscoverPage() {
                                   type="text"
                                   value={override.displayName}
                                   onChange={(event) => updateOverride(device.fingerprint, { displayName: event.target.value })}
-                                  className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
+                                  className={`w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)] ${
+                                    result?.ok && !override.displayName.trim() ? "border-[var(--color-critical)]" : ""
+                                  }`}
                                 />
                               </Field>
-                              <Field label="Zone / Location">
+                              <Field label="Area / Location">
                                 <input
                                   type="text"
                                   value={override.zone}
                                   onChange={(event) => updateOverride(device.fingerprint, { zone: event.target.value })}
-                                  className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
+                                  className={`w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)] ${
+                                    result?.ok && !override.zone.trim() ? "border-[var(--color-critical)]" : ""
+                                  }`}
                                 />
                               </Field>
                             </div>
+
+                            {result?.ok && (!override.displayName.trim() || !override.zone.trim()) && (
+                              <div className="rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[var(--color-warning-bg)] px-3 py-2 text-sm text-[var(--color-text-secondary)]">
+                                Add a display name and area/location before importing this camera.
+                              </div>
+                            )}
 
                             <div className="grid gap-4 md:grid-cols-2">
                               <Field label="Camera Profile">
@@ -533,51 +604,75 @@ export function CameraDiscoverPage() {
                               </Field>
                             )}
 
+                            <div className="space-y-3 rounded-[var(--radius-md)] border px-3 py-3">
+                              <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-medium text-[var(--color-text-primary)]">Camera Login</p>
+                                  <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+                                    Use shared credentials, or enter a different login for this camera.
+                                  </p>
+                                </div>
+                                <div className="flex rounded-[var(--radius-md)] border bg-white p-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => updateOverride(device.fingerprint, { credentialMode: "inherit" })}
+                                    className={`rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium ${
+                                      override.credentialMode === "inherit"
+                                        ? "bg-[var(--color-info-bg)] text-[var(--color-info)]"
+                                        : "text-[var(--color-text-secondary)]"
+                                    }`}
+                                  >
+                                    Shared
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => updateOverride(device.fingerprint, { credentialMode: "override" })}
+                                    className={`rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium ${
+                                      override.credentialMode === "override"
+                                        ? "bg-[var(--color-info-bg)] text-[var(--color-info)]"
+                                        : "text-[var(--color-text-secondary)]"
+                                    }`}
+                                  >
+                                    Custom
+                                  </button>
+                                </div>
+                              </div>
+
+                              {override.credentialMode === "inherit" && (
+                                <p className="rounded-[var(--radius-md)] bg-[var(--color-bg-tertiary)] px-3 py-2 text-sm text-[var(--color-text-secondary)]">
+                                  This camera will use the shared username and password from the setup panel.
+                                </p>
+                              )}
+
+                              {override.credentialMode === "override" && (
+                                <div className="grid gap-4 md:grid-cols-2">
+                                  <Field label="Username">
+                                    <input
+                                      type="text"
+                                      value={override.username}
+                                      onChange={(event) => updateOverride(device.fingerprint, { username: event.target.value, credentialMode: "override" })}
+                                      placeholder="admin"
+                                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
+                                    />
+                                  </Field>
+                                  <Field label="Password">
+                                    <input
+                                      type="password"
+                                      value={override.password}
+                                      onChange={(event) => updateOverride(device.fingerprint, { password: event.target.value, credentialMode: "override" })}
+                                      placeholder="Camera password"
+                                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
+                                    />
+                                  </Field>
+                                </div>
+                              )}
+                            </div>
+
                             <details className="rounded-[var(--radius-md)] border px-3 py-3">
                               <summary className="cursor-pointer text-sm font-medium text-[var(--color-text-primary)]">
                                 Advanced
                               </summary>
                               <div className="mt-4 space-y-4">
-                                <div className="flex items-center justify-between gap-3 rounded-[var(--radius-md)] bg-[var(--color-bg-tertiary)] px-3 py-2">
-                                  <div>
-                                    <p className="text-sm font-medium text-[var(--color-text-primary)]">Credential Mode</p>
-                                    <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                                      Use shared credentials for most cameras, then override only failures.
-                                    </p>
-                                  </div>
-                                  <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    type="button"
-                                    onClick={() => updateOverride(device.fingerprint, {
-                                      credentialMode: override.credentialMode === "inherit" ? "override" : "inherit",
-                                    })}
-                                  >
-                                    {override.credentialMode === "inherit" ? "Override" : "Use Shared"}
-                                  </Button>
-                                </div>
-
-                                {showOverrideCredentials && (
-                                  <div className="grid gap-4 md:grid-cols-2">
-                                    <Field label="Camera Username">
-                                      <input
-                                        type="text"
-                                        value={override.username}
-                                        onChange={(event) => updateOverride(device.fingerprint, { username: event.target.value, credentialMode: "override" })}
-                                        className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
-                                      />
-                                    </Field>
-                                    <Field label="Camera Password">
-                                      <input
-                                        type="password"
-                                        value={override.password}
-                                        onChange={(event) => updateOverride(device.fingerprint, { password: event.target.value, credentialMode: "override" })}
-                                        className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
-                                      />
-                                    </Field>
-                                  </div>
-                                )}
-
                                 <div>
                                   <p className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">Detections</p>
                                   <DetectionChecklist
@@ -592,7 +687,7 @@ export function CameraDiscoverPage() {
                             {device.duplicate_state === "exact" && device.existing_camera_id && (
                               <div className="flex items-center justify-between rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[var(--color-warning-bg)] px-3 py-2">
                                 <p className="text-sm text-[var(--color-text-secondary)]">
-                                  This camera already exists in SafetyLens.
+                                  This camera already exists in Rakshak Lens.
                                 </p>
                                 <Button variant="secondary" size="sm" onClick={() => navigate(`/configure/cameras/${device.existing_camera_id}`)}>
                                   Open Existing
@@ -646,7 +741,7 @@ export function CameraDiscoverPage() {
                   </Field>
                 </div>
 
-                <Field label="Default Zone / Location">
+                <Field label="Default Area / Location">
                   <input
                     type="text"
                     value={sharedZone}
@@ -722,10 +817,10 @@ export function CameraDiscoverPage() {
 
               {selectedDevices.some((device) => {
                 const override = overridesById[device.fingerprint]
-                return override && usesZoneIntrusion(override.capabilities)
+                return override && usesConfiguredZones(override.capabilities)
               }) && (
                 <p className="text-xs text-[var(--color-text-secondary)]">
-                  Cameras with Zone Intrusion enabled will still need polygon setup after import.
+                  Cameras with zone-based detections enabled will still need polygon setup after import.
                 </p>
               )}
             </Card>

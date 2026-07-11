@@ -2,7 +2,7 @@ import { useState, useEffect } from "react"
 import { Trash2 } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { getCameras, getZones, addZone, deleteZone, updateZone, API_BASE } from "@/lib/api"
+import { getCameras, getZones, addZone, deleteZone, updateZone, STREAM_BASE } from "@/lib/api"
 import { PolygonDrawer } from "@/components/zones/PolygonDrawer"
 import type { Zone } from "@/types"
 
@@ -37,14 +37,14 @@ export function ZoneManagement() {
     }
   }, [selectedCamId])
 
-  async function handleSaveZone(zone: { name: string; type: string; color: string; points: number[][] }) {
+  async function handleSaveZone(zone: Omit<Zone, "id">) {
     if (!selectedCamId) return
     await addZone(selectedCamId, zone)
     const updated = await getZones(selectedCamId)
     setZones(updated)
   }
 
-  async function handleUpdateZone(zoneId: string, updates: { points: number[][] }) {
+  async function handleUpdateZone(zoneId: string, updates: Partial<Zone>) {
     if (!selectedCamId) return
     await updateZone(selectedCamId, zoneId, updates)
     const updated = await getZones(selectedCamId)
@@ -177,7 +177,7 @@ export function ZoneManagement() {
           {selectedCamId ? (
             <PolygonDrawer
               key={selectedCamId}
-              imageUrl={`${API_BASE}/api/stream/${selectedCamId}`}
+              imageUrl={`${STREAM_BASE}/api/stream/${selectedCamId}`}
               existingZones={zones}
               onSave={handleSaveZone}
               onDelete={handleDeleteZone}

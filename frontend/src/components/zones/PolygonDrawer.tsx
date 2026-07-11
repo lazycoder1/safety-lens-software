@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { Plus, Shield, AlertTriangle, HardHat, Pencil, Trash2, X } from "lucide-react"
+import { Plus, Shield, AlertTriangle, HardHat, Monitor, Pencil, Trash2, X } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -17,14 +17,23 @@ export const ZONE_TYPES: ZoneType[] = [
   { key: "restricted", label: "Restricted Area", color: "#dc2626", icon: Shield, desc: "No entry — triggers P1 alert" },
   { key: "caution", label: "Caution Zone", color: "#f59e0b", icon: AlertTriangle, desc: "Extra care needed — triggers P2 alert" },
   { key: "ppe_required", label: "PPE Required", color: "#2563eb", icon: HardHat, desc: "Must wear PPE in this zone" },
+  { key: "workstation", label: "Chair", color: "#059669", icon: Monitor, desc: "Chair/seat zone for occupancy tracking" },
+  { key: "gangway", label: "Gangway", color: "#7c3aed", icon: Monitor, desc: "Pedestrian or material movement path" },
+  { key: "motor_risk_zone", label: "Motor Risk", color: "#be123c", icon: AlertTriangle, desc: "Machine or motor danger area" },
+  { key: "queue", label: "Queue", color: "#0891b2", icon: Monitor, desc: "Queue density and dwell monitoring" },
+  { key: "object_watch", label: "Object Watch", color: "#0f766e", icon: Monitor, desc: "Watched-object dwell and removal monitoring" },
+  { key: "loading_bay", label: "Loading Bay", color: "#9333ea", icon: Monitor, desc: "Truck or loading operations area" },
+  { key: "forklift_lane", label: "Forklift Lane", color: "#ea580c", icon: AlertTriangle, desc: "Forklift movement lane" },
+  { key: "exclusion", label: "Exclusion Zone", color: "#4b5563", icon: Shield, desc: "Ignore or suppress detections in this area" },
 ]
 
 export interface PolygonDrawerProps {
   imageUrl: string
   existingZones?: Zone[]
-  onSave: (zone: { name: string; type: string; color: string; points: number[][] }) => Promise<void>
+  defaultZoneType?: string
+  onSave: (zone: Omit<Zone, "id">) => Promise<void>
   onDelete?: (zoneId: string) => Promise<void>
-  onUpdate?: (zoneId: string, updates: { points: number[][] }) => Promise<void>
+  onUpdate?: (zoneId: string, updates: Partial<Zone>) => Promise<void>
   onDraftStateChange?: (hasDraft: boolean) => void
 }
 
@@ -33,6 +42,23 @@ function getDefaultZoneName(zoneType: string, zoneCount: number): string {
     ZONE_TYPES.find((item) => item.key === zoneType)?.label.replace(" Area", "") ||
     "Zone"
   return `${zoneTypeLabel} ${zoneCount}`
+}
+
+function defaultAnalyticsForZone(zoneType: string): string {
+  const mapping: Record<string, string> = {
+    restricted: "intrusion",
+    caution: "intrusion",
+    ppe_required: "ppe",
+    workstation: "occupancy",
+    queue: "queue",
+    object_watch: "object_lifecycle",
+    gangway: "obstruction",
+    loading_bay: "vehicle_presence",
+    forklift_lane: "vehicle_presence",
+    motor_risk_zone: "intrusion",
+    exclusion: "exclusion",
+  }
+  return mapping[zoneType] || "intrusion"
 }
 
 /* ── geometry helpers ── */
@@ -63,6 +89,7 @@ function distPx(
 export function PolygonDrawer({
   imageUrl,
   existingZones = [],
+  defaultZoneType = "restricted",
   onSave,
   onDelete,
   onUpdate,
@@ -72,7 +99,14 @@ export function PolygonDrawer({
   const [drawingMode, setDrawingMode] = useState(false)
   const [currentPoints, setCurrentPoints] = useState<number[][]>([])
   const [newZoneName, setNewZoneName] = useState("")
-  const [newZoneType, setNewZoneType] = useState("restricted")
+  const [newZoneType, setNewZoneType] = useState(defaultZoneType)
+  const [newZoneAnalytics, setNewZoneAnalytics] = useState(defaultAnalyticsForZone(defaultZoneType))
+  const [newZoneClasses, setNewZoneClasses] = useState("")
+  const [newZoneThreshold, setNewZoneThreshold] = useState("")
+  const [newZoneMinDuration, setNewZoneMinDuration] = useState("")
+  const [newZoneArea, setNewZoneArea] = useState("")
+  const [newZoneP1Threshold, setNewZoneP1Threshold] = useState("")
+  const [newZoneP2Threshold, setNewZoneP2Threshold] = useState("")
   const [saving, setSaving] = useState(false)
 
   // selection & editing
@@ -387,11 +421,20 @@ export function PolygonDrawer({
       if (editingZoneId && onUpdate) {
         await onUpdate(editingZoneId, { points: currentPoints })
       } else {
+        const severityThresholds: Record<string, number> = {}
+        if (newZoneP1Threshold.trim()) severityThresholds.P1 = Number(newZoneP1Threshold)
+        if (newZoneP2Threshold.trim()) severityThresholds.P2 = Number(newZoneP2Threshold)
         await onSave({
           name: newZoneName.trim(),
           type: newZoneType,
           color: typeConfig?.color || "#dc2626",
           points: currentPoints,
+          analytics: newZoneAnalytics || null,
+          classes: newZoneClasses.split(",").map((item) => item.trim()).filter(Boolean),
+          threshold: numberOrNull(newZoneThreshold),
+          min_duration_seconds: numberOrNull(newZoneMinDuration),
+          area_square_meters: numberOrNull(newZoneArea),
+          severity_thresholds: Object.keys(severityThresholds).length ? severityThresholds : null,
         })
       }
       resetDrawing()
@@ -406,14 +449,28 @@ export function PolygonDrawer({
     setDrawingMode(false)
     setCurrentPoints([])
     setNewZoneName("")
-    setNewZoneType("restricted")
+    setNewZoneType(defaultZoneType)
+    setNewZoneAnalytics(defaultAnalyticsForZone(defaultZoneType))
+    setNewZoneClasses("")
+    setNewZoneThreshold("")
+    setNewZoneMinDuration("")
+    setNewZoneArea("")
+    setNewZoneP1Threshold("")
+    setNewZoneP2Threshold("")
     setEditingZoneId(null)
   }
 
   function resetDrawing() {
     setCurrentPoints([])
     setNewZoneName("")
-    setNewZoneType("restricted")
+    setNewZoneType(defaultZoneType)
+    setNewZoneAnalytics(defaultAnalyticsForZone(defaultZoneType))
+    setNewZoneClasses("")
+    setNewZoneThreshold("")
+    setNewZoneMinDuration("")
+    setNewZoneArea("")
+    setNewZoneP1Threshold("")
+    setNewZoneP2Threshold("")
     setDrawingMode(false)
     setEditingZoneId(null)
     setSelectedZoneId(null)
@@ -424,6 +481,13 @@ export function PolygonDrawer({
     setNewZoneName(zone.name)
     const zt = ZONE_TYPES.find((t) => t.key === zone.type)
     setNewZoneType(zt ? zt.key : "restricted")
+    setNewZoneAnalytics(zone.analytics || defaultAnalyticsForZone(zt ? zt.key : "restricted"))
+    setNewZoneClasses((zone.classes || []).join(", "))
+    setNewZoneThreshold(numberToInput(zone.threshold))
+    setNewZoneMinDuration(numberToInput(zone.min_duration_seconds))
+    setNewZoneArea(numberToInput(zone.area_square_meters))
+    setNewZoneP1Threshold(numberToInput(zone.severity_thresholds?.P1))
+    setNewZoneP2Threshold(numberToInput(zone.severity_thresholds?.P2))
     setCurrentPoints([])
     setDrawingMode(true)
     setSelectedZoneId(null)
@@ -431,8 +495,15 @@ export function PolygonDrawer({
 
   function startNewZone() {
     setCurrentPoints([])
-    setNewZoneType("restricted")
-    setNewZoneName(getDefaultZoneName("restricted", existingZones.length + 1))
+    setNewZoneType(defaultZoneType)
+    setNewZoneAnalytics(defaultAnalyticsForZone(defaultZoneType))
+    setNewZoneClasses("")
+    setNewZoneThreshold("")
+    setNewZoneMinDuration("")
+    setNewZoneArea("")
+    setNewZoneP1Threshold("")
+    setNewZoneP2Threshold("")
+    setNewZoneName(getDefaultZoneName(defaultZoneType, existingZones.length + 1))
     setDrawingMode(true)
     setEditingZoneId(null)
     setSelectedZoneId(null)
@@ -509,6 +580,7 @@ export function PolygonDrawer({
           </span>
           <span className="text-xs text-[var(--color-text-tertiary)]">
             {ZONE_TYPES.find((t) => t.key === selectedZone.type)?.label ?? selectedZone.type}
+            {selectedZone.analytics ? ` · ${selectedZone.analytics}` : ""}
           </span>
           {onUpdate && (
             <Button variant="secondary" size="sm" onClick={() => startRedraw(selectedZone)}>
@@ -559,14 +631,17 @@ export function PolygonDrawer({
 
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium text-[var(--color-text-primary)]">Zone Type</label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                     {ZONE_TYPES.map((zt) => {
                       const Icon = zt.icon
                       return (
                         <button
                           key={zt.key}
                           type="button"
-                          onClick={() => setNewZoneType(zt.key)}
+                          onClick={() => {
+                            setNewZoneType(zt.key)
+                            setNewZoneAnalytics(defaultAnalyticsForZone(zt.key))
+                          }}
                           className={`flex flex-col items-center gap-1.5 p-3 rounded-[var(--radius-md)] border text-xs cursor-pointer transition-colors ${
                             newZoneType === zt.key
                               ? "border-2"
@@ -579,6 +654,99 @@ export function PolygonDrawer({
                         </button>
                       )
                     })}
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Analytics Type</label>
+                    <select
+                      value={newZoneAnalytics}
+                      onChange={(event) => setNewZoneAnalytics(event.target.value)}
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    >
+                      <option value="intrusion">Restricted entry</option>
+                      <option value="ppe">PPE required</option>
+                      <option value="occupancy">Occupancy</option>
+                      <option value="queue">Queue</option>
+                      <option value="obstruction">Route obstruction</option>
+                      <option value="vehicle_presence">Vehicle presence</option>
+                      <option value="object_lifecycle">Object lifecycle</option>
+                      <option value="exclusion">Exclusion / ignore</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Target Classes</label>
+                    <input
+                      type="text"
+                      value={newZoneClasses}
+                      onChange={(event) => setNewZoneClasses(event.target.value)}
+                      placeholder="person, forklift, truck"
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-5">
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Threshold</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={newZoneThreshold}
+                      onChange={(event) => setNewZoneThreshold(event.target.value)}
+                      placeholder="default"
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Min Dwell</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      value={newZoneMinDuration}
+                      onChange={(event) => setNewZoneMinDuration(event.target.value)}
+                      placeholder="seconds"
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">Area m2</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={newZoneArea}
+                      onChange={(event) => setNewZoneArea(event.target.value)}
+                      placeholder="optional"
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">P1 At</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={newZoneP1Threshold}
+                      onChange={(event) => setNewZoneP1Threshold(event.target.value)}
+                      placeholder="optional"
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-[var(--color-text-primary)]">P2 At</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={newZoneP2Threshold}
+                      onChange={(event) => setNewZoneP2Threshold(event.target.value)}
+                      placeholder="optional"
+                      className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                    />
                   </div>
                 </div>
               </>
@@ -623,4 +791,16 @@ export function PolygonDrawer({
       )}
     </div>
   )
+}
+
+function numberOrNull(value: string): number | null {
+  if (!value.trim()) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function numberToInput(value: unknown): string {
+  if (value === null || value === undefined || value === "") return ""
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? String(parsed) : ""
 }

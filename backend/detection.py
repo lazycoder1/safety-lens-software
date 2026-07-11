@@ -1,8 +1,9 @@
 """
-SafetyLens detection logic — drawing, PPE checks, zone intrusions, violations.
+Rakshak Lens detection logic — drawing, PPE checks, zone intrusions, violations.
 """
 
 import logging
+import math
 
 import cv2
 import numpy as np
@@ -10,7 +11,7 @@ import numpy as np
 from config_manager import get_config
 from constants import COCO_NAMES, CLASS_COLORS, YOLOE_COLORS
 
-logger = logging.getLogger("safetylens")
+logger = logging.getLogger("rakshak_lens")
 
 # ── Unified draw function ───────────────────────────────────────────────────
 
@@ -226,57 +227,181 @@ def _midpoint(kp_a, kp_b):
     return ((kp_a[0] + kp_b[0]) / 2.0, (kp_a[1] + kp_b[1]) / 2.0)
 
 
-def _is_fall(keypoints, bbox, conf_threshold: float = 0.3) -> bool:
-    """Determine if a person is in a fallen state using keypoint heuristics.
+def _pose_hit_counts(keypoints, conf_threshold: float = 0.3) -> tuple[int, int]:
+    torso_points = (
+        keypoints[_KP_LEFT_SHOULDER],
+        keypoints[_KP_RIGHT_SHOULDER],
+        keypoints[_KP_LEFT_HIP],
+        keypoints[_KP_RIGHT_HIP],
+    )
+    leg_points = (
+        keypoints[_KP_LEFT_KNEE],
+        keypoints[_KP_RIGHT_KNEE],
+    )
+    torso_hits = sum(1 for point in torso_points if point[2] >= conf_threshold)
+    leg_hits = sum(1 for point in leg_points if point[2] >= conf_threshold)
+    return torso_hits, leg_hits
 
-    Checks:
-    1. Bounding box aspect ratio (wider than tall → lying down)
-    2. Torso angle (shoulder-hip line deviates from vertical)
-    3. Hip near or below shoulder level (inverted / horizontal posture)
-    """
-    x1, y1, x2, y2 = bbox
-    bbox_w = x2 - x1
-    bbox_h = y2 - y1
 
-    # Heuristic 1: Aspect ratio — lying persons have wide, short boxes
-    if bbox_h > 0 and bbox_w / bbox_h > 1.4:
-        return True
+def _has_usable_body_pose(keypoints, conf_threshold: float = 0.3) -> bool:
+    torso_hits, leg_hits = _pose_hit_counts(keypoints, conf_threshold)
+    return torso_hits >= 3 and (torso_hits == 4 or leg_hits >= 1)
 
+
+def _round_keypoint(point) -> list[float]:
+    return [round(float(point[0]), 2), round(float(point[1]), 2), round(float(point[2]), 4)]
+
+
+def _fall_detection_settings(camera_id: str | None) -> dict:
+    if not camera_id:
+        return {}
+    cfg = get_config()
+    camera = cfg.get("cameras", {}).get(camera_id, {})
+    settings = camera.get("fall_detection") or camera.get("fallDetection") or {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _setting_enabled(settings: dict, *keys: str) -> bool:
+    return any(settings.get(key) is True for key in keys)
+
+
+def _fall_suppression_reason(analysis: dict, settings: dict) -> str | None:
+    if (
+        _setting_enabled(settings, "suppress_floor_exercise", "suppressFloorExercise")
+        and bool(analysis.get("floorExercisePose"))
+    ):
+        return "floor_exercise_pose"
+    return None
+
+
+def _fall_confirmation_threshold(settings: dict) -> int:
+    for key in ("confirmation_threshold", "confirmationThreshold", "threshold"):
+        value = settings.get(key)
+        if value is None:
+            continue
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            continue
+    return 8
+
+
+def _fall_analysis(keypoints, bbox, conf_threshold: float = 0.3) -> dict:
+    """Analyze a pose for fall/man-down heuristics and explain the decision."""
     # Extract key body points (x, y, confidence)
     left_shoulder = keypoints[_KP_LEFT_SHOULDER]
     right_shoulder = keypoints[_KP_RIGHT_SHOULDER]
     left_hip = keypoints[_KP_LEFT_HIP]
     right_hip = keypoints[_KP_RIGHT_HIP]
+    left_knee = keypoints[_KP_LEFT_KNEE]
+    right_knee = keypoints[_KP_RIGHT_KNEE]
+    torso_hits, leg_hits = _pose_hit_counts(keypoints, conf_threshold)
+    usable_pose = bool(torso_hits >= 3 and (torso_hits == 4 or leg_hits >= 1))
+    x1, y1, x2, y2 = bbox
+    bbox_w = max(0, x2 - x1)
+    bbox_h = max(0, y2 - y1)
+    aspect_ratio = (bbox_w / bbox_h) if bbox_h > 0 else 0.0
 
-    # Need sufficient confidence on at least shoulders and hips
-    shoulder_conf = min(left_shoulder[2], right_shoulder[2])
-    hip_conf = min(left_hip[2], right_hip[2])
-    if shoulder_conf < conf_threshold or hip_conf < conf_threshold:
-        return False
+    analysis = {
+        "isFall": False,
+        "reason": "upright_or_not_fall",
+        "bbox": [int(x1), int(y1), int(x2), int(y2)],
+        "bboxWidth": int(bbox_w),
+        "bboxHeight": int(bbox_h),
+        "aspectRatio": round(float(aspect_ratio), 4),
+        "confThreshold": conf_threshold,
+        "torsoHits": torso_hits,
+        "legHits": leg_hits,
+        "usablePose": usable_pose,
+        "keypoints": {
+            "leftShoulder": _round_keypoint(left_shoulder),
+            "rightShoulder": _round_keypoint(right_shoulder),
+            "leftHip": _round_keypoint(left_hip),
+            "rightHip": _round_keypoint(right_hip),
+            "leftKnee": _round_keypoint(left_knee),
+            "rightKnee": _round_keypoint(right_knee),
+        },
+    }
+
+    # A P1 fall alert should never come from a box shape alone. Require a
+    # usable body pose before applying posture heuristics.
+    if not usable_pose:
+        analysis["reason"] = "insufficient_pose"
+        return analysis
 
     shoulder_mid = _midpoint(left_shoulder, right_shoulder)
     hip_mid = _midpoint(left_hip, right_hip)
+    visible_knees = [
+        knee for knee in (left_knee, right_knee)
+        if knee[2] >= conf_threshold
+    ]
+    knee_mid = None
+    if visible_knees:
+        knee_mid = (
+            sum(float(knee[0]) for knee in visible_knees) / len(visible_knees),
+            sum(float(knee[1]) for knee in visible_knees) / len(visible_knees),
+        )
 
-    # Heuristic 2: Torso angle — angle of shoulder→hip line vs vertical
+    knee_raise_margin = max(20.0, bbox_h * 0.12)
+    raised_knee_count = sum(1 for knee in visible_knees if float(knee[1]) < hip_mid[1] - knee_raise_margin)
+    hips_below_shoulders = bool(hip_mid[1] > shoulder_mid[1] + max(10.0, bbox_h * 0.08))
+    analysis["shoulderMidpoint"] = [round(float(shoulder_mid[0]), 2), round(float(shoulder_mid[1]), 2)]
+    analysis["hipMidpoint"] = [round(float(hip_mid[0]), 2), round(float(hip_mid[1]), 2)]
+    analysis["kneeMidpoint"] = (
+        [round(float(knee_mid[0]), 2), round(float(knee_mid[1]), 2)]
+        if knee_mid is not None
+        else None
+    )
+    analysis["raisedKneeCount"] = raised_knee_count
+    analysis["hipsBelowShoulders"] = hips_below_shoulders
+
+    # Torso angle — angle of shoulder→hip line vs vertical.
     dx = abs(hip_mid[0] - shoulder_mid[0])
     dy = abs(hip_mid[1] - shoulder_mid[1])
     if dy < 1:
-        # Nearly horizontal torso
-        return True
-    import math
-    torso_angle_deg = math.degrees(math.atan2(dx, dy))
+        torso_angle_deg = 90.0
+    else:
+        torso_angle_deg = math.degrees(math.atan2(dx, dy))
+    analysis["torsoAngleDeg"] = round(float(torso_angle_deg), 2)
+    floor_exercise_pose = bool(
+        raised_knee_count > 0
+        and (
+            hips_below_shoulders
+            or (aspect_ratio > 2.0 and torso_angle_deg > 50)
+        )
+    )
+    analysis["floorExercisePose"] = floor_exercise_pose
+
+    # Heuristic 1: Aspect ratio — lying persons have wide, short boxes
+    if aspect_ratio > 1.4:
+        analysis["isFall"] = True
+        analysis["reason"] = "wide_body_box"
+        return analysis
+
+    # Heuristic 2: nearly horizontal torso.
     if torso_angle_deg > 50:
-        return True
+        analysis["isFall"] = True
+        analysis["reason"] = "horizontal_torso"
+        return analysis
 
     # Heuristic 3: Hip at same level or above shoulders (person lying flat)
-    if hip_mid[1] <= shoulder_mid[1] + 10:
+    hips_at_or_above_shoulders = bool(hip_mid[1] <= shoulder_mid[1] + 10)
+    analysis["hipsAtOrAboveShoulders"] = hips_at_or_above_shoulders
+    if hips_at_or_above_shoulders:
         # In image coords, lower Y = higher position. If hip Y ≤ shoulder Y,
         # person may be lying with feet up or fully horizontal.
         # Only flag if bbox is also somewhat wide
-        if bbox_h > 0 and bbox_w / bbox_h > 0.9:
-            return True
+        if aspect_ratio > 0.9:
+            analysis["isFall"] = True
+            analysis["reason"] = "hips_at_or_above_shoulders"
+            return analysis
 
-    return False
+    return analysis
+
+
+def _is_fall(keypoints, bbox, conf_threshold: float = 0.3) -> bool:
+    """Determine if a person is in a fallen state using keypoint heuristics."""
+    return bool(_fall_analysis(keypoints, bbox, conf_threshold)["isFall"])
 
 
 def check_fall_detections(results, camera_id: str, frame: np.ndarray) -> list:
@@ -295,17 +420,31 @@ def check_fall_detections(results, camera_id: str, frame: np.ndarray) -> list:
 
     fallen_count = 0
     max_conf = 0.0
+    pose_diagnostics = []
+    fall_settings = _fall_detection_settings(camera_id)
+    confirmation_threshold = _fall_confirmation_threshold(fall_settings)
 
     for i in range(len(boxes)):
         conf = float(boxes.conf[i])
         bbox = list(map(int, boxes.xyxy[i]))
         kps = keypoints_data[i].cpu().numpy()  # (17, 3)
+        analysis = _fall_analysis(kps, bbox)
+        analysis["confidence"] = round(conf, 4)
+        analysis["index"] = i
+        suppression_reason = _fall_suppression_reason(analysis, fall_settings)
+        if analysis["isFall"] and suppression_reason:
+            analysis["rawIsFall"] = True
+            analysis["isFall"] = False
+            analysis["suppressed"] = True
+            analysis["suppressionReason"] = suppression_reason
+        pose_diagnostics.append(analysis)
 
-        if _is_fall(kps, bbox):
+        if analysis["isFall"]:
             fallen_count += 1
             max_conf = max(max_conf, conf)
 
     if fallen_count > 0:
+        frame_h, frame_w = frame.shape[:2]
         candidates.append({
             "camera_id": camera_id,
             "rule": "Fall Detected",
@@ -313,13 +452,21 @@ def check_fall_detections(results, camera_id: str, frame: np.ndarray) -> list:
             "confidence": max_conf,
             "description": f"{fallen_count} person(s) detected in fallen/man-down position",
             "source": "Pose Specialist",
-            "threshold": 8,
+            "threshold": confirmation_threshold,
+            "metadata": {
+                "frameWidth": frame_w,
+                "frameHeight": frame_h,
+                "fallenCount": fallen_count,
+                "fallConfirmationThreshold": confirmation_threshold,
+                "fallDetectionSettings": fall_settings,
+                "poseDiagnostics": pose_diagnostics,
+            },
         })
 
     return candidates
 
 
-def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False) -> tuple[np.ndarray, list]:
+def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False, camera_id: str | None = None) -> tuple[np.ndarray, list]:
     """Draw skeleton keypoints on frame. Returns annotated frame and fall detections list."""
     annotated = frame.copy()
     fall_detections = []
@@ -338,13 +485,15 @@ def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False) ->
 
     keypoints_data = result.keypoints.data
     boxes = result.boxes
+    fall_settings = _fall_detection_settings(camera_id)
 
     for i in range(len(boxes)):
         conf = float(boxes.conf[i])
         bbox = list(map(int, boxes.xyxy[i]))
         kps = keypoints_data[i].cpu().numpy()
 
-        is_fallen = _is_fall(kps, bbox)
+        analysis = _fall_analysis(kps, bbox)
+        is_fallen = bool(analysis["isFall"]) and not _fall_suppression_reason(analysis, fall_settings)
 
         if fall_only and not is_fallen:
             continue
@@ -383,6 +532,15 @@ def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False) ->
 
 # ── PPE detection ───────────────────────────────────────────────────────────
 
+RIDER_HELMET_RULE_ID = "ppe_rider_helmet"
+RIDER_HELMET_GROUP = "rider helmet"
+RIDER_VEHICLE_CLASSES = {"motorcycle", "motorbike", "scooter"}
+RIDER_MIN_PERSON_CONFIDENCE = 0.65
+RIDER_MIN_VEHICLE_CONFIDENCE = 0.70
+RIDER_MIN_PERSON_HEIGHT_RATIO = 0.12
+RIDER_MIN_VEHICLE_HEIGHT_RATIO = 0.06
+
+
 def get_ppe_groups() -> dict[str, list[str]]:
     """Get PPE groups from config (safety_rules where type=='ppe')."""
     cfg = get_config()
@@ -404,29 +562,460 @@ def get_ppe_threshold_map() -> dict[str, int | None]:
     return {r["name"].lower(): r.get("threshold") for r in rules if r.get("type") == "ppe" and r.get("enabled", True)}
 
 
-def _ppe_center_inside_person(person_bbox: list, ppe_dets: list) -> bool:
-    """Check if the center of any PPE detection falls inside the person bbox."""
+def _positive_int(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
+def _camera_ppe_threshold_override(cam: dict, rule_id: str | None, group_name: str) -> int | None:
+    overrides = (
+        cam.get("safety_rule_overrides")
+        or cam.get("safetyRuleOverrides")
+        or cam.get("rule_overrides")
+        or {}
+    )
+    if not isinstance(overrides, dict):
+        return None
+
+    for key in (rule_id, group_name):
+        if not key or key not in overrides:
+            continue
+        override = overrides.get(key)
+        value = override.get("threshold") if isinstance(override, dict) else override
+        parsed = _positive_int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _source_label_for_model_families(model_families: set[str]) -> str:
+    if model_families == {"yoloe_long_tail"}:
+        return "YOLOE Long-Tail"
+    if model_families == {"fire_smoke_specialist"}:
+        return "Fire / Smoke Specialist"
+    if model_families == {"ppe_closed_set_candidate"}:
+        return "Closed-Set PPE Candidate"
+    if model_families == {"ppe_specialist"}:
+        return "PPE Specialist"
+    if model_families == {"coco_primary"}:
+        return "COCO Primary"
+    return "YOLO"
+
+
+def _expanded_bbox(bbox: list, *, x_ratio: float = 0.12, y_ratio: float = 0.08) -> list[float]:
+    x1, y1, x2, y2 = bbox
+    width = max(0.0, float(x2 - x1))
+    height = max(0.0, float(y2 - y1))
+    return [
+        float(x1) - width * x_ratio,
+        float(y1) - height * y_ratio,
+        float(x2) + width * x_ratio,
+        float(y2) + height * y_ratio,
+    ]
+
+
+def _bbox_intersection_area(a: list, b: list) -> float:
+    ax1, ay1, ax2, ay2 = map(float, a)
+    bx1, by1, bx2, by2 = map(float, b)
+    width = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    height = max(0.0, min(ay2, by2) - max(ay1, by1))
+    return width * height
+
+
+def _bbox_area(bbox: list) -> float:
+    x1, y1, x2, y2 = map(float, bbox)
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _ppe_match_detail(person_bbox: list, ppe_bbox: list) -> dict:
+    """Describe whether a PPE detection plausibly belongs to a person box."""
     px1, py1, px2, py2 = person_bbox
+    cx = (ppe_bbox[0] + ppe_bbox[2]) / 2.0
+    cy = (ppe_bbox[1] + ppe_bbox[3]) / 2.0
+    center_inside_person = px1 <= cx <= px2 and py1 <= cy <= py2
+
+    ex1, ey1, ex2, ey2 = _expanded_bbox(person_bbox)
+    center_inside_expanded_person = ex1 <= cx <= ex2 and ey1 <= cy <= ey2
+
+    overlap = _bbox_intersection_area(person_bbox, ppe_bbox)
+    ppe_area = _bbox_area(ppe_bbox)
+    person_area = _bbox_area(person_bbox)
+    reference_area = min(ppe_area, person_area)
+    overlap_reference_ratio = overlap / reference_area if reference_area > 0 else 0.0
+    overlap_matched = overlap_reference_ratio >= 0.25
+    matched = center_inside_person or center_inside_expanded_person or overlap_matched
+    reason = None
+    if center_inside_person:
+        reason = "center_inside_person"
+    elif center_inside_expanded_person:
+        reason = "center_inside_expanded_person"
+    elif overlap_matched:
+        reason = "bbox_overlap"
+
+    return {
+        "matched": matched,
+        "reason": reason,
+        "ppeCenter": [round(float(cx), 2), round(float(cy), 2)],
+        "centerInsidePerson": center_inside_person,
+        "centerInsideExpandedPerson": center_inside_expanded_person,
+        "overlapArea": round(float(overlap), 2),
+        "overlapReferenceRatio": round(float(overlap_reference_ratio), 4),
+    }
+
+
+def _ppe_matches_person(person_bbox: list, ppe_bbox: list) -> bool:
+    """True when a PPE detection plausibly belongs to a person box."""
+    return bool(_ppe_match_detail(person_bbox, ppe_bbox)["matched"])
+
+
+def _ppe_present_for_person(person_bbox: list, ppe_dets: list) -> bool:
+    """Check if any PPE detection is geometrically associated with a person."""
     for p in ppe_dets:
-        cx = (p["bbox"][0] + p["bbox"][2]) / 2.0
-        cy = (p["bbox"][1] + p["bbox"][3]) / 2.0
-        if px1 <= cx <= px2 and py1 <= cy <= py2:
+        if _ppe_matches_person(person_bbox, p["bbox"]):
             return True
     return False
 
 
-def check_yoloe_violations(detections: list, camera_id: str) -> list:
+def _person_evaluable_for_ppe(person_bbox: list, frame_w: int | None = None, frame_h: int | None = None) -> bool:
+    x1, y1, x2, y2 = map(float, person_bbox)
+    width = max(0.0, x2 - x1)
+    height = max(0.0, y2 - y1)
+    if width < 24 or height < 48:
+        return False
+    if not frame_w or not frame_h:
+        return True
+    width_ratio = width / float(frame_w)
+    height_ratio = height / float(frame_h)
+    area_ratio = (width * height) / float(frame_w * frame_h)
+    touches_horizontal_edge = x1 <= 2 or x2 >= frame_w - 2
+    if width_ratio < 0.03 or height_ratio < 0.10 or area_ratio < 0.003:
+        return False
+    if touches_horizontal_edge and width_ratio < 0.08:
+        return False
+    return True
+
+
+def _round_bbox(bbox: list) -> list[float]:
+    return [round(float(v), 2) for v in bbox]
+
+
+def _ppe_scope_zones(cam: dict) -> list[dict]:
+    zones = cam.get("zones") or []
+    if not isinstance(zones, list):
+        return []
+    scope_zones = []
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        zone_type = str(zone.get("type") or "").lower()
+        analytics = str(zone.get("analytics") or "").lower()
+        if zone_type in {"ppe", "ppe_evaluation", "ppe_compliance"} or analytics in {"ppe", "ppe_evaluation", "ppe_compliance"}:
+            if len(zone.get("points") or []) >= 3:
+                scope_zones.append(zone)
+    return scope_zones
+
+
+def _person_in_ppe_scope(person_bbox: list, scope_zones: list[dict], frame_w: int | None, frame_h: int | None) -> bool:
+    if not scope_zones:
+        return True
+    if not frame_w or not frame_h:
+        return True
+    return any(bbox_intersects_polygon(person_bbox, zone.get("points", []), frame_w, frame_h) for zone in scope_zones)
+
+
+def _detection_class(value) -> str:
+    return str(value or "").lower().replace("_", " ").replace("-", " ").strip()
+
+
+def _rider_vehicle_match_detail(person_bbox: list, vehicle_bbox: list) -> dict:
+    px1, py1, px2, py2 = map(float, person_bbox)
+    vx1, vy1, vx2, vy2 = map(float, vehicle_bbox)
+    person_w = max(0.0, px2 - px1)
+    person_h = max(0.0, py2 - py1)
+    vehicle_w = max(0.0, vx2 - vx1)
+    vehicle_h = max(0.0, vy2 - vy1)
+    if person_w <= 0 or person_h <= 0 or vehicle_w <= 0 or vehicle_h <= 0:
+        return {"matched": False, "reason": "invalid_bbox", "score": 0.0}
+
+    person_cx = (px1 + px2) / 2.0
+    foot_x = person_cx
+    foot_y = py2
+    expanded_vehicle = _expanded_bbox(vehicle_bbox, x_ratio=0.35, y_ratio=0.45)
+    ex1, ey1, ex2, ey2 = expanded_vehicle
+    foot_inside_expanded_vehicle = ex1 <= foot_x <= ex2 and ey1 <= foot_y <= ey2
+    center_x_near_vehicle = ex1 <= person_cx <= ex2
+
+    horizontal_overlap = max(0.0, min(px2, vx2) - max(px1, vx1))
+    horizontal_overlap_ratio = horizontal_overlap / min(person_w, vehicle_w)
+
+    lower_person_bbox = [px1, py1 + person_h * 0.45, px2, py2]
+    expanded_vehicle_core = _expanded_bbox(vehicle_bbox, x_ratio=0.20, y_ratio=0.25)
+    lower_overlap = _bbox_intersection_area(lower_person_bbox, expanded_vehicle_core)
+    lower_reference_area = min(_bbox_area(lower_person_bbox), _bbox_area(expanded_vehicle_core))
+    lower_overlap_ratio = lower_overlap / lower_reference_area if lower_reference_area > 0 else 0.0
+
+    posture_near_vehicle = center_x_near_vehicle and horizontal_overlap_ratio >= 0.18
+    matched = (
+        posture_near_vehicle
+        and (foot_inside_expanded_vehicle or lower_overlap_ratio >= 0.08)
+    ) or lower_overlap_ratio >= 0.18
+    reason = None
+    if matched and foot_inside_expanded_vehicle:
+        reason = "foot_on_vehicle"
+    elif matched:
+        reason = "lower_body_vehicle_overlap"
+
+    score = max(horizontal_overlap_ratio, lower_overlap_ratio)
+    return {
+        "matched": bool(matched),
+        "reason": reason,
+        "score": round(float(score), 4),
+        "footInsideExpandedVehicle": bool(foot_inside_expanded_vehicle),
+        "centerXNearVehicle": bool(center_x_near_vehicle),
+        "horizontalOverlapRatio": round(float(horizontal_overlap_ratio), 4),
+        "lowerBodyVehicleOverlapRatio": round(float(lower_overlap_ratio), 4),
+    }
+
+
+def _rider_vehicle_associations(persons: list, vehicles: list) -> list[dict]:
+    associations = []
+    for person in persons:
+        best_match = None
+        for vehicle in vehicles:
+            detail = _rider_vehicle_match_detail(person["bbox"], vehicle["bbox"])
+            if not detail["matched"]:
+                continue
+            candidate = {"person": person, "vehicle": vehicle, "detail": detail}
+            if best_match is None or detail["score"] > best_match["detail"]["score"]:
+                best_match = candidate
+        if best_match:
+            associations.append(best_match)
+    return associations
+
+
+def _bbox_height_ratio(bbox: list, frame_h: int | None) -> float | None:
+    if not frame_h:
+        return None
+    _x1, y1, _x2, y2 = map(float, bbox)
+    return max(0.0, y2 - y1) / float(frame_h)
+
+
+def _rider_person_evaluable(person: dict, frame_h: int | None) -> bool:
+    if float(person.get("confidence", 0.0)) < RIDER_MIN_PERSON_CONFIDENCE:
+        return False
+    height_ratio = _bbox_height_ratio(person["bbox"], frame_h)
+    if height_ratio is not None and height_ratio < RIDER_MIN_PERSON_HEIGHT_RATIO:
+        return False
+    return True
+
+
+def _rider_vehicle_evaluable(vehicle: dict, frame_h: int | None) -> bool:
+    if float(vehicle.get("confidence", 0.0)) < RIDER_MIN_VEHICLE_CONFIDENCE:
+        return False
+    height_ratio = _bbox_height_ratio(vehicle["bbox"], frame_h)
+    if height_ratio is not None and height_ratio < RIDER_MIN_VEHICLE_HEIGHT_RATIO:
+        return False
+    return True
+
+
+def _rider_helmet_rule_for_camera(cam: dict, cfg: dict) -> dict | None:
+    assigned_rule_ids = cam.get("safety_rule_ids") or cam.get("ppe_rule_ids") or []
+    if RIDER_HELMET_RULE_ID not in assigned_rule_ids:
+        return None
+    rule = {r["id"]: r for r in cfg.get("safety_rules", [])}.get(RIDER_HELMET_RULE_ID)
+    if rule and rule.get("enabled", True) and rule.get("type") == "ppe":
+        return rule
+    return None
+
+
+def _check_rider_helmet_violations(
+    detections: list,
+    camera_id: str,
+    cam: dict,
+    rule: dict,
+    persons: list,
+    all_persons: list,
+    scope_zones: list[dict],
+    frame_w: int | None,
+    frame_h: int | None,
+) -> list[dict]:
+    raw_vehicles = [
+        d for d in detections
+        if d.get("bbox") and _detection_class(d.get("class")) in RIDER_VEHICLE_CLASSES
+    ]
+    vehicles = [d for d in raw_vehicles if _rider_vehicle_evaluable(d, frame_h)]
+    if not vehicles:
+        return []
+
+    rider_persons = [p for p in persons if _rider_person_evaluable(p, frame_h)]
+    if not rider_persons:
+        return []
+
+    ppe_classes = rule.get("classes") or ["motorcycle helmet", "rider helmet", "helmet"]
+    ppe_dets = [d for d in detections if d.get("bbox") and d.get("class") in ppe_classes]
+    rider_associations = _rider_vehicle_associations(rider_persons, vehicles)
+    if not rider_associations:
+        return []
+
+    violating_associations = [
+        association for association in rider_associations
+        if not _ppe_present_for_person(association["person"]["bbox"], ppe_dets)
+    ]
+    if not violating_associations:
+        return []
+
+    rule_threshold = _positive_int(rule.get("threshold"))
+    override_threshold = _camera_ppe_threshold_override(cam, rule.get("id"), RIDER_HELMET_GROUP)
+    threshold = override_threshold if override_threshold is not None else rule_threshold
+    threshold_source = "camera_override" if override_threshold is not None else (
+        "safety_rule" if rule_threshold is not None else "default"
+    )
+    person_diagnostics = _ppe_person_diagnostics(all_persons, ppe_dets, frame_w, frame_h, scope_zones)
+    confidence = max(
+        max(
+            float(association["person"].get("confidence", 0.0)),
+            float(association["vehicle"].get("confidence", 0.0)),
+        )
+        for association in violating_associations
+    )
+
+    return [{
+        "camera_id": camera_id,
+        "rule": "Missing rider helmet",
+        "severity": rule.get("severity", "P2"),
+        "confidence": confidence,
+        "count": len(violating_associations),
+        "classes": [
+            "rider helmet",
+            "missing rider helmet",
+            "no rider helmet",
+            "person",
+            *sorted(RIDER_VEHICLE_CLASSES),
+            *ppe_classes,
+        ],
+        "description": f"{len(violating_associations)} rider(s) detected without helmet",
+        "source": "COCO Primary + PPE Specialist",
+        "threshold": threshold,
+        "metadata": {
+            "ppeGroup": RIDER_HELMET_GROUP,
+            "safetyRuleId": rule.get("id"),
+            "ruleThreshold": threshold,
+            "thresholdSource": threshold_source,
+            "personCount": len(all_persons),
+            "evaluablePersonCount": len(persons),
+            "riderCandidatePersonCount": len(rider_persons),
+            "rawVehicleDetectionCount": len(raw_vehicles),
+            "vehicleDetectionCount": len(vehicles),
+            "riderCount": len(rider_associations),
+            "coveredRiderCount": len(rider_associations) - len(violating_associations),
+            "violatingRiderCount": len(violating_associations),
+            "ppeDetectionCount": len(ppe_dets),
+            "ppeEvaluationZoneIds": [zone.get("id") or zone.get("name") for zone in scope_zones],
+            "frameWidth": frame_w,
+            "frameHeight": frame_h,
+            "riderVehicleClasses": sorted(RIDER_VEHICLE_CLASSES),
+            "riderCandidateFilters": {
+                "minPersonConfidence": RIDER_MIN_PERSON_CONFIDENCE,
+                "minVehicleConfidence": RIDER_MIN_VEHICLE_CONFIDENCE,
+                "minPersonHeightRatio": RIDER_MIN_PERSON_HEIGHT_RATIO,
+                "minVehicleHeightRatio": RIDER_MIN_VEHICLE_HEIGHT_RATIO,
+            },
+            "ppeDetections": [
+                {
+                    "class": p["class"],
+                    "confidence": round(float(p.get("confidence", 0.0)), 4),
+                    "bbox": _round_bbox(p["bbox"]),
+                }
+                for p in ppe_dets
+            ],
+            "riderAssociations": [
+                {
+                    "person": {
+                        "confidence": round(float(association["person"].get("confidence", 0.0)), 4),
+                        "bbox": _round_bbox(association["person"]["bbox"]),
+                    },
+                    "vehicle": {
+                        "class": association["vehicle"].get("class"),
+                        "confidence": round(float(association["vehicle"].get("confidence", 0.0)), 4),
+                        "bbox": _round_bbox(association["vehicle"]["bbox"]),
+                    },
+                    **association["detail"],
+                }
+                for association in rider_associations
+            ],
+            "personDiagnostics": person_diagnostics,
+        },
+    }]
+
+
+def _ppe_person_diagnostics(
+    all_persons: list,
+    ppe_dets: list,
+    frame_w: int | None = None,
+    frame_h: int | None = None,
+    scope_zones: list[dict] | None = None,
+) -> list[dict]:
+    diagnostics = []
+    scope_zones = scope_zones or []
+    for index, person in enumerate(all_persons):
+        person_bbox = person["bbox"]
+        geometry_evaluable = _person_evaluable_for_ppe(person_bbox, frame_w, frame_h)
+        in_scope = _person_in_ppe_scope(person_bbox, scope_zones, frame_w, frame_h)
+        ppe_matches = []
+        for ppe in ppe_dets:
+            detail = _ppe_match_detail(person_bbox, ppe["bbox"])
+            ppe_matches.append({
+                "class": ppe["class"],
+                "confidence": round(float(ppe.get("confidence", 0.0)), 4),
+                "bbox": _round_bbox(ppe["bbox"]),
+                **detail,
+            })
+        best_match = max(
+            ppe_matches,
+            key=lambda match: (
+                1 if match["matched"] else 0,
+                match["overlapReferenceRatio"],
+                1 if match["centerInsideExpandedPerson"] else 0,
+            ),
+            default=None,
+        )
+        diagnostics.append({
+            "index": index,
+            "class": person["class"],
+            "confidence": round(float(person.get("confidence", 0.0)), 4),
+            "bbox": _round_bbox(person_bbox),
+            "evaluable": geometry_evaluable and in_scope,
+            "geometryEvaluable": geometry_evaluable,
+            "inPpeEvaluationScope": in_scope,
+            "covered": bool(geometry_evaluable and in_scope and best_match and best_match["matched"]),
+            "bestPpeMatch": best_match,
+        })
+    return diagnostics
+
+
+def check_yoloe_violations(detections: list, camera_id: str, frame_w: int | None = None, frame_h: int | None = None) -> list:
     """Return candidate violation dicts (NOT yet persisted to DB).
     Per-person check: only flags persons whose bbox does not contain any matching PPE item."""
     candidates = []
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
-    persons = [d for d in detections if d["class"] == "person"]
+    all_persons = [d for d in detections if d["class"] == "person"]
+    scope_zones = _ppe_scope_zones(cam)
+    persons = [
+        p for p in all_persons
+        if _person_evaluable_for_ppe(p["bbox"], frame_w, frame_h)
+        and _person_in_ppe_scope(p["bbox"], scope_zones, frame_w, frame_h)
+    ]
     if not persons:
         return candidates
 
     # Get PPE groups and severity map
     safety_rule_ids = cam.get("safety_rule_ids", cam.get("ppe_rule_ids", []))
+    rule_id_map = {}
+    threshold_source_map = {}
     if safety_rule_ids:
         # Camera has assigned safety rules — only check PPE ones
         all_rules = cfg.get("safety_rules", [])
@@ -436,17 +1025,38 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
         threshold_map = {}
         for rid in safety_rule_ids:
             rule = rule_map.get(rid)
+            if rule and rule.get("id") == RIDER_HELMET_RULE_ID:
+                continue
             if rule and rule.get("type") == "ppe" and rule.get("enabled", True):
                 key = rule["name"].lower()
                 ppe_groups[key] = rule["classes"]
                 severity_map[key] = rule.get("severity", "P2")
-                threshold_map[key] = rule.get("threshold")
+                rule_id_map[key] = rule.get("id")
+                rule_threshold = _positive_int(rule.get("threshold"))
+                override_threshold = _camera_ppe_threshold_override(cam, rule.get("id"), key)
+                threshold_map[key] = override_threshold if override_threshold is not None else rule_threshold
+                threshold_source_map[key] = "camera_override" if override_threshold is not None else (
+                    "safety_rule" if rule_threshold is not None else "default"
+                )
         checked_groups: set[str] = set(ppe_groups)
     else:
         # Fallback: match yoloe_classes against all known PPE groups
-        ppe_groups = get_ppe_groups()
-        severity_map = get_ppe_severity_map()
-        threshold_map = get_ppe_threshold_map()
+        ppe_rules = [
+            r for r in cfg.get("safety_rules", [])
+            if r.get("type") == "ppe" and r.get("enabled", True) and r.get("id") != RIDER_HELMET_RULE_ID
+        ]
+        ppe_groups = {r["name"].lower(): r["classes"] for r in ppe_rules}
+        severity_map = {r["name"].lower(): r.get("severity", "P2") for r in ppe_rules}
+        threshold_map = {}
+        for rule in ppe_rules:
+            key = rule["name"].lower()
+            rule_id_map[key] = rule.get("id")
+            rule_threshold = _positive_int(rule.get("threshold"))
+            override_threshold = _camera_ppe_threshold_override(cam, rule.get("id"), key)
+            threshold_map[key] = override_threshold if override_threshold is not None else rule_threshold
+            threshold_source_map[key] = "camera_override" if override_threshold is not None else (
+                "safety_rule" if rule_threshold is not None else "default"
+            )
         yoloe_classes = cam.get("yoloe_classes", [])
         checked_groups = set()
         for cls in yoloe_classes:
@@ -460,18 +1070,65 @@ def check_yoloe_violations(detections: list, camera_id: str) -> list:
     for group_name in checked_groups:
         group_classes = ppe_groups[group_name]
         ppe_dets = [d for d in detections if d["class"] in group_classes]
-        violating_persons = [p for p in persons if not _ppe_center_inside_person(p["bbox"], ppe_dets)]
+        violating_persons = [p for p in persons if not _ppe_present_for_person(p["bbox"], ppe_dets)]
 
         if violating_persons:
+            person_diagnostics = _ppe_person_diagnostics(all_persons, ppe_dets, frame_w, frame_h, scope_zones)
+            matching_sources = {d.get("model_family") for d in ppe_dets if d.get("model_family")}
+            if not matching_sources:
+                person_sources = {p.get("model_family") for p in violating_persons if p.get("model_family")}
+                matching_sources = (
+                    person_sources
+                    if person_sources == {"ppe_closed_set_candidate"}
+                    else {"ppe_specialist"}
+                )
             candidates.append({
                 "camera_id": camera_id,
                 "rule": f"Missing {group_name}",
                 "severity": severity_map.get(group_name, "P2"),
                 "confidence": max(p["confidence"] for p in violating_persons),
                 "description": f"{len(violating_persons)} worker(s) detected without {group_name}",
-                "source": "PPE Specialist",
+                "source": _source_label_for_model_families(matching_sources),
                 "threshold": threshold_map.get(group_name),
+                "metadata": {
+                    "ppeGroup": group_name,
+                    "safetyRuleId": rule_id_map.get(group_name),
+                    "ruleThreshold": threshold_map.get(group_name),
+                    "thresholdSource": threshold_source_map.get(group_name, "default"),
+                    "personCount": len(all_persons),
+                    "evaluablePersonCount": len(persons),
+                    "ignoredPersonCount": len(all_persons) - len(persons),
+                    "ppeDetectionCount": len(ppe_dets),
+                    "coveredPersonCount": len(persons) - len(violating_persons),
+                    "violatingPersonCount": len(violating_persons),
+                    "ppeEvaluationZoneIds": [zone.get("id") or zone.get("name") for zone in scope_zones],
+                    "frameWidth": frame_w,
+                    "frameHeight": frame_h,
+                    "ppeDetections": [
+                        {
+                            "class": p["class"],
+                            "confidence": round(float(p.get("confidence", 0.0)), 4),
+                            "bbox": _round_bbox(p["bbox"]),
+                        }
+                        for p in ppe_dets
+                    ],
+                    "personDiagnostics": person_diagnostics,
+                },
             })
+
+    rider_helmet_rule = _rider_helmet_rule_for_camera(cam, cfg)
+    if rider_helmet_rule:
+        candidates.extend(_check_rider_helmet_violations(
+            detections,
+            camera_id,
+            cam,
+            rider_helmet_rule,
+            persons,
+            all_persons,
+            scope_zones,
+            frame_w,
+            frame_h,
+        ))
 
     return candidates
 
@@ -626,20 +1283,53 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
                 results.append({"label": "Fall / Man Down", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
         return results
 
+    if rule == "Missing rider helmet":
+        cfg = get_config()
+        cam = cfg["cameras"].get(camera_id, {}) if camera_id else {}
+        scope_zones = _ppe_scope_zones(cam)
+        persons = [
+            d for d in detections
+            if d.get("class") == "person"
+            and d.get("bbox")
+            and _person_evaluable_for_ppe(d["bbox"], frame_w, frame_h)
+            and _rider_person_evaluable(d, frame_h)
+            and _person_in_ppe_scope(d["bbox"], scope_zones, frame_w, frame_h)
+        ]
+        vehicles = [
+            d for d in detections
+            if d.get("bbox")
+            and _detection_class(d.get("class")) in RIDER_VEHICLE_CLASSES
+            and _rider_vehicle_evaluable(d, frame_h)
+        ]
+        rule_map = {r["id"]: r for r in cfg.get("safety_rules", [])}
+        rider_rule = rule_map.get(RIDER_HELMET_RULE_ID) or {}
+        ppe_classes = rider_rule.get("classes") or ["motorcycle helmet", "rider helmet", "helmet"]
+        ppe_dets = [d for d in detections if d.get("bbox") and d.get("class") in ppe_classes]
+        for association in _rider_vehicle_associations(persons, vehicles):
+            person = association["person"]
+            if _ppe_present_for_person(person["bbox"], ppe_dets):
+                continue
+            results.append({
+                "label": "Missing Rider Helmet",
+                "bbox": normalize(person["bbox"]),
+                "confidence": round(person["confidence"], 2),
+            })
+        return results
+
     if rule.startswith("Missing "):
         ppe_item = rule.replace("Missing ", "")
         ppe_classes = get_ppe_groups().get(ppe_item, [ppe_item])
-        # Collect center points of all detected PPE items of this type
-        ppe_centers = []
-        for d in detections:
-            if d["class"] in ppe_classes:
-                cx = (d["bbox"][0] + d["bbox"][2]) / 2.0
-                cy = (d["bbox"][1] + d["bbox"][3]) / 2.0
-                ppe_centers.append((cx, cy))
+        ppe_dets = [d for d in detections if d["class"] in ppe_classes]
+        cfg = get_config()
+        cam = cfg["cameras"].get(camera_id, {}) if camera_id else {}
+        scope_zones = _ppe_scope_zones(cam)
         for d in detections:
             if d["class"] == "person":
-                px1, py1, px2, py2 = d["bbox"]
-                has_ppe = any(px1 <= cx <= px2 and py1 <= cy <= py2 for cx, cy in ppe_centers)
+                if not _person_evaluable_for_ppe(d["bbox"], frame_w, frame_h):
+                    continue
+                if not _person_in_ppe_scope(d["bbox"], scope_zones, frame_w, frame_h):
+                    continue
+                has_ppe = _ppe_present_for_person(d["bbox"], ppe_dets)
                 if not has_ppe:
                     results.append({"label": f"Missing {ppe_item.title()}", "bbox": normalize(d["bbox"]), "confidence": round(d["confidence"], 2)})
     elif rule == "Zone Intrusion":
@@ -722,19 +1412,14 @@ def check_violations(detections: list, camera_id: str) -> list:
             desc = f"Animal detected: {', '.join(parts)}" if parts else desc
 
         matching_sources = {d.get("model_family") for d in matching if d.get("model_family")}
-        source_label = "YOLO"
-        if matching_sources == {"yoloe_long_tail"}:
-            source_label = "YOLOE Long-Tail"
-        elif matching_sources == {"ppe_specialist"}:
-            source_label = "PPE Specialist"
-        elif matching_sources == {"coco_primary"}:
-            source_label = "COCO Primary"
+        source_label = _source_label_for_model_families(matching_sources)
 
         candidates.append({
             "camera_id": camera_id,
             "rule": rule["name"],
             "severity": rule["severity"],
             "confidence": max(d["confidence"] for d in matching),
+            "count": len(matching),
             "description": desc,
             "source": source_label,
             "threshold": rule.get("threshold"),

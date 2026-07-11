@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import {
   getLicenseStatus,
   uploadLicense,
+  uploadHeartbeat,
   type LicenseStatusResponse,
 } from "@/lib/api"
 
@@ -31,19 +32,26 @@ export function LicenseGate() {
   }, [])
 
   const handleFile = useCallback(async (file: File) => {
-    if (!file.name.toLowerCase().endsWith(".lic")) {
-      toast.error("Please upload a .lic license file")
+    const fileName = file.name.toLowerCase()
+    const isLicense = fileName.endsWith(".lic")
+    const isHeartbeat = fileName.endsWith(".json")
+    if (!isLicense && !isHeartbeat) {
+      toast.error("Please upload a .lic license file or .json heartbeat file")
       return
     }
     setUploading(true)
     try {
-      const next = await uploadLicense(file)
+      const next = isLicense ? await uploadLicense(file) : await uploadHeartbeat(file)
       setStatus(next)
       if (next.state === "valid") {
-        toast.success(`License activated for ${next.license?.customer_name ?? "this site"}`)
+        toast.success(
+          isLicense
+            ? `License activated for ${next.license?.customer_name ?? "this site"}`
+            : "Heartbeat refreshed",
+        )
         setDismissed(true)
       } else {
-        toast.info(`License uploaded — status: ${next.state}`)
+        toast.info(`${isLicense ? "License" : "Heartbeat"} uploaded - status: ${next.state}`)
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed")
@@ -67,7 +75,19 @@ export function LicenseGate() {
   if (!status || status.state === "valid") return null
 
   const isSuspended = status.state === "suspended"
+  const isHeartbeatIssue = status.reason.toLowerCase().includes("heartbeat")
   const canDismiss = !isSuspended // warning and grace can be dismissed
+  const dismissKey = canDismiss
+    ? [
+        "rakshak-license-gate-dismissed",
+        status.state,
+        status.license?.license_id ?? "no-license",
+        status.heartbeat?.valid_until ?? "no-heartbeat",
+        status.reason,
+      ].join(":")
+    : ""
+
+  if (dismissKey && window.localStorage.getItem(dismissKey) === "1") return null
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -95,7 +115,9 @@ export function LicenseGate() {
             >
               {isSuspended
                 ? "License Required"
-                : status.state === "grace"
+                : isHeartbeatIssue
+                  ? "Heartbeat Refresh Needed"
+                  : status.state === "grace"
                   ? "License Grace Period"
                   : "License Renewal Due"}
             </h2>
@@ -115,11 +137,23 @@ export function LicenseGate() {
           {isSuspended && (
             <p className="text-sm text-gray-600">
               Inference is paused and cameras are not processing. Upload a valid
-              license file to restore operation.
+              license file or heartbeat token to restore operation.
             </p>
           )}
 
-          {status.state === "grace" && status.days_until_suspension !== null && (
+          {status.state === "grace" && isHeartbeatIssue && status.days_until_suspension !== null && (
+            <p className="text-sm text-gray-600">
+              The license file is installed, but the device has not refreshed its
+              heartbeat. Fix network/DNS access to the license hub or upload a
+              fresh heartbeat token within{" "}
+              <span className="font-semibold text-amber-700">
+                {status.days_until_suspension} days
+              </span>
+              .
+            </p>
+          )}
+
+          {status.state === "grace" && !isHeartbeatIssue && status.days_until_suspension !== null && (
             <p className="text-sm text-gray-600">
               Cameras are still running, but the system will suspend in{" "}
               <span className="font-semibold text-amber-700">
@@ -143,7 +177,7 @@ export function LicenseGate() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".lic"
+            accept=".lic,.json"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]
@@ -173,7 +207,9 @@ export function LicenseGate() {
               <Upload className="w-6 h-6 text-gray-400" />
             )}
             <p className="text-sm text-gray-500">
-              {uploading ? "Uploading..." : "Drop a .lic file here, or click to browse"}
+              {uploading
+                ? "Uploading..."
+                : "Drop a .lic or heartbeat .json file here, or click to browse"}
             </p>
           </div>
         </div>
@@ -188,14 +224,17 @@ export function LicenseGate() {
           </button>
           {canDismiss ? (
             <button
-              onClick={() => setDismissed(true)}
+              onClick={() => {
+                if (dismissKey) window.localStorage.setItem(dismissKey, "1")
+                setDismissed(true)
+              }}
               className="px-4 py-2 text-sm font-medium rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-700 transition-colors"
             >
               Continue anyway
             </button>
           ) : (
             <span className="text-xs text-red-500 font-medium">
-              Upload a license to continue
+              Upload a license or heartbeat to continue
             </span>
           )}
         </div>

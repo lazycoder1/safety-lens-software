@@ -1,13 +1,20 @@
+const DEV_API_HOST = window.location.hostname || "localhost"
+const DEV_STREAM_HOST = DEV_API_HOST === "localhost" ? "127.0.0.1" : DEV_API_HOST === "127.0.0.1" ? "localhost" : DEV_API_HOST
+
 export const API_BASE =
-  import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? '' : `http://${window.location.hostname}:8000`)
+  import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? `http://${DEV_API_HOST}:8000` : `http://${window.location.hostname}:8000`)
+
+export const STREAM_BASE =
+  import.meta.env.VITE_STREAM_URL ?? (import.meta.env.DEV ? `http://${DEV_STREAM_HOST}:8000` : API_BASE)
 
 export const WS_BASE =
   import.meta.env.VITE_WS_URL ??
-  (import.meta.env.DEV ? `ws://${window.location.hostname}:${window.location.port}` : `ws://${window.location.hostname}:8000`)
+  (import.meta.env.DEV ? `ws://${DEV_API_HOST}:8000` : `ws://${window.location.hostname}:8000`)
 
 import { reportError } from "@/lib/errorReporter"
+import type { AlertOutput, Zone } from "@/types"
 
-const TOKEN_KEY = "safetylens_token"
+const TOKEN_KEY = "rakshak_lens_token"
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -19,6 +26,7 @@ export function setToken(token: string) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
+  window.dispatchEvent(new Event("rakshak-lens:auth-cleared"))
 }
 
 export class ApiError extends Error {
@@ -39,10 +47,10 @@ export class ApiError extends Error {
 // Backoff delays for network-error retries. Only genuine TypeError (request
 // never reached server) is retried — not timeouts or HTTP errors.
 const NETWORK_RETRY_DELAYS_MS = [250, 750, 1500]
-const DEFAULT_TIMEOUT_MS = 30000
+const DEFAULT_TIMEOUT_MS = 8000
 
-async function request(path: string, options?: RequestInit & { retryOnTimeout?: boolean }) {
-  const { retryOnTimeout, ...fetchOptions } = options ?? {}
+async function request(path: string, options?: RequestInit & { retryOnTimeout?: boolean; timeoutMs?: number }) {
+  const { retryOnTimeout, timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options ?? {}
   const token = getToken()
   const headers: Record<string, string> = {
     ...(fetchOptions?.headers as Record<string, string>),
@@ -54,7 +62,7 @@ async function request(path: string, options?: RequestInit & { retryOnTimeout?: 
   const totalAttempts = NETWORK_RETRY_DELAYS_MS.length + 1
   for (let attempt = 0; attempt < totalAttempts; attempt++) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     let res: Response
     try {
       res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers, signal: controller.signal })
@@ -187,11 +195,55 @@ export async function getConfig() {
   return request("/api/config")
 }
 
+export async function getAlertOutputs(): Promise<AlertOutput[]> {
+  return request("/api/alert-outputs")
+}
+
+export async function createAlertOutput(output: AlertOutput): Promise<AlertOutput> {
+  return request("/api/alert-outputs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(output),
+  })
+}
+
+export async function updateAlertOutput(output: AlertOutput): Promise<AlertOutput> {
+  return request(`/api/alert-outputs/${output.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(output),
+  })
+}
+
+export async function deleteAlertOutput(id: string) {
+  return request(`/api/alert-outputs/${id}`, { method: "DELETE" })
+}
+
+export async function testAlertOutput(id: string) {
+  return request(`/api/alert-outputs/${id}/test`, { method: "POST" })
+}
+
 export async function updateGlobalConfig(settings: Record<string, any>) {
   return request("/api/config/global", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(settings),
+  })
+}
+
+export async function updateModelServerConfig(settings: Record<string, any>) {
+  return request("/api/config/model-server", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function testModelServerConfig(settings?: Record<string, any>) {
+  return request("/api/config/model-server/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings ?? {}),
   })
 }
 
@@ -292,7 +344,7 @@ export function downloadPdfReport(start: string, end: string, severity?: string,
     .then((blob) => {
       const a = document.createElement("a")
       a.href = URL.createObjectURL(blob)
-      a.download = `safetylens-report-${start}-to-${end}.pdf`
+      a.download = `rakshak-lens-report-${start}-to-${end}.pdf`
       a.click()
       URL.revokeObjectURL(a.href)
     })
@@ -315,7 +367,7 @@ export async function getZones(cameraId: string) {
   return request(`/api/cameras/${cameraId}/zones`)
 }
 
-export async function addZone(cameraId: string, zone: { name: string; type: string; color: string; points: number[][] }) {
+export async function addZone(cameraId: string, zone: Omit<Zone, "id">) {
   return request(`/api/cameras/${cameraId}/zones`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -363,6 +415,10 @@ export async function getCameraById(id: string) {
   return camera
 }
 
+export async function getCameraOccupancy(cameraId: string) {
+  return request(`/api/cameras/${cameraId}/occupancy`)
+}
+
 export async function addCamera(camera: {
   name: string
   video: string
@@ -385,7 +441,10 @@ export async function addCamera(camera: {
   onvif_uuid?: string
   discovery_fingerprint?: string
   safety_rule_ids?: string[]
+  safety_rule_overrides?: Record<string, { confidence?: number; threshold?: number }>
   custom_long_tail_terms?: string[]
+  capability_model_overrides?: Record<string, string>
+  capability_windows?: Array<Record<string, any>>
 }) {
   return request("/api/cameras", {
     method: "POST",
@@ -490,6 +549,107 @@ export async function deleteFace(id: string): Promise<EnrolledFaceApi> {
   return request(`/api/faces/${id}`, { method: "DELETE" })
 }
 
+export type PlateListType = "whitelist" | "blocked" | "visitors"
+export type PlateEventType = "plate_read" | "plate_unknown" | "plate_blocked" | "plate_visitor" | "plate_low_confidence"
+export type PlateMatchStatus = "whitelist" | "blocked" | "visitor" | "unknown" | "low_confidence"
+
+export interface PlateListEntryApi {
+  id: string
+  plateNumber: string
+  normalizedPlate: string
+  list: PlateListType
+  owner: string
+  vehicle: string
+  validFrom: string | null
+  validUntil: string | null
+  createdAt: string
+  active: boolean
+  isIndianFormat: boolean
+}
+
+export interface PlateReadApi {
+  id: string
+  plateNumber: string
+  normalizedPlate: string
+  cameraId: string
+  cameraName: string
+  timestamp: string
+  eventType: PlateEventType
+  matchStatus: PlateMatchStatus
+  matchedListId: string | null
+  matchedList: PlateListType | null
+  confidence: number | null
+  detectionConfidence: number | null
+  ocrConfidence: number | null
+  snapshotUrl: string | null
+  cropUrl: string | null
+  bbox: Record<string, number>
+  vehicleClass: string | null
+  qualityReason: string | null
+  isUnknown: boolean
+}
+
+export async function getPlateReads(params?: {
+  plate?: string
+  cameraId?: string
+  eventType?: string
+  limit?: number
+  offset?: number
+}): Promise<PlateReadApi[]> {
+  const searchParams = new URLSearchParams()
+  if (params?.plate) searchParams.set("plate", params.plate)
+  if (params?.cameraId) searchParams.set("cameraId", params.cameraId)
+  if (params?.eventType) searchParams.set("eventType", params.eventType)
+  if (params?.limit) searchParams.set("limit", String(params.limit))
+  if (params?.offset) searchParams.set("offset", String(params.offset))
+  const qs = searchParams.toString()
+  return request(`/api/plates/reads${qs ? `?${qs}` : ""}`)
+}
+
+export async function getPlateListEntries(list?: PlateListType): Promise<PlateListEntryApi[]> {
+  return request(`/api/plates/lists${list ? `?list=${encodeURIComponent(list)}` : ""}`)
+}
+
+export async function createPlateListEntry(payload: {
+  plateNumber: string
+  list: PlateListType
+  owner?: string
+  vehicle?: string
+  validFrom?: string | null
+  validUntil?: string | null
+}): Promise<PlateListEntryApi> {
+  return request("/api/plates/lists", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updatePlateListEntry(id: string, payload: {
+  plateNumber: string
+  list: PlateListType
+  owner?: string
+  vehicle?: string
+  validFrom?: string | null
+  validUntil?: string | null
+}): Promise<PlateListEntryApi> {
+  return request(`/api/plates/lists/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deletePlateListEntry(id: string): Promise<PlateListEntryApi> {
+  return request(`/api/plates/lists/${id}`, { method: "DELETE" })
+}
+
+export async function importPlateListCsv(file: File): Promise<{ created: PlateListEntryApi[]; failed: Array<{ row: number; error: string; plate?: string | null }> }> {
+  const form = new FormData()
+  form.set("file", file)
+  return request("/api/plates/lists/import", { method: "POST", body: form })
+}
+
 export async function previewCameraPlan(payload: {
   name?: string
   zone?: string
@@ -508,8 +668,11 @@ export async function previewCameraPlan(payload: {
   onvif_uuid?: string
   discovery_fingerprint?: string
   safety_rule_ids?: string[]
+  safety_rule_overrides?: Record<string, { confidence?: number; threshold?: number }>
   yoloe_classes?: string[]
   custom_long_tail_terms?: string[]
+  capability_model_overrides?: Record<string, string>
+  capability_windows?: Array<Record<string, any>>
 }) {
   return request("/api/camera-plans/preview", {
     method: "POST",
@@ -522,10 +685,13 @@ export async function discoverCameras(payload?: {
   cidrs?: string[]
   timeout_seconds?: number
 }) {
+  const scanSeconds = Math.max(payload?.timeout_seconds ?? 5, 5)
   return request("/api/cameras/discover", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload || {}),
+    retryOnTimeout: true,
+    timeoutMs: Math.max(scanSeconds * 1000 + 45000, 60000),
   })
 }
 
@@ -549,6 +715,7 @@ export async function testDiscoveredCamera(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: 60000,
   })
 }
 
@@ -575,6 +742,7 @@ export async function importDiscoveredCameras(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: 120000,
   })
 }
 
@@ -639,7 +807,7 @@ export async function getSafetyRules(): Promise<SafetyRule[]> {
   return request("/api/safety-rules")
 }
 
-export async function createSafetyRule(rule: { name: string; type: string; classes: string[]; model: string; severity: string; threshold?: number | null }): Promise<SafetyRule> {
+export async function createSafetyRule(rule: { name: string; type: string; classes: string[]; model: string; severity: string; threshold?: number | null; confidence?: number | null }): Promise<SafetyRule> {
   return request("/api/safety-rules", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -647,7 +815,7 @@ export async function createSafetyRule(rule: { name: string; type: string; class
   })
 }
 
-export async function updateSafetyRule(id: string, updates: Partial<Omit<SafetyRule, "threshold">> & { threshold?: number | null }): Promise<SafetyRule> {
+export async function updateSafetyRule(id: string, updates: Partial<Omit<SafetyRule, "threshold" | "confidence">> & { threshold?: number | null; confidence?: number | null }): Promise<SafetyRule> {
   return request(`/api/safety-rules/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

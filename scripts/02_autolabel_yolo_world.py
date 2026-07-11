@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Auto-label extracted frames using YOLO-World zero-shot detection.
+Auto-label extracted frames using YOLOE-26 promptable detection.
 Generates YOLO-format annotations for industrial safety classes.
 """
 import os
@@ -9,10 +9,11 @@ import shutil
 import random
 from pathlib import Path
 
-from ultralytics import YOLOWorld
+from ultralytics import YOLOE
 
 DATASET_DIR = Path(__file__).parent.parent / "dataset"
 FRAMES_DIR = DATASET_DIR / "frames"
+YOLOE_MODEL = "yoloe-26s-seg.pt"
 
 # Industrial safety classes to detect
 CLASSES = [
@@ -105,9 +106,10 @@ def main():
     print(f"Found {len(frames)} frames to label")
     setup_dirs()
 
-    # Load YOLO-World
-    print("Loading YOLO-World model...")
-    model = YOLOWorld("yolov8s-worldv2.pt")
+    # The filename is retained for compatibility with existing runbooks; the
+    # model path is the current 2026 YOLOE promptable family.
+    print(f"Loading {YOLOE_MODEL} model...")
+    model = YOLOE(YOLOE_MODEL)
     model.set_classes(CLASSES)
 
     # Split frames

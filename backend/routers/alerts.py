@@ -1,5 +1,5 @@
 """
-SafetyLens alert endpoints — list, stats, time-series, acknowledge, resolve, snooze, false-positive, snapshots.
+Rakshak Lens alert endpoints — list, stats, time-series, acknowledge, resolve, snooze, false-positive, snapshots.
 """
 
 from typing import Optional

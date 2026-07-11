@@ -1,5 +1,5 @@
 """
-SafetyLens Demo Backend
+Rakshak Lens Demo Backend
 - Loops videos with YOLO detection, streams annotated frames as MJPEG
 - Runs VLM (qwen3-vl) periodically on cameras with demo=yolo+vlm
 - Pushes alerts via WebSocket to the React frontend
@@ -20,10 +20,11 @@ from constants import PUBLIC_PATHS, PUBLIC_PREFIXES, FRONTEND_DIR
 from logging_config import setup_logging
 from routers import register_routers
 from routers.safety_rules import _ensure_safety_rules
-from video_processing import start_camera
+from video_processing import camera_frame_watchdog_loop, camera_start_retry_loop, start_camera
 import db
 import alert_store
 import face_store
+import plate_store
 import audit_store
 import auth_store
 import diagnostics
@@ -33,11 +34,11 @@ import notification_dispatcher
 import report_generator
 import state
 
-logger = logging.getLogger("safetylens")
+logger = logging.getLogger("rakshak_lens")
 
 # ── App ─────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="SafetyLens Demo Backend")
+app = FastAPI(title="Rakshak Lens Demo Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,6 +50,8 @@ app.add_middleware(
 def _authenticate_request(request: Request):
     path = request.url.path
     if request.method == "OPTIONS":
+        return None
+    if request.method == "POST" and path == "/api/errors":
         return None
     if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
         return None
@@ -164,12 +167,13 @@ async def startup():
     import asyncio
 
     setup_logging()
-    logger.info("SafetyLens backend starting")
+    logger.info("Rakshak Lens backend starting")
 
     # Phase 1: fast init — server becomes responsive for /api/health and /api/auth/login
     db.init_pool()
     alert_store.init_db()
     face_store.init_db()
+    plate_store.init_db()
     audit_store.init_db()
     auth_store.init_auth_db()
     error_store.init_db()
@@ -199,6 +203,8 @@ async def startup():
     asyncio.create_task(alert_store.auto_resolve_loop())
     asyncio.create_task(notification_dispatcher.escalation_check_loop())
     asyncio.create_task(report_generator.scheduled_report_loop())
+    asyncio.create_task(camera_start_retry_loop())
+    asyncio.create_task(camera_frame_watchdog_loop())
 
     # Phase 2: model loading + camera startup in background so the server
     # can serve login and health requests immediately.

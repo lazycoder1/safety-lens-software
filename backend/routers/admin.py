@@ -1,5 +1,5 @@
 """
-SafetyLens admin user management endpoints.
+Rakshak Lens admin user management endpoints.
 """
 
 from fastapi import APIRouter, Depends, Request, HTTPException

@@ -1,4 +1,4 @@
-# SafetyLens Logging & Error Tracking Reference
+# Rakshak Lens Logging & Error Tracking Reference
 
 Quick reference for debugging production issues. Every error source, where it's stored, and how to query it.
 
@@ -11,9 +11,9 @@ Quick reference for debugging production issues. Every error source, where it's 
 | `error_log` table | Frontend crashes, API 500s, WebSocket errors, unhandled exceptions | 30 days | `GET /api/errors?source=frontend&limit=50` |
 | `audit_log` table | Admin actions (user approve, alert ack, license upload, config changes) | Unlimited | `GET /api/audit` |
 | `alerts` table | Detection alerts, violations, false positives | Active 24h, then auto-resolved | `GET /api/alerts?status=active` |
-| `backend/logs/safetylens.log` | INFO+ backend activity — requests, state changes, startup | 25MB x 8 files (200MB total) | `cat logs/safetylens.log \| jq .` |
+| `backend/logs/rakshak-lens.log` | INFO+ backend activity — requests, state changes, startup | 25MB x 8 files (200MB total) | `cat logs/rakshak-lens.log \| jq .` |
 | `backend/logs/errors.log` | WARNING+ only — errors and warnings. Small, always actionable | 25MB x 8 files | `cat logs/errors.log \| jq .` |
-| Console (stdout) | Same as main log; colorized in dev, JSON in prod | Docker default (json-file) | `docker logs safetylens-backend` |
+| Console (stdout) | Same as main log; colorized in dev, JSON in prod | Docker default (json-file) | `docker logs rakshak-lens-backend` |
 
 ---
 
@@ -21,17 +21,17 @@ Quick reference for debugging production issues. Every error source, where it's 
 
 | File | Logger Name | What It Logs |
 |------|-------------|-------------|
-| `server.py` | `safetylens` | Every HTTP request (method, route, status, duration_ms, request_id). 500s also written to `error_log` table |
-| `error_store.py` | `safetylens.errors` | Manages `error_log` PostgreSQL table. Frontend + backend errors persisted here |
-| `audit_store.py` | `safetylens.audit` | Manages `audit_log` table. Who did what, when (user mgmt, alert actions, config) |
-| `alert_store.py` | `safetylens.alerts` | Alert creation, state transitions, auto-resolve (24h), snapshot cleanup |
-| `video_processing.py` | `safetylens` | Detection loop, VLM calls, Telegram failures, frame capture |
-| `licensing.py` | `safetylens.licensing` | License state (VALID/WARNING/GRACE/SUSPENDED), heartbeat refresh |
-| `model_manager.py` | `safetylens.models` | Model download, installation jobs, warmup, failures |
-| `diagnostics.py` | `safetylens.diagnostics` | Retention cleanup loop, diagnostics bundle generation |
-| `telegram_notifier.py` | `safetylens.telegram` | Alert notification delivery success/failure |
-| `db.py` | `safetylens.db` | PostgreSQL connection pool init, health check failures |
-| `auth_store.py` | `safetylens.auth` | JWT secret generation, persistence warnings |
+| `server.py` | `rakshak_lens` | Every HTTP request (method, route, status, duration_ms, request_id). 500s also written to `error_log` table |
+| `error_store.py` | `rakshak_lens.errors` | Manages `error_log` PostgreSQL table. Frontend + backend errors persisted here |
+| `audit_store.py` | `rakshak_lens.audit` | Manages `audit_log` table. Who did what, when (user mgmt, alert actions, config) |
+| `alert_store.py` | `rakshak_lens.alerts` | Alert creation, state transitions, auto-resolve (24h), snapshot cleanup |
+| `video_processing.py` | `rakshak_lens` | Detection loop, VLM calls, Telegram failures, frame capture |
+| `licensing.py` | `rakshak_lens.licensing` | License state (VALID/WARNING/GRACE/SUSPENDED), heartbeat refresh |
+| `model_manager.py` | `rakshak_lens.models` | Model download, installation jobs, warmup, failures |
+| `diagnostics.py` | `rakshak_lens.diagnostics` | Retention cleanup loop, diagnostics bundle generation |
+| `telegram_notifier.py` | `rakshak_lens.telegram` | Alert notification delivery success/failure |
+| `db.py` | `rakshak_lens.db` | PostgreSQL connection pool init, health check failures |
+| `auth_store.py` | `rakshak_lens.auth` | JWT secret generation, persistence warnings |
 | `logging_config.py` | — | Configures all of the above (format, rotation, levels) |
 
 ---
@@ -83,24 +83,24 @@ details         JSONB DEFAULT '{}'
 
 | File | Level | Purpose |
 |------|-------|---------|
-| `logs/safetylens.log` | INFO+ | Operational log — requests, state changes, startup events |
+| `logs/rakshak-lens.log` | INFO+ | Operational log — requests, state changes, startup events |
 | `logs/errors.log` | WARNING+ | Errors only — small file, always actionable. Check this first. |
-| Console (stdout) | INFO+ | Same as safetylens.log; colorized in dev, JSON in prod |
+| Console (stdout) | INFO+ | Same as rakshak-lens.log; colorized in dev, JSON in prod |
 
 **Start debugging with `errors.log`** — it only contains warnings and errors, no noise.
 
 ## Log File Format
 
-**Files:** `backend/logs/safetylens.log` and `backend/logs/errors.log` (JSON-line, one object per line)
+**Files:** `backend/logs/rakshak-lens.log` and `backend/logs/errors.log` (JSON-line, one object per line)
 
 ```json
 {
   "timestamp": "2026-04-20T10:23:45.123456+00:00",
   "level": "ERROR",
-  "service": "safetylens",
+  "service": "rakshak_lens",
   "environment": "prod",
   "host": "edge-server-01",
-  "logger": "safetylens",
+  "logger": "rakshak_lens",
   "message": "HTTP 500 on /api/alerts",
   "request_id": "a1b2c3d4",
   "method": "POST",
@@ -140,7 +140,7 @@ Every API response includes an `X-Request-ID` header (8-char UUID). Use it to tr
 
 Example: User reports "something went wrong" → find the error in `GET /api/errors` → use `request_id` to grep the log file:
 ```bash
-cat logs/safetylens.log | jq 'select(.request_id == "a1b2c3d4")'
+cat logs/rakshak-lens.log | jq 'select(.request_id == "a1b2c3d4")'
 ```
 
 ---
@@ -171,10 +171,10 @@ curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/errors?source=backend
 curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/errors?since=2026-04-20T00:00:00"
 
 # All 500s in the log file
-cat logs/safetylens.log | jq 'select(.status_code >= 500)'
+cat logs/rakshak-lens.log | jq 'select(.status_code >= 500)'
 
 # Errors for a specific camera
-cat logs/safetylens.log | jq 'select(.camera_id == "cam1" and .level == "ERROR")'
+cat logs/rakshak-lens.log | jq 'select(.camera_id == "cam1" and .level == "ERROR")'
 
 # Audit trail for a user
 curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/audit?actor=admin"
@@ -186,9 +186,9 @@ curl -H "Authorization: Bearer $TOKEN" "localhost:8000/api/audit?actor=admin"
 
 | Level | What | Goes to file? | Examples |
 |-------|------|--------------|---------|
-| ERROR | Operations that failed | `errors.log` + `safetylens.log` | HTTP 500, DB down, model load failure, unhandled exception |
-| WARNING | Recoverable issues | `errors.log` + `safetylens.log` | HTTP 4xx, license expiring, heartbeat refresh failed, slow query |
-| INFO | State changes only | `safetylens.log` only | Startup, login, config change, POST/PUT/DELETE requests, slow GET (>2s) |
+| ERROR | Operations that failed | `errors.log` + `rakshak-lens.log` | HTTP 500, DB down, model load failure, unhandled exception |
+| WARNING | Recoverable issues | `errors.log` + `rakshak-lens.log` | HTTP 4xx, license expiring, heartbeat refresh failed, slow query |
+| INFO | State changes only | `rakshak-lens.log` only | Startup, login, config change, POST/PUT/DELETE requests, slow GET (>2s) |
 | DEBUG | Routine operations | Console only (not in any file) | Every GET request, alert creation, frame processing, health checks |
 
 **Rule of thumb:** If it happens more than once per minute during normal operation, it's DEBUG. If it's a state change or something a human would care about, it's INFO.
@@ -202,7 +202,7 @@ Based on Datadog, 12-Factor App, Better Stack, and SigNoz guidelines:
 - **JSON structured logging** — every line is parseable by `jq`, ELK, Datadog
 - **Standard fields on every line** — `timestamp`, `level`, `service`, `environment`, `host`
 - **request_id correlation** — trace frontend error → backend log → audit event
-- **Two log files** — `errors.log` (check first) + `safetylens.log` (full operational log)
+- **Two log files** — `errors.log` (check first) + `rakshak-lens.log` (full operational log)
 - **DEBUG disabled in files** — never written to disk, only console during development
 - **No sensitive data** — no passwords, tokens, PII in logs
 - **Rotating files** — 25MB x 8 backups, auto-rotated

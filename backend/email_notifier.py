@@ -1,5 +1,5 @@
 """
-Email alert notifications for SafetyLens.
+Email alert notifications for Rakshak Lens.
 Uses stdlib smtplib + email.mime — no extra dependency needed.
 
 Sync calls, fire-and-forget. Called from notification dispatcher.
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from config_manager import get_config
 
-logger = logging.getLogger("safetylens.email")
+logger = logging.getLogger("rakshak_lens.email")
 
 
 def send_alert(alert: dict, snapshot_path: str | None = None) -> None:
@@ -64,11 +64,11 @@ def test_connection(smtp_host: str, smtp_port: int, smtp_user: str, smtp_pass: s
     """Send a test email to verify SMTP configuration."""
     try:
         msg = MIMEText(
-            "<h3>SafetyLens — Email Test</h3>"
+            "<h3>Rakshak Lens — Email Test</h3>"
             "<p>If you see this message, your email configuration is working correctly.</p>",
             "html",
         )
-        msg["Subject"] = "[SafetyLens] Connection Test"
+        msg["Subject"] = "[Rakshak Lens] Connection Test"
         msg["From"] = from_addr
         msg["To"] = to_addr
 
@@ -76,6 +76,24 @@ def test_connection(smtp_host: str, smtp_port: int, smtp_user: str, smtp_pass: s
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def build_message(
+    subject: str,
+    html_body: str,
+    from_addr: str,
+    to_addrs: list[str],
+    snapshot_path: str | None = None,
+) -> MIMEMultipart:
+    """Build an HTML alert email with an optional inline snapshot."""
+    msg = MIMEMultipart("related")
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_addrs)
+    msg.attach(MIMEText(html_body, "html"))
+    if snapshot_path:
+        _attach_snapshot(msg, snapshot_path)
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -91,12 +109,12 @@ def _build_email(alert: dict, snapshot_path: str | None) -> tuple[str, str]:
     rule = alert.get("rule", "Unknown")
     camera = alert.get("cameraName", "Unknown")
     zone = alert.get("zone", "Unknown")
-    desc = alert.get("description", "")
+    desc = alert.get("message") or alert.get("description", "")
     ts = alert.get("timestamp", "")[:19]
     confidence = alert.get("confidence", 0)
     color = _SEVERITY_COLORS.get(severity, "#6b7280")
 
-    subject = f"[SafetyLens {severity}] {rule} — {camera}"
+    subject = f"[Rakshak Lens {severity}] {rule} — {camera}"
 
     snapshot_html = ""
     if snapshot_path and Path(snapshot_path).exists():
@@ -117,7 +135,7 @@ def _build_email(alert: dict, snapshot_path: str | None) -> tuple[str, str]:
     {"<p style='margin-top:12px;'>" + desc + "</p>" if desc else ""}
     {snapshot_html}
     <p style="margin-top:16px;font-size:12px;color:#9ca3af;">
-      This is an automated alert from SafetyLens. Do not reply to this email.
+      This is an automated alert from Rakshak Lens. Do not reply to this email.
     </p>
   </div>
 </div>"""
@@ -136,16 +154,26 @@ def _attach_snapshot(msg: MIMEMultipart, snapshot_path: str) -> None:
         pass
 
 
-def _send(host: str, port: int, user: str, password: str,
-          from_addr: str, to_addrs: list[str], msg: MIMEMultipart | MIMEText) -> None:
+def _send(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    from_addr: str,
+    to_addrs: list[str],
+    msg: MIMEMultipart | MIMEText,
+    *,
+    use_tls: bool = True,
+) -> None:
     """Connect to SMTP server and send message."""
     if port == 465:
         server = smtplib.SMTP_SSL(host, port, timeout=15)
     else:
         server = smtplib.SMTP(host, port, timeout=15)
         server.ehlo()
-        server.starttls()
-        server.ehlo()
+        if use_tls:
+            server.starttls()
+            server.ehlo()
 
     try:
         if user and password:

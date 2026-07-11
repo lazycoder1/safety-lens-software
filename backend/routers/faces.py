@@ -149,13 +149,18 @@ def _create_enrollment_from_bytes(
     except face_analyzer.FaceAnalyzerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        photo_bytes = face_analyzer.format_enrollment_photo(image_bytes, payload.bbox)
+    except Exception:
+        photo_bytes = image_bytes
+
     face = face_store.create_enrollment(
         name=clean_name,
         group=group,
         valid_until=valid_until or None,
         consent_method=consent_method,
         embedding=payload.embedding,
-        photo_bytes=image_bytes,
+        photo_bytes=photo_bytes,
     )
     audit_store.log_event(
         "face.enroll",

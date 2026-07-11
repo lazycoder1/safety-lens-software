@@ -9,7 +9,7 @@ from unittest import mock
 import pytest
 
 # Set up test DB
-TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/safetylens_test")
+TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/rakshak_lens_test")
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
 _tmpdir = tempfile.mkdtemp()

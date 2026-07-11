@@ -1,5 +1,5 @@
 """
-Webhook alert notifications for SafetyLens.
+Webhook alert notifications for Rakshak Lens.
 HTTP POST JSON payloads to a configurable endpoint.
 
 Sync calls, fire-and-forget. Called from notification dispatcher.
@@ -13,7 +13,7 @@ import requests
 
 from config_manager import get_config
 
-logger = logging.getLogger("safetylens.webhook")
+logger = logging.getLogger("rakshak_lens.webhook")
 
 
 def send_alert(alert: dict, snapshot_path: str | None = None) -> None:
@@ -49,7 +49,7 @@ def test_connection(url: str, headers: dict | None = None) -> dict:
     try:
         test_payload = {
             "type": "test",
-            "source": "SafetyLens",
+            "source": "Rakshak Lens",
             "message": "Webhook connection test successful.",
         }
         req_headers = {"Content-Type": "application/json"}
@@ -68,7 +68,7 @@ def test_connection(url: str, headers: dict | None = None) -> dict:
 def _build_payload(alert: dict, snapshot_path: str | None, include_snapshot: bool) -> dict:
     """Build the JSON payload to POST."""
     payload = {
-        "source": "SafetyLens",
+        "source": "Rakshak Lens",
         "event": "alert",
         "alert": {
             "id": alert.get("id"),
@@ -81,6 +81,9 @@ def _build_payload(alert: dict, snapshot_path: str | None, include_snapshot: boo
             "confidence": alert.get("confidence"),
             "timestamp": alert.get("timestamp"),
             "description": alert.get("description"),
+            "message": alert.get("message"),
+            "policyId": alert.get("policyId"),
+            "priority": alert.get("priority"),
         },
     }
 

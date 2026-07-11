@@ -8,7 +8,7 @@ import { ViolationModal } from "./ViolationModal"
 import { LiveAlertsPanel } from "./LiveAlertsPanel"
 import { LicenseGate } from "./LicenseGate"
 
-const HIDE_LIVE_ALERTS_ON = ["/alerts"]
+const HIDE_LIVE_ALERTS_ON = ["/alerts", "/configure", "/system"]
 
 export function Layout() {
   const { pathname } = useLocation()

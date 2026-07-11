@@ -1,5 +1,5 @@
 """
-Structured logging for SafetyLens.
+Structured logging for Rakshak Lens.
 
 Dev  → colorized console (human-readable) + rotating file
 Prod → JSON-line console (for journalctl) + rotating file
@@ -9,7 +9,7 @@ Usage:
     setup_logging()
 
     import logging
-    logger = logging.getLogger("safetylens.video")
+    logger = logging.getLogger("rakshak_lens.video")
     logger.info("Camera started", extra={"camera_id": "cam1"})
 
 Env vars:
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-SERVICE_NAME = "safetylens"
+SERVICE_NAME = "rakshak_lens"
 HOSTNAME = socket.gethostname()
 
 DEFAULT_LOGS_DIR = Path(__file__).parent / "logs"
@@ -93,7 +93,7 @@ class ColorConsoleFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelname, "")
         ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
-        name_short = record.name.replace("safetylens.", "")
+        name_short = record.name.replace("rakshak_lens.", "")
         base = f"{color}[{ts}] {record.levelname:<8}{self.RESET} {name_short:<12} {record.getMessage()}"
 
         # Append extra context
@@ -126,7 +126,7 @@ def setup_logging() -> None:
     level_override = os.environ.get("SAFETYLENS_LOG_LEVEL", "").upper()
     is_prod = env == "prod"
 
-    root_logger = logging.getLogger("safetylens")
+    root_logger = logging.getLogger("rakshak_lens")
     root_logger.setLevel(logging.DEBUG)
     root_logger.handlers.clear()
 
@@ -146,7 +146,7 @@ def setup_logging() -> None:
 
     # Main log — INFO and above (requests, state changes, startup)
     file_handler = RotatingFileHandler(
-        LOGS_DIR / "safetylens.log",
+        LOGS_DIR / "rakshak-lens.log",
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",

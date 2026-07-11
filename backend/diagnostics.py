@@ -22,7 +22,7 @@ import state
 from config_manager import get_config, get_redacted_config
 from logging_config import LOGS_DIR
 
-logger = logging.getLogger("safetylens.diagnostics")
+logger = logging.getLogger("rakshak_lens.diagnostics")
 
 DIAGNOSTICS_DIR = Path(__file__).parent / "diagnostics"
 APP_START_TIME = time.time()
@@ -60,10 +60,20 @@ def build_health_snapshot() -> dict:
         cameras = []
         enabled_cameras = 0
         running_cameras = 0
+        now = time.time()
         for cam_id, cam in cfg.get("cameras", {}).items():
             enabled = bool(cam.get("enabled", True))
             worker_running = cam_id in state.camera_threads
-            frame_available = state.camera_frames.get(cam_id) is not None
+            last_frame_at = state.camera_frame_updated_at.get(cam_id)
+            last_frame_age = None if last_frame_at is None else now - last_frame_at
+            frame_available = (
+                state.camera_frames.get(cam_id) is not None
+                and last_frame_age is not None
+                and last_frame_age <= state.CAMERA_FRAME_STALE_SECONDS
+            )
+            runtime_status = state.camera_runtime_status.get(cam_id, "offline")
+            if worker_running and not frame_available and runtime_status == "running":
+                runtime_status = "stale"
             if enabled:
                 enabled_cameras += 1
             if enabled and worker_running:
@@ -75,10 +85,14 @@ def build_health_snapshot() -> dict:
                     "enabled": enabled,
                     "workerRunning": worker_running,
                     "frameAvailable": frame_available,
-                    "runtimeStatus": state.camera_runtime_status.get(cam_id, "offline"),
+                    "frameFresh": frame_available,
+                    "lastFrameAgeSeconds": None if last_frame_age is None else round(last_frame_age, 1),
+                    "runtimeStatus": runtime_status,
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
                 }
             )
+
+        models = model_manager.list_models_for_status()
 
         status = "ok"
         reasons: list[str] = []
@@ -88,6 +102,9 @@ def build_health_snapshot() -> dict:
         if license_status.state == licensing.LicenseState.SUSPENDED and status != "error":
             status = "degraded"
             reasons.append("license suspended")
+        if any(model.get("status") == "remote_unavailable" for model in models) and status == "ok":
+            status = "degraded"
+            reasons.append("model server unavailable")
         if enabled_cameras and running_cameras < enabled_cameras and status == "ok":
             status = "degraded"
             reasons.append("one or more enabled cameras are not running")
@@ -99,7 +116,7 @@ def build_health_snapshot() -> dict:
             "reasons": reasons,
             "database": {"ok": db_ok},
             "license": license_status.to_public_dict(),
-            "models": model_manager.list_models(),
+            "models": models,
             "cameras": cameras,
             "storage": {
                 **storage,
@@ -115,7 +132,7 @@ def build_health_snapshot() -> dict:
 def create_diagnostics_bundle() -> Path:
     DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    bundle_path = DIAGNOSTICS_DIR / f"safetylens-diagnostics-{timestamp}.zip"
+    bundle_path = DIAGNOSTICS_DIR / f"rakshak-lens-diagnostics-{timestamp}.zip"
 
     recent_alerts = alert_store.get_alerts(limit=200)
     recent_audit = audit_store.get_recent(limit=200)
@@ -133,7 +150,7 @@ def create_diagnostics_bundle() -> Path:
         zf.writestr("config.redacted.json", json.dumps(config, indent=2))
 
         if LOGS_DIR.exists():
-            for path in sorted(LOGS_DIR.glob("safetylens.log*")):
+            for path in sorted(LOGS_DIR.glob("rakshak-lens.log*")):
                 if path.is_file():
                     zf.write(path, arcname=f"logs/{path.name}")
 

@@ -1,5 +1,5 @@
 """
-Shared PostgreSQL connection pool for SafetyLens backend.
+Shared PostgreSQL connection pool for Rakshak Lens backend.
 Thread-safe via psycopg2 ThreadedConnectionPool.
 """
 
@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import psycopg2
 from psycopg2 import pool
 
-logger = logging.getLogger("safetylens.db")
+logger = logging.getLogger("rakshak_lens.db")
 
 _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
@@ -30,7 +30,7 @@ def _get_database_url() -> str:
             return url
     except Exception:
         pass
-    return "postgresql://localhost:5432/safetylens"
+    return "postgresql://localhost:5432/rakshak_lens"
 
 
 def init_pool():

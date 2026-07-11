@@ -8,12 +8,13 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from PIL import Image, ImageOps
 
 import face_store
 from config_manager import get_config
 from constants import PROJECT_ROOT
 
-logger = logging.getLogger("safetylens.faces")
+logger = logging.getLogger("rakshak_lens.faces")
 
 MIN_FACE_SIZE = 48
 LOW_QUALITY_MIN_SCORE = 0.55
@@ -76,11 +77,24 @@ def get_app():
 
 
 def decode_image(image_bytes: bytes) -> np.ndarray:
-    arr = np.frombuffer(image_bytes, np.uint8)
-    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if frame is None:
-        raise FaceAnalyzerError("Could not read image")
-    return frame
+    try:
+        from io import BytesIO
+
+        try:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        except Exception:
+            pass
+        image = Image.open(BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    except Exception:
+        arr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise FaceAnalyzerError("Could not read image")
+        return frame
 
 
 def extract_enrollment_embedding(image_bytes: bytes) -> FacePayload:
@@ -100,6 +114,52 @@ def extract_enrollment_embedding(image_bytes: bytes) -> FacePayload:
         err.match = duplicate  # type: ignore[attr-defined]
         raise err
     return payload
+
+
+def format_enrollment_photo(image_bytes: bytes, bbox: dict, *, output_size: int = 512) -> bytes:
+    """Return a face-centered JPEG suitable for enrollment cards."""
+    frame = decode_image(image_bytes)
+    height, width = frame.shape[:2]
+    x1 = max(0, int(bbox.get("x1", 0)))
+    y1 = max(0, int(bbox.get("y1", 0)))
+    x2 = min(width, int(bbox.get("x2", width)))
+    y2 = min(height, int(bbox.get("y2", height)))
+    if x2 <= x1 or y2 <= y1:
+        raise FaceAnalyzerError("Face crop could not be generated")
+
+    face_w = x2 - x1
+    face_h = y2 - y1
+    crop_size = int(max(face_w, face_h) * 2.2)
+    crop_size = max(crop_size, face_w, face_h)
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    crop_x1 = max(0, cx - crop_size // 2)
+    crop_y1 = max(0, cy - crop_size // 2)
+    crop_x2 = min(width, crop_x1 + crop_size)
+    crop_y2 = min(height, crop_y1 + crop_size)
+    crop_x1 = max(0, crop_x2 - crop_size)
+    crop_y1 = max(0, crop_y2 - crop_size)
+
+    crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+    if crop.size == 0:
+        raise FaceAnalyzerError("Face crop could not be generated")
+
+    crop_h, crop_w = crop.shape[:2]
+    side = max(crop_h, crop_w)
+    top = (side - crop_h) // 2
+    bottom = side - crop_h - top
+    left = (side - crop_w) // 2
+    right = side - crop_w - left
+    crop = cv2.copyMakeBorder(crop, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(245, 245, 245))
+    if side > output_size:
+        crop = cv2.resize(crop, (output_size, output_size), interpolation=cv2.INTER_AREA)
+    else:
+        crop = cv2.resize(crop, (output_size, output_size), interpolation=cv2.INTER_CUBIC)
+
+    ok, encoded = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    if not ok:
+        raise FaceAnalyzerError("Face crop could not be encoded")
+    return encoded.tobytes()
 
 
 def analyze_frame(frame: np.ndarray) -> list[dict]:

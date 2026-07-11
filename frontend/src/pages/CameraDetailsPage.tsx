@@ -6,9 +6,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { deleteCamera, getCameraById, getSafetyRules, getZones, API_BASE } from "@/lib/api"
+import { deleteCamera, getAlertOutputs, getAutomationRules, getCameraById, getSafetyRules, getZones, STREAM_BASE } from "@/lib/api"
 import { useAuthStore } from "@/stores/authStore"
-import type { Camera, SafetyRule, Zone } from "@/types"
+import type { AlertOutput, Camera, CapabilityKey, CapabilityWindow, EngineRule, SafetyRule, Zone } from "@/types"
 import { statusVariant } from "@/components/cameras/constants"
 import {
   cameraHasDetectionModeMismatch,
@@ -16,9 +16,11 @@ import {
   deriveConfiguredCameraPurpose,
   getConfiguredDetectionKeys,
   getConfiguredDetectionLabels,
-  usesZoneIntrusion,
+  getDetectionLabelsFromKeys,
+  usesConfiguredZones,
 } from "@/components/cameras/detectionCatalog"
 import { InfoRow } from "@/components/cameras/helpers"
+import { CameraEventPolicySummary, normalizeCapabilityWindows } from "@/components/cameras/CameraEventPolicyPanel"
 
 export function CameraDetailsPage() {
   const navigate = useNavigate()
@@ -29,6 +31,8 @@ export function CameraDetailsPage() {
   const [deleting, setDeleting] = useState(false)
   const [camera, setCamera] = useState<Camera | null>(null)
   const [safetyRules, setSafetyRules] = useState<SafetyRule[]>([])
+  const [alertOutputs, setAlertOutputs] = useState<AlertOutput[]>([])
+  const [automationRules, setAutomationRules] = useState<EngineRule[]>([])
   const [zones, setZones] = useState<Zone[]>([])
 
   useEffect(() => {
@@ -36,12 +40,19 @@ export function CameraDetailsPage() {
 
     async function load() {
       try {
-        const [cameraData, ruleData] = await Promise.all([getCameraById(cameraId), getSafetyRules()])
+        const [cameraData, ruleData, outputData, automationRuleData] = await Promise.all([
+          getCameraById(cameraId),
+          getSafetyRules(),
+          getAlertOutputs(),
+          getAutomationRules(),
+        ])
         if (cancelled) return
         const zoneData = await getZones(cameraData.id).catch(() => cameraData.zones || [])
         if (cancelled) return
         setCamera(cameraData)
         setSafetyRules(ruleData)
+        setAlertOutputs(outputData)
+        setAutomationRules(automationRuleData)
         setZones(zoneData)
       } catch (error: any) {
         toast.error(error.message || "Failed to load camera")
@@ -67,11 +78,13 @@ export function CameraDetailsPage() {
     [camera, safetyRules]
   )
   const purpose = camera ? deriveConfiguredCameraPurpose(camera, safetyRules) : "Monitoring only"
-  const requiresZone = usesZoneIntrusion(detectionKeys)
+  const requiresZone = usesConfiguredZones(detectionKeys)
   const statusVariantValue = camera ? statusVariant[camera.status] || "default" : "default"
   const isAdmin = userRole === "admin"
   const showLegacyNote = camera ? cameraNeedsLegacyNormalization(camera) : false
   const showModeMismatch = camera ? cameraHasDetectionModeMismatch(camera, safetyRules) : false
+  const detectionSchedule = camera ? summarizeDetectionSchedule(camera) : null
+  const trainedPpeEnabled = camera ? cameraUsesTrainedPpeModel(camera) : false
 
   async function handleDelete() {
     if (!camera) return
@@ -219,7 +232,7 @@ export function CameraDetailsPage() {
 
           <Card className="overflow-hidden p-0">
             <img
-              src={`${API_BASE}/api/stream/${camera.id}`}
+              src={`${STREAM_BASE}/api/stream/${camera.id}`}
               alt={camera.name}
               className="aspect-video w-full object-cover"
             />
@@ -276,14 +289,42 @@ export function CameraDetailsPage() {
             )}
           </Card>
 
+          <CameraEventPolicySummary
+            cameraId={camera.id}
+            rules={automationRules}
+            alertOutputs={alertOutputs}
+          />
+
           <Card className="space-y-4">
             <div>
-              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Execution Plan</h2>
+              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Detection Runtime</h2>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                Grouped model stack and runtime requirements for this camera.
+                Runtime behavior for this camera's selected detections.
               </p>
             </div>
             <div className="space-y-3">
+              {trainedPpeEnabled && (
+                <InfoRow
+                  label="PPE detection"
+                  value={<Badge variant="info">Trained apron / harness detector</Badge>}
+                />
+              )}
+              <InfoRow
+                label="Detection schedule"
+                value={detectionSchedule?.windowText || "Always active"}
+              />
+              <InfoRow
+                label="Detector status"
+                value={
+                  detectionSchedule?.suppressedLabels.length ? (
+                    <Badge variant="warning">
+                      Inactive for {detectionSchedule.suppressedLabels.join(", ")}
+                    </Badge>
+                  ) : (
+                    <Badge variant="success">Active</Badge>
+                  )
+                }
+              />
               <InfoRow label="Expected load" value={camera.execution_plan?.runtime_load || "unknown"} />
               <InfoRow
                 label="Tracking"
@@ -293,10 +334,6 @@ export function CameraDetailsPage() {
                 label="Association"
                 value={camera.execution_plan?.association_enabled ? "Enabled" : "Not required"}
               />
-              <InfoRow
-                label="Models"
-                value={camera.execution_plan?.model_stack?.join(", ") || "No model stack"}
-              />
             </div>
           </Card>
 
@@ -304,7 +341,7 @@ export function CameraDetailsPage() {
             <div>
               <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Zones</h2>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                Restricted area requirements for this camera.
+                Zone requirements for this camera.
               </p>
             </div>
             <div className="space-y-3">
@@ -328,7 +365,7 @@ export function CameraDetailsPage() {
                   <div className="mt-2 flex flex-wrap gap-2">
                     {zones.map((item) => (
                       <Badge key={item.id} variant="info">
-                        {item.name}
+                        {item.name}{item.analytics ? ` · ${item.analytics}` : ""}
                       </Badge>
                     ))}
                   </div>
@@ -368,11 +405,63 @@ export function CameraDetailsPage() {
                 <p><span className="font-medium text-[var(--color-text-primary)]">Detection Engine:</span> {camera.demo}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Runtime Status:</span> {camera.runtime_status}</p>
                 <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Rule IDs:</span> {(camera.safety_rule_ids || []).join(", ") || "None"}</p>
+                <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Model Stack:</span> {camera.execution_plan?.model_stack?.join(", ") || "None"}</p>
+                <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Model Overrides:</span> {JSON.stringify(camera.capability_model_overrides || {})}</p>
+                <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Schedule Telemetry:</span> {JSON.stringify(camera.scheduleTelemetry || {})}</p>
               </div>
             </details>
           )}
         </div>
       </div>
     </div>
+  )
+}
+
+function summarizeDetectionSchedule(camera: Camera): { windowText: string; suppressedLabels: string[] } {
+  const windows = normalizeCapabilityWindows(camera.capability_windows || camera.execution_plan?.capability_windows)
+  const suppressed = getSuppressedCapabilities(camera)
+  return {
+    windowText: windows.length ? windows.map(formatCapabilityWindow).join("; ") : "Always active",
+    suppressedLabels: getDetectionLabelsFromKeys(suppressed),
+  }
+}
+
+function getSuppressedCapabilities(camera: Camera): CapabilityKey[] {
+  const raw =
+    camera.scheduleTelemetry?.scheduleState?.suppressedCapabilities ||
+    camera.scheduleTelemetry?.suppressedCapabilities ||
+    camera.execution_plan?.suppressed_capabilities ||
+    []
+  return raw.filter((item): item is CapabilityKey => Boolean(item))
+}
+
+function formatCapabilityWindow(window: CapabilityWindow): string {
+  const labels = getDetectionLabelsFromKeys(window.capabilities || [])
+  const detectionText = labels.length ? labels.join(", ") : "Selected detections"
+  const rangeText = (window.windows || []).map((item) => {
+    const days = item.days?.length ? item.days.map(formatDay).join("/") : "daily"
+    return `${days} ${item.from}-${item.to}`
+  })
+  return `${detectionText}: ${rangeText.join(", ") || "scheduled"}`
+}
+
+function formatDay(value: string): string {
+  const labels: Record<string, string> = {
+    mon: "Mon",
+    tue: "Tue",
+    wed: "Wed",
+    thu: "Thu",
+    fri: "Fri",
+    sat: "Sat",
+    sun: "Sun",
+  }
+  return labels[value] || value
+}
+
+function cameraUsesTrainedPpeModel(camera: Camera): boolean {
+  const overrides = camera.capability_model_overrides || camera.execution_plan?.capability_model_overrides || {}
+  return (
+    overrides.apron_required === "ppe_closed_set_candidate" ||
+    overrides.harness_required === "ppe_closed_set_candidate"
   )
 }

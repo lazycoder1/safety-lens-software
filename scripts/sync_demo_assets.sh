@@ -9,7 +9,7 @@ IDENTITY_FILE="$WORKSPACE_DIR/.project-keys/vast_techser_ed25519"
 REMOTE_USER="root"
 REMOTE_HOST=""
 REMOTE_PORT="22"
-REMOTE_DIR="/opt/safetylens/video-analytics"
+REMOTE_DIR="/opt/rakshak-lens/video-analytics"
 SYNC_CONFIG="yes"
 SYNC_ENV="no"
 
@@ -34,14 +34,14 @@ Uploads gitignored demo assets to the Vast backend host:
 - backend/config.json
 - test-videos/
 - models/
-- root-level model files such as yolo26m.pt and yoloe-11s-seg.pt
+- root-level model files such as *.pt, *.onnx, *.engine, and *.ts
 
 Options:
   --host HOST            Vast public IP or hostname
   --port PORT            SSH port. Default: 22
   --user USER            SSH user. Default: root
   --identity PATH        SSH private key. Default: ../.project-keys/vast_techser_ed25519
-  --remote-dir PATH      Remote project directory. Default: /opt/safetylens/video-analytics
+  --remote-dir PATH      Remote project directory. Default: /opt/rakshak-lens/video-analytics
   --skip-config          Do not upload backend/config.json
   --with-env             Upload .env as well
   -h, --help             Show this help
@@ -159,10 +159,17 @@ fi
 sync_dir "$PROJECT_DIR/test-videos" "$REMOTE_DIR/test-videos" "test-videos"
 sync_dir "$PROJECT_DIR/models" "$REMOTE_DIR/models" "models"
 
-sync_first_existing_file "$REMOTE_DIR/yolo26m.pt" "yolo26m.pt" "$PROJECT_DIR/yolo26m.pt" "$WORKSPACE_DIR/yolo26m.pt"
-sync_file "$PROJECT_DIR/yolo26n.pt" "$REMOTE_DIR/yolo26n.pt" "yolo26n.pt"
-sync_file "$PROJECT_DIR/yoloe-11s-seg.pt" "$REMOTE_DIR/yoloe-11s-seg.pt" "yoloe-11s-seg.pt"
-sync_file "$PROJECT_DIR/mobileclip_blt.ts" "$REMOTE_DIR/mobileclip_blt.ts" "mobileclip_blt.ts"
+sync_first_existing_file "$REMOTE_DIR/models/coco_primary/yolo26n.pt" "models/coco_primary/yolo26n.pt" \
+  "$PROJECT_DIR/models/coco_primary/yolo26n.pt"
+
+sync_first_existing_file "$REMOTE_DIR/models/yoloe_open_vocab/yoloe-26s-seg.pt" "models/yoloe_open_vocab/yoloe-26s-seg.pt" \
+  "$PROJECT_DIR/models/yoloe_open_vocab/yoloe-26s-seg.pt"
+
+shopt -s nullglob
+for model_file in "$PROJECT_DIR"/*.onnx "$PROJECT_DIR"/*.engine "$PROJECT_DIR"/*.ts; do
+  sync_file "$model_file" "$REMOTE_DIR/$(basename "$model_file")" "root model artifact $(basename "$model_file")"
+done
+shopt -u nullglob
 
 cat <<EOF
 

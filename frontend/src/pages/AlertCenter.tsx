@@ -644,6 +644,27 @@ export function AlertCenter() {
                   )}
                 </div>
               </div>
+
+              {liveSelectedAlert.deliveryResults && liveSelectedAlert.deliveryResults.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-[var(--color-text-primary)] mb-2 uppercase tracking-wider">
+                    Delivery
+                  </h4>
+                  <div className="space-y-2">
+                    {liveSelectedAlert.deliveryResults.map((result) => (
+                      <div key={`${result.outputId}-${result.timestamp}`} className="flex items-start justify-between gap-3 rounded-[var(--radius-md)] border p-2">
+                        <div>
+                          <p className="text-xs font-medium text-[var(--color-text-primary)]">{result.outputName}</p>
+                          <p className="text-[11px] text-[var(--color-text-secondary)]">{result.message}</p>
+                        </div>
+                        <Badge variant={result.status === "failed" ? "critical" : result.status === "simulated" ? "info" : "success"} className="capitalize text-[10px]">
+                          {result.status}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

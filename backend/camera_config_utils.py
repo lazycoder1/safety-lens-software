@@ -10,40 +10,50 @@ LEGACY_ALERT_MAP = {
     "person_detected": "alert_person",
     "vehicle_detected": "alert_vehicle",
     "zone_intrusion": "alert_zone_intrusion",
+    "fire_smoke": "alert_fire_smoke",
 }
 
 RULE_ID_TO_LEGACY_ALERT = {value: key for key, value in LEGACY_ALERT_MAP.items()}
 
 RULE_ID_TO_CLASSES = {
     "ppe_helmet": ["hard hat", "safety helmet"],
+    "ppe_rider_helmet": ["motorcycle helmet", "rider helmet", "helmet"],
     "ppe_vest": ["safety vest", "high visibility vest", "fluorescent vest"],
     "ppe_gloves": ["gloves"],
     "ppe_hairnet": ["hairnet"],
-    "ppe_facemask": ["face mask"],
-    "ppe_apron": ["apron"],
+    "ppe_face_mask": ["face mask", "surgical mask", "medical mask", "mask", "respirator"],
+    "ppe_facemask": ["face mask", "surgical mask", "medical mask", "mask", "respirator"],
+    "ppe_face_shield": ["face shield", "protective face shield", "clear face shield", "visor", "protective visor"],
+    "ppe_apron": ["apron", "protective apron", "kitchen apron", "denim apron", "work apron"],
     "ppe_boots": ["safety boots", "steel-toe boots"],
     "ppe_goggles": ["safety goggles", "protective eyewear"],
+    "ppe_harness": ["safety harness", "fall arrest harness", "body harness", "harness", "safety lanyard", "fall protection lanyard"],
     "alert_mobile_phone": ["cell phone"],
     "alert_animal": ["dog", "cat", "deer", "animal"],
     "alert_person": ["person"],
     "alert_vehicle": ["truck", "car", "motorcycle"],
     "alert_zone_intrusion": ["person"],
+    "alert_fire_smoke": ["fire", "smoke"],
 }
 
 RULE_MATCH_TERMS = {
     "ppe_helmet": ["helmet", "hard hat", "safety helmet"],
+    "ppe_rider_helmet": ["rider helmet", "motorcycle helmet", "helmet on vehicle", "helmet while riding"],
     "ppe_vest": ["vest", "safety vest", "high visibility vest", "fluorescent vest"],
     "ppe_gloves": ["gloves"],
     "ppe_hairnet": ["hairnet"],
-    "ppe_facemask": ["face mask", "mask"],
-    "ppe_apron": ["apron"],
+    "ppe_face_mask": ["face mask", "mask"],
+    "ppe_face_shield": ["face shield", "protective face shield", "clear face shield", "visor", "protective visor"],
+    "ppe_apron": ["apron", "protective apron", "kitchen apron", "denim apron", "work apron"],
     "ppe_boots": ["safety boots", "steel-toe boots", "boots"],
     "ppe_goggles": ["safety goggles", "protective eyewear", "goggles"],
+    "ppe_harness": ["safety harness", "fall arrest harness", "body harness", "harness", "safety lanyard", "fall protection lanyard"],
     "alert_mobile_phone": ["mobile phone", "cell phone", "phone"],
     "alert_animal": ["animal intrusion", "animal", "dog", "cat", "deer"],
     "alert_person": ["person detected", "person"],
     "alert_vehicle": ["vehicle detected", "vehicle", "car", "truck", "motorcycle", "forklift"],
     "alert_zone_intrusion": ["zone intrusion", "restricted zone", "intrusion"],
+    "alert_fire_smoke": ["fire", "smoke", "flames"],
 }
 
 PPE_RULE_IDS = {rule_id for rule_id in RULE_ID_TO_CLASSES if rule_id.startswith("ppe_")}
@@ -53,6 +63,8 @@ CLASS_TO_RULE_ID = {
     for normalized in [cls.lower().replace("_", " ").replace("-", " ").strip() for cls in classes]
     if normalized != "person"
 }
+for _face_mask_term in ("face mask", "surgical mask", "medical mask", "mask", "respirator"):
+    CLASS_TO_RULE_ID[_face_mask_term] = "ppe_face_mask"
 
 
 def _ensure_list(value) -> list[str]:

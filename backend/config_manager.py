@@ -1,10 +1,11 @@
 """
-Config manager for SafetyLens backend.
+Config manager for Rakshak Lens backend.
 Thread-safe config loading, saving, and updating with atomic writes.
 """
 
 import json
 import os
+import tempfile
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -22,10 +23,199 @@ PG_CONFIG_ID = "default"
 _lock = threading.Lock()
 _config: dict | None = None
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _default_model_server_config() -> dict:
+    url = os.environ.get("SAFETYLENS_MODEL_SERVER_URL", "").strip().rstrip("/")
+    if url and "://" not in url:
+        url = f"http://{url}"
+    return {
+        "enabled": bool(url),
+        "url": url,
+        "token": os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", ""),
+        "timeout_seconds": _env_float("SAFETYLENS_MODEL_SERVER_TIMEOUT_SECONDS", 30.0),
+    }
+
+
+DEFAULT_ALERT_OUTPUTS = [
+    {
+        "id": "in_app",
+        "name": "In-App Alerts",
+        "type": "in_app",
+        "enabled": True,
+        "severities": ["P1", "P2", "P3", "P4"],
+        "zones": [],
+        "mode": "websocket",
+        "status": "ready",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {},
+    },
+    {
+        "id": "browser_sound",
+        "name": "Browser Sound",
+        "type": "browser_sound",
+        "enabled": True,
+        "severities": ["P1"],
+        "zones": [],
+        "mode": "local_browser",
+        "status": "simulated",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {"sound": "critical", "repeatSeconds": 0},
+    },
+    {
+        "id": "telegram",
+        "name": "Telegram",
+        "type": "telegram",
+        "enabled": False,
+        "severities": ["P1", "P2"],
+        "zones": [],
+        "mode": "bot",
+        "status": "needs_setup",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {"bot_token": "", "chat_id": ""},
+    },
+    {
+        "id": "email",
+        "name": "Email",
+        "type": "email",
+        "enabled": False,
+        "severities": ["P1", "P2"],
+        "zones": [],
+        "mode": "smtp",
+        "status": "needs_setup",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {
+            "provider": "smtp",
+            "smtp_host": "",
+            "smtp_port": 587,
+            "smtp_user": "",
+            "smtp_pass": "",
+            "sendgrid_api_key": "",
+            "sendgrid_template_id": "",
+            "from_address": "",
+            "from_name": "Rakshak Lens",
+            "to_addresses": [],
+        },
+    },
+    {
+        "id": "webhook",
+        "name": "Webhook",
+        "type": "webhook",
+        "enabled": False,
+        "severities": ["P1", "P2"],
+        "zones": [],
+        "mode": "http",
+        "status": "needs_setup",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {"url": "", "headers": {}, "include_snapshot": False},
+    },
+    {
+        "id": "pushover",
+        "name": "Pushover iPhone",
+        "type": "pushover",
+        "enabled": False,
+        "severities": ["P1", "P2"],
+        "zones": [],
+        "mode": "mobile_push",
+        "status": "needs_setup",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {
+            "app_token": "",
+            "user_key": "",
+            "device": "",
+            "sound": "siren",
+            "priority": 1,
+            "emergency_retry": 60,
+            "emergency_expire": 3600,
+        },
+    },
+    {
+        "id": "audio_relay",
+        "name": "AudioRelay / Local Audio",
+        "type": "ip_speaker",
+        "enabled": False,
+        "severities": ["P1"],
+        "zones": [],
+        "mode": "audio_relay",
+        "status": "simulated",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {"message": "Safety alert. Check the Rakshak Lens dashboard."},
+    },
+    {
+        "id": "ip_speaker",
+        "name": "IP Speaker",
+        "type": "ip_speaker",
+        "enabled": False,
+        "severities": ["P1"],
+        "zones": [],
+        "mode": "http",
+        "status": "needs_setup",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {
+            "url": "",
+            "method": "POST",
+            "headers": {},
+            "message": "Critical {severity} alert. {violation_type} detected in {zone} on camera {camera}. Check Rakshak Lens dashboard immediately.",
+        },
+    },
+    {
+        "id": "relay_buzzer",
+        "name": "Relay / Buzzer",
+        "type": "relay",
+        "enabled": False,
+        "severities": ["P1", "P2"],
+        "zones": [],
+        "mode": "dry_run",
+        "status": "simulated",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {"pulseSeconds": 5, "url": "", "mqtt_topic": ""},
+    },
+    {
+        "id": "plc",
+        "name": "PLC / Modbus",
+        "type": "plc",
+        "enabled": False,
+        "severities": ["P1"],
+        "zones": [],
+        "mode": "modbus",
+        "status": "not_implemented",
+        "lastTestAt": None,
+        "lastFiredAt": None,
+        "lastError": "",
+        "settings": {"host": "", "port": 502, "register": "", "coil": ""},
+    },
+]
+
+
 DEFAULT_CONFIG = {
     "database": {
-        "url": "postgresql://localhost:5432/safetylens",
+        "url": "postgresql://localhost:5432/rakshak_lens",
     },
+    "model_server": _default_model_server_config(),
     "telegram": {
         "enabled": False,
         "bot_token": "",
@@ -49,6 +239,7 @@ DEFAULT_CONFIG = {
         "severities": ["P1", "P2"],
         "include_snapshot": False,
     },
+    "alert_outputs": DEFAULT_ALERT_OUTPUTS,
     "alert_routing": {
         "channel_matrix": {
             "P1": {"inApp": True, "telegram": True, "email": True, "webhook": True, "whatsapp": False, "sms": False, "plc": False},
@@ -69,8 +260,8 @@ DEFAULT_CONFIG = {
             {"id": 2, "afterMinutes": 10, "role": "Plant Manager", "channel": "email"},
         ],
         "templates": {
-            "email_subject": "[SafetyLens {severity}] {violation_type} detected at {zone}",
-            "email_body": "A safety violation has been detected:\n\nViolation: {violation_type}\nSeverity: {severity}\nCamera: {camera}\nZone: {zone}\nTime: {timestamp}\nConfidence: {confidence}\n\nThis is an automated alert from SafetyLens.",
+            "email_subject": "[Rakshak Lens {severity}] {violation_type} detected at {zone}",
+            "email_body": "A safety violation has been detected:\n\nViolation: {violation_type}\nSeverity: {severity}\nCamera: {camera}\nZone: {zone}\nTime: {timestamp}\nConfidence: {confidence}\n\nThis is an automated alert from Rakshak Lens.",
             "telegram_template": "*{severity} Alert*\n{violation_type} at {zone}\nCamera: {camera}\nTime: {timestamp}",
         },
     },
@@ -83,6 +274,7 @@ DEFAULT_CONFIG = {
     },
     "global": {
         "target_fps": 6,
+        "inference_fps": 2.0,
         "yolo_conf": 0.35,
         "jpeg_quality": 60,
         "inference_width": 640,
@@ -147,14 +339,108 @@ def _merge_defaults(current, default):
     return default if current is None else current
 
 
+_SECRET_OUTPUT_KEYS = {"bot_token", "smtp_pass", "sendgrid_api_key", "app_token", "user_key"}
+
+
+def _output_defaults_by_id() -> dict[str, dict]:
+    return {output["id"]: deepcopy(output) for output in DEFAULT_ALERT_OUTPUTS}
+
+
+def normalize_alert_outputs(config: dict) -> tuple[dict, bool]:
+    """Merge alert output defaults and migrate legacy notification settings."""
+    changed = False
+    defaults = _output_defaults_by_id()
+    existing = config.get("alert_outputs")
+    existing_by_id = {item.get("id"): item for item in existing if item.get("id")} if isinstance(existing, list) else {}
+    merged_outputs = []
+
+    for output_id, default in defaults.items():
+        current = existing_by_id.get(output_id, {})
+        merged = _merge_defaults(current, default)
+        if not current:
+            changed = True
+        merged_outputs.append(merged)
+
+    for output_id, output in existing_by_id.items():
+        if output_id not in defaults:
+            merged_outputs.append(output)
+
+    by_id = {output["id"]: output for output in merged_outputs}
+
+    tg = config.get("telegram", {})
+    if "telegram" in by_id:
+        settings = by_id["telegram"].setdefault("settings", {})
+        for src, dst in (("bot_token", "bot_token"), ("chat_id", "chat_id")):
+            if tg.get(src) and not settings.get(dst):
+                settings[dst] = tg[src]
+                changed = True
+        if tg.get("enabled") and not by_id["telegram"].get("enabled"):
+            by_id["telegram"]["enabled"] = True
+            changed = True
+        if tg.get("severities") and by_id["telegram"].get("severities") != tg["severities"]:
+            by_id["telegram"]["severities"] = tg["severities"]
+            changed = True
+
+    email = config.get("email", {})
+    if "email" in by_id:
+        settings = by_id["email"].setdefault("settings", {})
+        for key in ("smtp_host", "smtp_port", "smtp_user", "smtp_pass", "from_address", "to_addresses"):
+            if email.get(key) and not settings.get(key):
+                settings[key] = email[key]
+                changed = True
+        if email.get("enabled") and not by_id["email"].get("enabled"):
+            by_id["email"]["enabled"] = True
+            changed = True
+        if email.get("severities") and by_id["email"].get("severities") != email["severities"]:
+            by_id["email"]["severities"] = email["severities"]
+            changed = True
+
+    webhook = config.get("webhook", {})
+    if "webhook" in by_id:
+        settings = by_id["webhook"].setdefault("settings", {})
+        for key in ("url", "headers", "include_snapshot"):
+            if webhook.get(key) and not settings.get(key):
+                settings[key] = webhook[key]
+                changed = True
+        if webhook.get("enabled") and not by_id["webhook"].get("enabled"):
+            by_id["webhook"]["enabled"] = True
+            changed = True
+        if webhook.get("severities") and by_id["webhook"].get("severities") != webhook["severities"]:
+            by_id["webhook"]["severities"] = webhook["severities"]
+            changed = True
+
+    if config.get("alert_outputs") != merged_outputs:
+        config["alert_outputs"] = merged_outputs
+        changed = True
+    return config, changed
+
+
+def redact_alert_outputs(outputs: list[dict]) -> list[dict]:
+    redacted = json.loads(json.dumps(outputs or []))
+    for output in redacted:
+        settings = output.get("settings", {})
+        for key in list(settings.keys()):
+            if key in _SECRET_OUTPUT_KEYS and settings.get(key):
+                settings[key] = "***redacted***"
+        headers = settings.get("headers")
+        if isinstance(headers, dict):
+            for header_key in list(headers.keys()):
+                if "auth" in header_key.lower() or "token" in header_key.lower():
+                    headers[header_key] = "***redacted***"
+    return redacted
+
+
 def load_config() -> dict:
     """Read config from disk. Creates default config if file is missing."""
     global _config
     with _lock:
         loaded = _load_raw_config_unlocked()
         _config = _merge_defaults(loaded, DEFAULT_CONFIG)
+        if isinstance(loaded, dict) and isinstance(loaded.get("cameras"), dict):
+            _config["cameras"] = deepcopy(loaded["cameras"])
+        _config, outputs_normalized = normalize_alert_outputs(_config)
         _config, normalized = normalize_config(_config)
-        if normalized or _config != loaded:
+        if normalized or outputs_normalized or _config != loaded:
             _save_unlocked(_config)
         return _config
 
@@ -222,6 +508,12 @@ def get_redacted_config() -> dict:
     if db_url:
         database["url"] = _redact_database_url(db_url)
 
+    model_server = config.get("model_server", {})
+    if model_server.get("token"):
+        model_server["token"] = "***redacted***"
+
+    config["alert_outputs"] = redact_alert_outputs(config.get("alert_outputs", []))
+
     cameras = config.get("cameras", {})
     for camera_id, camera in list(cameras.items()):
         cameras[camera_id] = redact_camera_secrets(camera)
@@ -232,6 +524,12 @@ def get_redacted_config() -> dict:
 def get_public_config() -> dict:
     """Return config data safe for normal API responses."""
     config = json.loads(json.dumps(get_config()))
+    model_server = config.get("model_server")
+    if isinstance(model_server, dict):
+        token = model_server.get("token")
+        model_server["token_configured"] = bool(token)
+        model_server.pop("token", None)
+    config["alert_outputs"] = redact_alert_outputs(config.get("alert_outputs", []))
     cameras = config.get("cameras", {})
     for camera_id, camera in list(cameras.items()):
         cameras[camera_id] = redact_camera_secrets(camera)
@@ -268,10 +566,22 @@ def _load_raw_config_unlocked() -> dict:
 
 
 def _save_to_disk(config: dict) -> None:
-    tmp_path = str(CONFIG_PATH) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(config, f, indent=2)
-    os.rename(tmp_path, CONFIG_PATH)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f"{CONFIG_PATH.name}.",
+        suffix=".tmp",
+        dir=CONFIG_PATH.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_PATH)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def _get_postgres_dsn() -> str:

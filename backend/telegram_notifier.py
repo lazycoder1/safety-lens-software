@@ -1,5 +1,5 @@
 """
-Telegram alert notifications for SafetyLens.
+Telegram alert notifications for Rakshak Lens.
 Uses raw requests to Telegram Bot API — no extra dependency needed.
 
 Sync calls, fire-and-forget. Called from video processing threads.
@@ -11,7 +11,7 @@ import requests
 
 from config_manager import get_config
 
-logger = logging.getLogger("safetylens.telegram")
+logger = logging.getLogger("rakshak_lens.telegram")
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
@@ -55,7 +55,7 @@ def test_connection(bot_token: str, chat_id: str) -> dict:
             url,
             json={
                 "chat_id": chat_id,
-                "text": "SafetyLens — connection test successful.",
+                "text": "Rakshak Lens — connection test successful.",
                 "parse_mode": "Markdown",
             },
             timeout=10,
@@ -73,7 +73,7 @@ def _format_caption(alert: dict) -> str:
     rule = alert.get("rule", "Unknown")
     camera = alert.get("cameraName", "Unknown")
     zone = alert.get("zone", "Unknown")
-    desc = alert.get("description", "")
+    desc = alert.get("message") or alert.get("description", "")
     ts = alert.get("timestamp", "")
 
     lines = [

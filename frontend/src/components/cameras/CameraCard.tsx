@@ -10,7 +10,7 @@ import {
   deriveConfiguredCameraPurpose,
   getConfiguredDetectionLabels,
   getConfiguredDetectionKeys,
-  usesZoneIntrusion,
+  usesConfiguredZones,
 } from "./detectionCatalog"
 
 interface CameraCardProps {
@@ -35,7 +35,10 @@ export function CameraCard({
   const detectionKeys = getConfiguredDetectionKeys(camera, safetyRules)
   const purpose = deriveConfiguredCameraPurpose(camera, safetyRules)
   const summary = getConfiguredDetectionLabels(camera, safetyRules)
-  const requiresZone = usesZoneIntrusion(detectionKeys)
+  const requiresZone = usesConfiguredZones(detectionKeys)
+  const hasDetectorWindow = Boolean((camera.capability_windows || camera.execution_plan?.capability_windows || []).length)
+  const suppressedCount = getSuppressedDetectionCount(camera)
+  const trainedPpeEnabled = cameraUsesTrainedPpeModel(camera)
   const variant = statusVariant[camera.status] || "default"
   const needsReview = cameraNeedsLegacyNormalization(camera) || cameraHasDetectionModeMismatch(camera, safetyRules)
   const runtimeLabel =
@@ -74,17 +77,21 @@ export function CameraCard({
 
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">
-            Execution Plan
+            Detection Runtime
           </p>
-          {camera.execution_plan?.model_stack?.length ? (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {camera.execution_plan.model_stack.map((item) => (
-                <Badge key={item} variant="info">{item}</Badge>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">No model plan available</p>
-          )}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Badge variant={summary.length > 0 ? "success" : "default"}>
+              {summary.length > 0 ? "Runs selected detections" : "Monitoring only"}
+            </Badge>
+            <Badge variant={suppressedCount > 0 ? "warning" : hasDetectorWindow ? "info" : "default"}>
+              {suppressedCount > 0
+                ? `${suppressedCount} inactive now`
+                : hasDetectorWindow
+                  ? "Scheduled"
+                  : "Always active"}
+            </Badge>
+            {trainedPpeEnabled && <Badge variant="info">Trained PPE</Badge>}
+          </div>
         </div>
 
         <div>
@@ -157,5 +164,22 @@ export function CameraCard({
         )}
       </div>
     </Card>
+  )
+}
+
+function getSuppressedDetectionCount(camera: Camera): number {
+  return (
+    camera.scheduleTelemetry?.scheduleState?.suppressedCapabilities ||
+    camera.scheduleTelemetry?.suppressedCapabilities ||
+    camera.execution_plan?.suppressed_capabilities ||
+    []
+  ).length
+}
+
+function cameraUsesTrainedPpeModel(camera: Camera): boolean {
+  const overrides = camera.capability_model_overrides || camera.execution_plan?.capability_model_overrides || {}
+  return (
+    overrides.apron_required === "ppe_closed_set_candidate" ||
+    overrides.harness_required === "ppe_closed_set_candidate"
   )
 }

@@ -8,7 +8,7 @@ BACKEND_DIR="$PROJECT_DIR/backend"
 REQUIREMENTS_FILE="$PROJECT_DIR/requirements.txt"
 ENV_FILE="$PROJECT_DIR/.env"
 VENV_DIR="$PROJECT_DIR/.venv"
-SERVICE_NAME="safetylens-backend"
+SERVICE_NAME="rakshak-lens-backend"
 SYSTEMD_MODE="auto"
 INSTALL_PACKAGES="yes"
 DEPLOY_DIR="$PROJECT_DIR/.deploy"
@@ -30,13 +30,13 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/deploy_backend.sh [options]
 
-Sets up the SafetyLens backend in a Python virtualenv and optionally installs
+Sets up the Rakshak Lens backend in a Python virtualenv and optionally installs
 or updates a systemd service on the target Linux host.
 
 Options:
   --env-file PATH         Path to the backend env file. Default: ./video-analytics/.env
   --venv-dir PATH         Virtualenv directory. Default: ./video-analytics/.venv
-  --service-name NAME     systemd service name. Default: safetylens-backend
+  --service-name NAME     systemd service name. Default: rakshak-lens-backend
   --install-systemd       Fail if the service cannot be installed into systemd
   --skip-systemd          Skip systemd installation and print the manual start command
   --skip-pip              Reuse the existing virtualenv without reinstalling packages
@@ -131,12 +131,12 @@ if [[ -z "${JWT_SECRET:-}" ]]; then
   warn "JWT_SECRET is empty. Tokens will invalidate whenever the backend restarts."
 fi
 
-if [[ ! -f "$PROJECT_DIR/yolo26m.pt" && ! -f "$PROJECT_DIR/models/coco_primary/yolo26m.pt" ]]; then
-  warn "COCO model missing (yolo26m.pt). Cameras will stay paused until it is installed."
+if [[ ! -f "$PROJECT_DIR/models/coco_primary/yolo26n.pt" ]]; then
+  warn "COCO model missing (models/coco_primary/yolo26n.pt). Cameras will stay paused until it is installed."
 fi
 
-if [[ ! -f "$PROJECT_DIR/yoloe-11s-seg.pt" && ! -f "$PROJECT_DIR/models/yoloe_open_vocab/yoloe-11s-seg.pt" ]]; then
-  warn "YOLOE model missing (yoloe-11s-seg.pt). Open-vocabulary detections will stay paused until it is installed."
+if [[ ! -f "$PROJECT_DIR/models/yoloe_open_vocab/yoloe-26s-seg.pt" ]]; then
+  warn "YOLOE PPE model missing (models/yoloe_open_vocab/yoloe-26s-seg.pt). Open-vocabulary PPE detections will stay paused until it is installed."
 fi
 
 log "Validating backend imports"
@@ -148,7 +148,7 @@ log "Validating backend imports"
 SERVICE_FILE="$DEPLOY_DIR/${SERVICE_NAME}.service"
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=SafetyLens backend
+Description=Rakshak Lens backend
 After=network-online.target
 Wants=network-online.target
 

@@ -1,5 +1,5 @@
 """
-SafetyLens miscellaneous endpoints — health, videos, alert rules available.
+Rakshak Lens miscellaneous endpoints — health, videos, alert rules available.
 """
 
 import asyncio

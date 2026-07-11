@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { HelpCircle, Pencil, Plus, Search, Shield, Trash2, Upload, Video } from "lucide-react"
+import { Camera, HelpCircle, Pencil, Plus, Search, Shield, Trash2, Upload, Video } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -77,6 +77,7 @@ export function FaceEnrollment() {
   const [submitting, setSubmitting] = useState(false)
   const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const cameraInputRef = useRef<HTMLInputElement | null>(null)
 
   const [enrollMode, setEnrollMode] = useState<EnrollMode>("upload")
   const [photoFile, setPhotoFile] = useState<File | null>(null)
@@ -197,6 +198,11 @@ export function FaceEnrollment() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  function handlePhotoSelected(file: File | undefined | null) {
+    if (!file) return
+    setPhotoFile(file)
   }
 
   async function handleDelete() {
@@ -378,18 +384,42 @@ export function FaceEnrollment() {
             </div>
 
             {enrollMode === "upload" ? (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed rounded-[var(--radius-lg)] p-8 flex flex-col items-center gap-2 cursor-pointer hover:bg-[var(--color-bg-secondary)] transition-colors"
-              >
-                <Upload className="w-8 h-8 text-[var(--color-text-tertiary)]" />
-                <span className="text-sm text-[var(--color-text-secondary)]">{photoFile ? photoFile.name : "Drop image or click to upload"}</span>
+              <div className="border rounded-[var(--radius-lg)] p-4 space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <Button variant="secondary" size="md" onClick={() => cameraInputRef.current?.click()}>
+                    <Camera className="w-4 h-4" /> Take Photo
+                  </Button>
+                  <Button variant="secondary" size="md" onClick={() => fileInputRef.current?.click()}>
+                    <Upload className="w-4 h-4" /> Choose File
+                  </Button>
+                </div>
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    handlePhotoSelected(event.dataTransfer.files?.[0])
+                  }}
+                  onDragOver={(event) => event.preventDefault()}
+                  className="border-2 border-dashed rounded-[var(--radius-lg)] p-6 flex flex-col items-center gap-2 cursor-pointer hover:bg-[var(--color-bg-secondary)] transition-colors"
+                >
+                  <Upload className="w-7 h-7 text-[var(--color-text-tertiary)]" />
+                  <span className="text-sm text-[var(--color-text-secondary)]">{photoFile ? photoFile.name : "Drop image here or choose a file"}</span>
+                  <span className="text-xs text-[var(--color-text-tertiary)] text-center">Use one clear, front-facing face. Phone camera photos are supported.</span>
+                </div>
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept="image/*"
                   className="hidden"
-                  onChange={(event) => setPhotoFile(event.target.files?.[0] || null)}
+                  onChange={(event) => handlePhotoSelected(event.target.files?.[0])}
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={(event) => handlePhotoSelected(event.target.files?.[0])}
                 />
               </div>
             ) : (
@@ -456,7 +486,7 @@ export function FaceEnrollment() {
                   className="mt-0.5 cursor-pointer"
                 />
                 <span className="text-xs text-[var(--color-text-secondary)] leading-relaxed">
-                  I confirm that {enrollName.trim() || "this person"} has been informed that their facial image will be processed by SafetyLens for access control and safety monitoring, stored on-premise, and they have provided consent.
+                  I confirm that {enrollName.trim() || "this person"} has been informed that their facial image will be processed by Rakshak Lens for access control and safety monitoring, stored on-premise, and they have provided consent.
                 </span>
               </label>
               <div>

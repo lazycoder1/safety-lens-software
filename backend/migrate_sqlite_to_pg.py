@@ -18,7 +18,7 @@ def migrate():
         print("No SQLite DB found at", SQLITE_DB)
         return
 
-    db_url = os.environ.get("DATABASE_URL", "postgresql://localhost:5432/safetylens")
+    db_url = os.environ.get("DATABASE_URL", "postgresql://localhost:5432/rakshak_lens")
     print(f"Migrating from {SQLITE_DB} → {db_url}")
 
     sqlite_conn = sqlite3.connect(str(SQLITE_DB))

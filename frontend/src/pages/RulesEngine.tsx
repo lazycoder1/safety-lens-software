@@ -133,11 +133,12 @@ function SafetyRulesTab() {
   // form state
   const [formName, setFormName] = useState("")
   const [formType, setFormType] = useState<"ppe" | "alert">("ppe")
-  const [formModel, setFormModel] = useState<"yolo" | "yoloe">("yoloe")
+  const [formModel, setFormModel] = useState<SafetyRule["model"]>("yoloe")
   const [formClasses, setFormClasses] = useState<string[]>([])
   const [formClassInput, setFormClassInput] = useState("")
   const [formSeverity, setFormSeverity] = useState<Severity>("P2")
   const [formThreshold, setFormThreshold] = useState("")
+  const [formConfidence, setFormConfidence] = useState("")
 
   const fetchData = useCallback(async () => {
     try {
@@ -167,6 +168,7 @@ function SafetyRulesTab() {
     setFormClassInput("")
     setFormSeverity("P2")
     setFormThreshold("")
+    setFormConfidence("")
     setShowForm(false)
     setEditingId(null)
   }
@@ -180,6 +182,7 @@ function SafetyRulesTab() {
     setFormClassInput("")
     setFormSeverity(rule.severity)
     setFormThreshold(rule.threshold ? String(rule.threshold) : "")
+    setFormConfidence(rule.confidence ? String(rule.confidence) : "")
     setShowForm(true)
   }
 
@@ -208,8 +211,16 @@ function SafetyRulesTab() {
     const thresholdValue = hasCustomThreshold
       ? Number.parseInt(formThreshold.trim(), 10)
       : undefined
+    const hasCustomConfidence = formType === "alert" && formConfidence.trim() !== ""
+    const confidenceValue = hasCustomConfidence
+      ? Number.parseFloat(formConfidence.trim())
+      : undefined
     if (hasCustomThreshold && (!Number.isInteger(thresholdValue) || (thresholdValue ?? 0) < 1)) {
       toast.error("Threshold must be a whole number greater than 0")
+      return
+    }
+    if (hasCustomConfidence && (!(confidenceValue && confidenceValue > 0 && confidenceValue <= 1))) {
+      toast.error("Confidence must be a decimal between 0 and 1")
       return
     }
     try {
@@ -221,6 +232,7 @@ function SafetyRulesTab() {
           classes: formClasses,
           severity: formSeverity,
           threshold: formType === "alert" ? (hasCustomThreshold ? thresholdValue : null) : null,
+          confidence: formType === "alert" ? (hasCustomConfidence ? confidenceValue : null) : null,
         })
         setRules((prev) => prev.map((r) => (r.id === editingId ? updated : r)))
         toast.success("Rule updated")
@@ -232,6 +244,7 @@ function SafetyRulesTab() {
           classes: formClasses,
           severity: formSeverity,
           threshold: formType === "alert" ? (hasCustomThreshold ? thresholdValue : undefined) : undefined,
+          confidence: formType === "alert" ? (hasCustomConfidence ? confidenceValue : undefined) : undefined,
         })
         setRules((prev) => [...prev, created])
         toast.success("Rule created")
@@ -384,10 +397,11 @@ function SafetyRulesTab() {
               <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Model</label>
               <select
                 value={formModel}
-                onChange={(e) => setFormModel(e.target.value as "yolo" | "yoloe")}
+                onChange={(e) => setFormModel(e.target.value as SafetyRule["model"])}
                 className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 cursor-pointer"
               >
                 <option value="yoloe">YOLOe Open-Vocab</option>
+                <option value="fire_smoke_specialist">Fire / Smoke Specialist</option>
                 <option value="yolo">YOLO COCO 80-class</option>
               </select>
             </div>
@@ -436,20 +450,38 @@ function SafetyRulesTab() {
               </select>
             </div>
             {formType === "alert" && (
-              <div>
-                <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Alert Threshold</label>
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={formThreshold}
-                  onChange={(e) => setFormThreshold(e.target.value)}
-                  placeholder="Default runtime threshold"
-                  className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
-                />
-                <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
-                  Optional. Lower values fire sooner for this rule only.
-                </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Alert Threshold</label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={formThreshold}
+                    onChange={(e) => setFormThreshold(e.target.value)}
+                    placeholder="Default runtime threshold"
+                    className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                  />
+                  <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+                    Hits needed before alerting.
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-1">Detection Confidence</label>
+                  <input
+                    type="number"
+                    min={0.01}
+                    max={1}
+                    step={0.01}
+                    value={formConfidence}
+                    onChange={(e) => setFormConfidence(e.target.value)}
+                    placeholder="Default global confidence"
+                    className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                  />
+                  <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+                    Lower values make this rule more sensitive.
+                  </p>
+                </div>
               </div>
             )}
           </div>
@@ -480,6 +512,7 @@ function SafetyRulesTab() {
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Model</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Severity</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Threshold</th>
+                <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Confidence</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Cameras</th>
                 <th className="text-left px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Enabled</th>
                 <th className="text-right px-4 py-2.5 text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Actions</th>
@@ -507,8 +540,8 @@ function SafetyRulesTab() {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <Badge variant={rule.model === "yoloe" ? "success" : "default"}>
-                      {rule.model === "yoloe" ? "YOLOe" : "YOLO"}
+                    <Badge variant={rule.model === "yoloe" || rule.model === "fire_smoke_specialist" ? "success" : "default"}>
+                      {rule.model === "fire_smoke_specialist" ? "Fire/Smoke" : rule.model === "yoloe" ? "YOLOe" : rule.model === "pose" ? "Pose" : "YOLO"}
                     </Badge>
                   </td>
                   <td className="px-4 py-3">
@@ -516,6 +549,9 @@ function SafetyRulesTab() {
                   </td>
                   <td className="px-4 py-3 text-[var(--color-text-secondary)]">
                     {rule.type === "alert" ? (rule.threshold ?? "Default") : "n/a"}
+                  </td>
+                  <td className="px-4 py-3 text-[var(--color-text-secondary)]">
+                    {rule.type === "alert" ? (rule.confidence ?? "Default") : "n/a"}
                   </td>
                   <td className="px-4 py-3">
                     <button

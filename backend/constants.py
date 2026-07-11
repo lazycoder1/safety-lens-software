@@ -1,5 +1,5 @@
 """
-SafetyLens constants — paths, class maps, color palettes, public routes.
+Rakshak Lens constants — paths, class maps, color palettes, public routes.
 """
 
 from pathlib import Path
@@ -8,8 +8,8 @@ import os
 # ── Paths ───────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).parent.parent
-YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26m.pt"  # COCO pretrained YOLO26 — 80 classes, NMS-free
-YOLOE_MODEL_PATH = PROJECT_ROOT / "yoloe-11s-seg.pt"
+YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "coco_primary" / "yolo26n.pt"
+YOLOE_MODEL_PATH = PROJECT_ROOT / "models" / "yoloe_open_vocab" / "yoloe-26s-seg.pt"
 VIDEO_DIR = PROJECT_ROOT / "test-videos"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
@@ -69,7 +69,7 @@ YOLOE_COLORS = [
 
 # ── Auth middleware paths ───────────────────────────────────────────────────
 
-PUBLIC_PATHS = {"/api/auth/login", "/api/auth/register", "/api/health", "/api/ping", "/api/errors", "/docs", "/openapi.json"}
+PUBLIC_PATHS = {"/api/auth/login", "/api/auth/register", "/api/health", "/api/ping", "/docs", "/openapi.json"}
 PUBLIC_PREFIXES = ("/api/stream/", "/api/snapshots/")
 
 # ── Violation detection threshold ───────────────────────────────────────────

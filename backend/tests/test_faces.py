@@ -2,13 +2,17 @@
 
 import os
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
+import cv2
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
-TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/safetylens_test")
+TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/rakshak_lens_test")
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
 _tmpdir = Path(tempfile.mkdtemp())
@@ -17,6 +21,7 @@ import alert_store
 import audit_store
 import auth_store
 import config_manager
+import face_analyzer
 import face_store
 
 config_manager.CONFIG_PATH = _tmpdir / "test_config.json"
@@ -77,6 +82,21 @@ def test_enroll_rejects_missing_consent():
     )
     assert resp.status_code == 400
     assert "Consent" in resp.json()["detail"]
+
+
+def test_format_enrollment_photo_outputs_centered_jpeg():
+    image = Image.new("RGB", (1200, 900), (20, 30, 40))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+
+    output = face_analyzer.format_enrollment_photo(
+        buffer.getvalue(),
+        {"x1": 450, "y1": 250, "x2": 650, "y2": 500},
+    )
+
+    decoded = cv2.imdecode(np.frombuffer(output, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded is not None
+    assert decoded.shape[:2] == (512, 512)
 
 
 @mock.patch("face_analyzer.extract_enrollment_embedding")

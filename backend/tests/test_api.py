@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 # Set DATABASE_URL to test DB before importing alert_store
-TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/safetylens_test")
+TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/rakshak_lens_test")
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
 _tmpdir = tempfile.mkdtemp()
@@ -20,6 +20,7 @@ _test_config = Path(_tmpdir) / "test_config.json"
 import alert_store
 alert_store.SNAPSHOTS_DIR = _test_snapshots
 
+import error_store
 import auth_store
 import config_manager
 config_manager.CONFIG_PATH = _test_config
@@ -35,16 +36,27 @@ state.model = None
 state.yoloe_model = None
 
 
+def _stop_worker_threads(registry):
+    for thread, stop_evt in list(registry.values()):
+        stop_evt.set()
+        thread.join(timeout=5)
+    registry.clear()
+
+
 @pytest.fixture(autouse=True)
 def fresh_state():
     """Reset DB, config, and server state before each test."""
+    _stop_worker_threads(state.camera_threads)
+    _stop_worker_threads(state.vlm_threads)
     alert_store.SNAPSHOTS_DIR = _test_snapshots
     alert_store.init_db()
+    error_store.init_db()
 
     # Truncate alerts table
     with alert_store._get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE alerts")
+            cur.execute("TRUNCATE TABLE error_log")
         conn.commit()
 
     # Re-create snapshots dir
@@ -72,6 +84,9 @@ def fresh_state():
 
     yield
 
+    _stop_worker_threads(state.camera_threads)
+    _stop_worker_threads(state.vlm_threads)
+
     # Clean up snapshot files
     if _test_snapshots.exists():
         for f in _test_snapshots.iterdir():
@@ -83,6 +98,14 @@ client = TestClient(server.app, raise_server_exceptions=False)
 
 def _admin_headers(extra: dict | None = None) -> dict[str, str]:
     token = auth_store.create_token("admin-test", "admin", "admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _role_headers(role: str, extra: dict | None = None) -> dict[str, str]:
+    token = auth_store.create_token(f"{role}-test", role, role)
     headers = {"Authorization": f"Bearer {token}"}
     if extra:
         headers.update(extra)
@@ -131,6 +154,17 @@ def test_health():
     data = resp.json()
     assert data["status"] in {"ok", "degraded"}
     assert "cameras" in data
+
+
+def test_error_reporting_is_public_but_error_query_requires_auth():
+    report_resp = client.post("/api/errors", json={"message": "frontend smoke"})
+    assert report_resp.status_code == 200
+
+    unauthenticated_query = client.get("/api/errors")
+    assert unauthenticated_query.status_code == 401
+
+    authenticated_query = api_get("/api/errors")
+    assert authenticated_query.status_code == 200
 
 
 # ── GET /api/cameras ─────────────────────────────────────────────────────────
@@ -363,6 +397,125 @@ def test_get_config():
     assert "global" in data
     assert "vlm" in data
     assert "cameras" in data
+    assert "model_server" in data
+
+
+def test_get_config_redacts_model_server_token():
+    cfg = config_manager.get_config()
+    cfg["model_server"] = {
+        "enabled": True,
+        "url": "http://models.example.test:8100",
+        "token": "secret-token",
+        "timeout_seconds": 30,
+    }
+    config_manager.save_config(cfg)
+
+    resp = api_get("/api/config")
+    assert resp.status_code == 200
+    model_server = resp.json()["model_server"]
+    assert "token" not in model_server
+    assert model_server["token_configured"] is True
+
+
+def test_get_config_hides_model_server_from_non_admin():
+    resp = client.get("/api/config", headers=_role_headers("operator"))
+    assert resp.status_code == 200
+    assert "model_server" not in resp.json()
+
+
+@mock.patch("routers.config.restart_all_cameras")
+@mock.patch("routers.config.load_config")
+def test_reload_config_reloads_backend_memory_and_restarts_cameras(mock_load_config, mock_restart):
+    mock_load_config.return_value = {"cameras": {"cam_b": {}, "cam_a": {}}}
+
+    resp = api_post("/api/config/reload")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "camera_count": 2, "camera_ids": ["cam_a", "cam_b"]}
+    mock_load_config.assert_called_once()
+    mock_restart.assert_called_once()
+
+
+def test_reload_config_requires_admin():
+    resp = client.post("/api/config/reload", headers=_role_headers("operator"))
+    assert resp.status_code == 403
+
+
+# ── Alert outputs ────────────────────────────────────────────────────────────
+
+def test_get_alert_outputs_redacts_secrets():
+    cfg = config_manager.get_config()
+    pushover = next(output for output in cfg["alert_outputs"] if output["id"] == "pushover")
+    pushover["settings"]["app_token"] = "app-secret"
+    pushover["settings"]["user_key"] = "user-secret"
+    config_manager.save_config(cfg)
+
+    resp = api_get("/api/alert-outputs")
+    assert resp.status_code == 200
+    data = resp.json()
+    redacted = next(output for output in data if output["id"] == "pushover")
+    assert redacted["settings"]["app_token"] == "***redacted***"
+    assert redacted["settings"]["user_key"] == "***redacted***"
+
+
+def test_update_alert_output_preserves_redacted_secret():
+    cfg = config_manager.get_config()
+    pushover = next(output for output in cfg["alert_outputs"] if output["id"] == "pushover")
+    pushover["settings"]["app_token"] = "app-secret"
+    pushover["settings"]["user_key"] = "user-secret"
+    config_manager.save_config(cfg)
+
+    public = next(output for output in api_get("/api/alert-outputs").json() if output["id"] == "pushover")
+    public["enabled"] = True
+    public["severities"] = ["P1"]
+    resp = api_put("/api/alert-outputs/pushover", json=public)
+
+    assert resp.status_code == 200
+    saved = next(output for output in config_manager.get_config()["alert_outputs"] if output["id"] == "pushover")
+    assert saved["settings"]["app_token"] == "app-secret"
+    assert saved["settings"]["user_key"] == "user-secret"
+    assert saved["enabled"] is True
+
+
+def test_disabling_pushover_cancels_emergency_retries():
+    cfg = config_manager.get_config()
+    pushover = next(output for output in cfg["alert_outputs"] if output["id"] == "pushover")
+    pushover["enabled"] = True
+    pushover["settings"]["app_token"] = "app-secret"
+    config_manager.save_config(cfg)
+
+    public = next(output for output in api_get("/api/alert-outputs").json() if output["id"] == "pushover")
+    public["enabled"] = False
+    with mock.patch("notification_dispatcher.cancel_pushover_emergency_retries", return_value={"attempted": 1, "cancelled": 1, "failed": 0, "errors": []}) as cancel:
+        resp = api_put("/api/alert-outputs/pushover", json=public)
+
+    assert resp.status_code == 200
+    cancel.assert_called_once()
+    saved = next(output for output in config_manager.get_config()["alert_outputs"] if output["id"] == "pushover")
+    assert saved["enabled"] is False
+
+
+def test_dry_run_relay_output_test():
+    resp = api_post("/api/alert-outputs/relay_buzzer/test")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["result"]["status"] == "simulated"
+    assert "pulse" in data["result"]["message"]
+
+
+def test_alert_routing_test_returns_output_results():
+    resp = api_post("/api/config/alert-routing/test", json={
+        "severity": "P1",
+        "rule": "Fire Test",
+        "cameraName": "Gate",
+        "zone": "Factory",
+        "outputIds": ["in_app", "browser_sound", "relay_buzzer"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert {result["outputId"] for result in data["results"]} == {"in_app", "browser_sound"}
 
 
 # ── PUT /api/config/global ───────────────────────────────────────────────────
@@ -382,6 +535,40 @@ def test_update_global_partial(mock_restart):
     data = resp.json()
     assert data["yolo_conf"] == 0.5
     assert data["target_fps"] == 6
+
+
+# ── PUT /api/config/model-server ─────────────────────────────────────────────
+
+@mock.patch("routers.config.restart_all_cameras")
+def test_update_model_server_config_normalizes_ip(mock_restart):
+    resp = api_put("/api/config/model-server", json={
+        "enabled": True,
+        "url": "203.0.113.10:8100",
+        "token": "shared-secret",
+        "timeout_seconds": 45,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["enabled"] is True
+    assert data["url"] == "http://203.0.113.10:8100"
+    assert data["timeout_seconds"] == 45
+    assert data["token_configured"] is True
+    assert config_manager.get_config()["model_server"]["token"] == "shared-secret"
+    mock_restart.assert_called_once()
+
+
+def test_update_model_server_requires_admin():
+    resp = client.put(
+        "/api/config/model-server",
+        headers=_role_headers("operator"),
+        json={"enabled": True, "url": "http://203.0.113.10:8100"},
+    )
+    assert resp.status_code == 403
+
+
+def test_update_model_server_requires_url_when_enabled():
+    resp = api_put("/api/config/model-server", json={"enabled": True, "url": ""})
+    assert resp.status_code == 400
 
 
 # ── PUT /api/config/vlm ─────────────────────────────────────────────────────
@@ -423,8 +610,10 @@ def test_available_alert_rules_endpoint():
     assert "alert_animal" in data
     assert "alert_person" in data
     assert "alert_vehicle" in data
+    assert "alert_fire_smoke" in data
     assert data["alert_mobile_phone"]["rule"] == "Mobile Phone Usage"
     assert data["alert_mobile_phone"]["severity"] == "P3"
+    assert data["alert_fire_smoke"]["classes"] == ["fire", "smoke"]
 
 
 # ── GET /api/videos ──────────────────────────────────────────────────────────
@@ -466,6 +655,71 @@ def test_add_camera(mock_start):
     data = resp.json()
     assert data["name"] == "New Cam"
     assert "id" in data
+    mock_start.assert_called_once()
+
+
+@mock.patch("routers.cameras.start_camera")
+def test_add_camera_preserves_detector_capability_windows(mock_start):
+    resp = api_post("/api/cameras", json={
+        "name": "Scheduled Cam",
+        "video": "test.mp4",
+        "zone": "ZoneX",
+        "profile": "general_safety",
+        "capabilities": ["person_presence"],
+        "safety_rule_ids": ["alert_person"],
+        "capability_windows": [
+            {
+                "id": "camera_detection_active_window",
+                "capabilities": ["person_presence"],
+                "mode": "detection",
+                "windows": [{"days": ["mon"], "from": "09:00", "to": "17:00"}],
+            }
+        ],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["capability_windows"] == [
+        {
+            "id": "camera_detection_active_window",
+            "capabilities": ["person_presence"],
+            "mode": "detection",
+            "windows": [{"days": ["mon"], "from": "09:00", "to": "17:00"}],
+        }
+    ]
+    assert data["execution_plan"]["capability_windows"] == data["capability_windows"]
+
+    saved = config_manager.get_config()["cameras"][data["id"]]
+    assert saved["capability_windows"] == data["capability_windows"]
+    mock_start.assert_called_once()
+
+
+@mock.patch("routers.cameras.start_camera")
+@mock.patch("routers.cameras.model_manager.missing_model_keys", return_value=[])
+def test_add_camera_preserves_closed_set_capability_model_overrides(_mock_missing, mock_start):
+    resp = api_post("/api/cameras", json={
+        "name": "Factory PPE Candidate Cam",
+        "video": "test.mp4",
+        "zone": "Factory PPE",
+        "profile": "work_zone_ppe",
+        "capabilities": ["apron_required", "harness_required"],
+        "safety_rule_ids": ["ppe_apron", "ppe_harness"],
+        "capability_model_overrides": {
+            "apron_required": "ppe_closed_set_candidate",
+            "harness_required": "ppe_closed_set_candidate",
+        },
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["capability_model_overrides"] == {
+        "apron_required": "ppe_closed_set_candidate",
+        "harness_required": "ppe_closed_set_candidate",
+    }
+    assert data["execution_plan"]["required_model_keys"] == ["ppe_closed_set_candidate"]
+    assert data["execution_plan"]["run_ppe_closed_set_candidate"] is True
+    assert data["execution_plan"]["run_ppe_specialist"] is False
+
+    saved = config_manager.get_config()["cameras"][data["id"]]
+    assert saved["capability_model_overrides"] == data["capability_model_overrides"]
     mock_start.assert_called_once()
 
 
@@ -517,6 +771,22 @@ def test_create_safety_rule_with_threshold():
     assert data["threshold"] == 4
 
 
+def test_create_safety_rule_with_confidence():
+    resp = api_post("/api/safety-rules", json={
+        "name": "Low Confidence Smoke",
+        "type": "alert",
+        "model": "fire_smoke_specialist",
+        "classes": ["smoke"],
+        "severity": "P1",
+        "threshold": 3,
+        "confidence": 0.22,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["threshold"] == 3
+    assert data["confidence"] == 0.22
+
+
 def test_update_safety_rule_threshold():
     resp = api_put("/api/safety-rules/alert_mobile_phone", json={"threshold": 3})
     assert resp.status_code == 200
@@ -540,6 +810,23 @@ def test_update_safety_rule_threshold_can_clear():
     cfg = config_manager.get_config()
     rule = next(rule for rule in cfg["safety_rules"] if rule["id"] == "alert_mobile_phone")
     assert rule["threshold"] is None
+
+
+def test_fire_smoke_preview_uses_specialist_model():
+    resp = api_post("/api/camera-plans/preview", json={
+        "profile": "demo_advanced",
+        "capabilities": ["fire_smoke"],
+        "stream_type": "file",
+        "video": "test.mp4",
+        "safety_rule_ids": ["alert_fire_smoke"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    plan = data["execution_plan"]
+    assert plan["required_model_keys"] == ["fire_smoke_specialist"]
+    assert plan["run_fire_smoke_specialist"] is True
+    assert plan["run_yoloe_long_tail"] is False
+    assert plan["model_stack"] == ["Fire / Smoke Specialist"]
 
 
 def test_update_camera_replaces_stale_legacy_detection_fields():
@@ -594,11 +881,50 @@ def test_preview_camera_plan():
         "capabilities": ["helmet_required", "zone_intrusion"],
         "stream_type": "file",
         "video": "test.mp4",
+        "capability_windows": [
+            {
+                "id": "camera_detection_active_window",
+                "capabilities": ["helmet_required", "zone_intrusion"],
+                "mode": "detection",
+                "windows": [{"days": ["mon", "tue"], "from": "08:00", "to": "18:00"}],
+            }
+        ],
     })
     assert resp.status_code == 200
     data = resp.json()
     assert data["execution_plan"]["run_coco_primary"] is True
     assert data["execution_plan"]["run_ppe_specialist"] is True
+    assert data["execution_plan"]["capability_windows"] == [
+        {
+            "id": "camera_detection_active_window",
+            "capabilities": ["helmet_required", "zone_intrusion"],
+            "mode": "detection",
+            "windows": [{"days": ["mon", "tue"], "from": "08:00", "to": "18:00"}],
+        }
+    ]
+
+
+def test_preview_camera_plan_with_closed_set_ppe_override():
+    resp = api_post("/api/camera-plans/preview", json={
+        "profile": "work_zone_ppe",
+        "capabilities": ["apron_required", "harness_required"],
+        "stream_type": "file",
+        "video": "test.mp4",
+        "safety_rule_ids": ["ppe_apron", "ppe_harness"],
+        "capability_model_overrides": {
+            "apron_required": "ppe_closed_set_candidate",
+            "harness_required": "ppe_closed_set_candidate",
+        },
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["execution_plan"]["required_model_keys"] == ["ppe_closed_set_candidate"]
+    assert data["execution_plan"]["capability_model_overrides"] == {
+        "apron_required": "ppe_closed_set_candidate",
+        "harness_required": "ppe_closed_set_candidate",
+    }
+    assert data["execution_plan"]["run_ppe_closed_set_candidate"] is True
+    assert data["execution_plan"]["run_ppe_specialist"] is False
 
 
 def test_update_camera_not_found():

@@ -37,29 +37,29 @@ else
 fi
 
 # ============================================================
-# STEP 2: Auto-label with YOLO-World
+# STEP 2: Auto-label with YOLOE-26
 # ============================================================
-if is_done "step2_label"; then
+if is_done "step2_label_yoloe26"; then
   log "SKIP: Frames already labeled"
 else
-  log "STEP 2: Auto-labeling with YOLO-World..."
+  log "STEP 2: Auto-labeling with YOLOE-26..."
   activate_venv
   python3 "$SCRIPT_DIR/02_autolabel_yolo_world.py"
-  done_flag "step2_label"
+  done_flag "step2_label_yoloe26"
   log "DONE: Auto-labeling"
 fi
 
 # ============================================================
-# STEP 3: Train YOLOv8n
+# STEP 3: Train YOLO26n
 # ============================================================
-if is_done "step3_train"; then
-  log "SKIP: YOLOv8n already trained"
+if is_done "step3_train_yolo26n"; then
+  log "SKIP: YOLO26n already trained"
 else
-  log "STEP 3: Training YOLOv8n (this takes ~20-40min on M1 Pro)..."
+  log "STEP 3: Training YOLO26n (this takes ~20-40min on M1 Pro)..."
   activate_venv
   python3 "$SCRIPT_DIR/03_train_yolo.py"
-  done_flag "step3_train"
-  log "DONE: YOLOv8n training"
+  done_flag "step3_train_yolo26n"
+  log "DONE: YOLO26n training"
 fi
 
 # ============================================================

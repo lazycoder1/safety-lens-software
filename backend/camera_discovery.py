@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import cv2
 import requests
 
+from capability_registry import CAPABILITY_REGISTRY
 from camera_connection import (
     DEFAULT_ONVIF_PORT,
     DEFAULT_RTSP_PORT,
@@ -71,6 +72,17 @@ CURATED_STREAM_PATHS = {
         "/video.mjpg",
     ],
 }
+
+DEFAULT_DISCOVERY_CAPABILITIES = ["person_presence"]
+DEFAULT_DISCOVERY_ZONE = "Discovered Cameras"
+DEFAULT_DISCOVERY_STREAM_PATH = "/Streaming/Channels/101"
+DEFAULT_DISCOVERY_WINDOW = {
+    "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+    "from": "00:00",
+    "to": "23:59",
+}
+DEFAULT_DISCOVERY_EVENT_OUTPUT_IDS = ["in_app"]
+DEFAULT_DISCOVERY_EVENT_MESSAGE = "{severity} {violation_type} on {camera} in {zone}"
 
 
 def _xml_text(parent: ET.Element | None, path: str, default: str = "") -> str:
@@ -258,7 +270,7 @@ def _rtsp_options_auth_state(host: str, port: int, timeout: float = 0.5) -> str:
     request = (
         f"OPTIONS rtsp://{host}:{port}/ RTSP/1.0\r\n"
         "CSeq: 1\r\n"
-        "User-Agent: SafetyLens/1.0\r\n\r\n"
+        "User-Agent: Rakshak Lens/1.0\r\n\r\n"
     ).encode("utf-8")
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -275,9 +287,12 @@ def _rtsp_options_auth_state(host: str, port: int, timeout: float = 0.5) -> str:
 
 def discover_cameras(cidrs: list[str] | None = None, timeout_seconds: float = 4.0) -> dict[str, Any]:
     networks, warnings = resolve_scan_networks(cidrs)
-    devices_by_host: dict[str, dict[str, Any]] = {
-        device["host"]: device for device in ws_discover(timeout_seconds=min(timeout_seconds, 4.0))
-    }
+    try:
+        onvif_devices = ws_discover(timeout_seconds=min(timeout_seconds, 4.0))
+    except OSError as exc:
+        onvif_devices = []
+        warnings.append(f"ONVIF WS-Discovery failed: {exc}")
+    devices_by_host: dict[str, dict[str, Any]] = {device["host"]: device for device in onvif_devices}
 
     rtsp_candidates: list[tuple[str, int]] = []
     for network in networks:
@@ -327,6 +342,175 @@ def discover_cameras(cidrs: list[str] | None = None, timeout_seconds: float = 4.
         "cidrs": networks,
         "warnings": warnings,
         "devices": devices,
+    }
+
+
+def _slug(value: str) -> str:
+    cleaned = []
+    for char in value.lower():
+        if char.isalnum():
+            cleaned.append(char)
+        elif cleaned and cleaned[-1] != "_":
+            cleaned.append("_")
+    slug = "".join(cleaned).strip("_")
+    return slug or "camera"
+
+
+def _discovered_camera_id(device: dict[str, Any], index: int, used: set[str]) -> str:
+    host = str(device.get("host") or device.get("ip") or "").strip()
+    name = str(device.get("name") or "camera").strip()
+    base = _slug(f"{name}_{host.replace('.', '_')}" if host else f"{name}_{index}")
+    camera_id = f"discovered_{base}"
+    suffix = 2
+    while camera_id in used:
+        camera_id = f"discovered_{base}_{suffix}"
+        suffix += 1
+    used.add(camera_id)
+    return camera_id
+
+
+def _stream_path_from_device(device: dict[str, Any], default_stream_path: str) -> tuple[str, bool]:
+    explicit = normalize_stream_path(device.get("stream_path", ""))
+    if explicit:
+        return explicit, False
+    for candidate in device.get("stream_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        path = normalize_stream_path(candidate.get("path", ""))
+        if path:
+            return path, False
+    return normalize_stream_path(default_stream_path), True
+
+
+def _safety_rule_ids_for(capabilities: list[str], explicit_rule_ids: list[str] | None = None) -> list[str]:
+    if explicit_rule_ids is not None:
+        return [str(rule_id) for rule_id in explicit_rule_ids if str(rule_id).strip()]
+    rule_ids: list[str] = []
+    for capability in capabilities:
+        definition = CAPABILITY_REGISTRY.get(capability)
+        if not definition:
+            continue
+        for rule_id in definition.get("safety_rule_ids", []):
+            if rule_id not in rule_ids:
+                rule_ids.append(rule_id)
+    return rule_ids
+
+
+def discovery_to_site_document(
+    discovery: dict[str, Any],
+    *,
+    site_name: str = "Rakshak Lens Discovered Cameras",
+    timezone: str = "Asia/Kolkata",
+    merge_existing: bool = True,
+    zone: str = DEFAULT_DISCOVERY_ZONE,
+    profile: str = "general_safety",
+    capabilities: list[str] | None = None,
+    capability_model_overrides: dict[str, str] | None = None,
+    safety_rule_ids: list[str] | None = None,
+    username_env: str = "",
+    password_env: str = "",
+    default_stream_path: str = DEFAULT_DISCOVERY_STREAM_PATH,
+    fps: int = 6,
+    enabled: bool = False,
+    include_active_windows: bool = True,
+    include_event_policy: bool = True,
+    event_output_ids: list[str] | None = None,
+    event_severity: str = "inherit",
+    event_priority: int = 5,
+    event_cooldown_seconds: int = 60,
+    event_min_confidence: float = 0.0,
+    event_message_template: str = DEFAULT_DISCOVERY_EVENT_MESSAGE,
+) -> dict[str, Any]:
+    """Convert discovery output into a reviewable site YAML document.
+
+    The generated cameras are disabled by default because RTSP discovery can
+    find ports before it proves a readable stream path. Operators can pass
+    enabled=True once credentials and stream paths have been verified.
+    """
+    selected_capabilities = [str(item) for item in (capabilities or DEFAULT_DISCOVERY_CAPABILITIES) if str(item).strip()]
+    selected_overrides = {
+        str(capability): str(model_key)
+        for capability, model_key in (capability_model_overrides or {}).items()
+        if str(capability).strip() and str(model_key).strip()
+    }
+    selected_rule_ids = _safety_rule_ids_for(selected_capabilities, safety_rule_ids)
+    selected_output_ids = [
+        str(item)
+        for item in (event_output_ids if event_output_ids is not None else DEFAULT_DISCOVERY_EVENT_OUTPUT_IDS)
+        if str(item).strip()
+    ]
+    cameras: dict[str, dict[str, Any]] = {}
+    used_ids: set[str] = set()
+
+    for index, device in enumerate(discovery.get("devices") or [], start=1):
+        if not isinstance(device, dict):
+            continue
+        host = str(device.get("host") or device.get("ip") or "").strip()
+        if not host:
+            continue
+        stream_path, guessed_stream_path = _stream_path_from_device(device, default_stream_path)
+        camera: dict[str, Any] = {
+            "name": str(device.get("name") or host),
+            "zone": zone,
+            "profile": profile,
+            "stream_type": "rtsp",
+            "host": host,
+            "rtsp_port": int(device.get("rtsp_port") or DEFAULT_RTSP_PORT),
+            "stream_path": stream_path,
+            "preferred_stream": str(device.get("recommended_stream") or device.get("preferred_stream") or infer_preferred_stream(stream_path)),
+            "enabled": bool(enabled),
+            "fps": int(fps),
+            "capabilities": selected_capabilities,
+            "capability_model_overrides": {
+                capability: model_key
+                for capability, model_key in selected_overrides.items()
+                if capability in selected_capabilities
+            },
+            "safety_rule_ids": selected_rule_ids,
+            "discovery_fingerprint": str(device.get("fingerprint") or ""),
+            "onvif_uuid": device.get("onvif_uuid"),
+            "onvif_xaddr": device.get("onvif_xaddr"),
+            "onvif_port": device.get("onvif_port"),
+            "vendor": device.get("vendor") or "",
+            "model": device.get("model") or "",
+            "discovery_source": device.get("source") or "discovery",
+            "discovery_auth_state": device.get("auth_state") or "unknown",
+            "needs_stream_path_review": guessed_stream_path,
+        }
+        if username_env:
+            camera["username"] = f"${{{username_env}}}"
+        if password_env:
+            camera["password"] = f"${{{password_env}}}"
+        if include_active_windows:
+            camera["capability_windows"] = {
+                capability: {
+                    "mode": "detection",
+                    "windows": [dict(DEFAULT_DISCOVERY_WINDOW)],
+                }
+                for capability in selected_capabilities
+            }
+        if include_event_policy and selected_output_ids:
+            camera["event_policy"] = {
+                "enabled": True,
+                "output_ids": selected_output_ids,
+                "severity": str(event_severity or "inherit"),
+                "priority": max(1, int(event_priority)),
+                "cooldown_seconds": max(0, int(event_cooldown_seconds)),
+                "min_confidence": max(0.0, min(1.0, float(event_min_confidence))),
+                "message_template": event_message_template or DEFAULT_DISCOVERY_EVENT_MESSAGE,
+                "schedule": {"windows": [dict(DEFAULT_DISCOVERY_WINDOW)]},
+            }
+        camera_id = _discovered_camera_id(device, index, used_ids)
+        cameras[camera_id] = {key: value for key, value in camera.items() if value not in (None, "")}
+
+    return {
+        "site": {
+            "name": site_name,
+            "timezone": timezone,
+            "config_source": "yaml",
+            "merge_existing": bool(merge_existing),
+        },
+        "cameras": cameras,
     }
 
 

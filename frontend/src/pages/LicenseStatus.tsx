@@ -13,7 +13,7 @@ import {
   type LicenseState,
 } from "@/lib/api"
 
-// Catalog of features SafetyLens supports. We render every entry — those
+// Catalog of features Rakshak Lens supports. We render every entry — those
 // not present in the license's `features` array show as "Not licensed".
 // Order matches the rollout: base is v1, the rest are post-v1 add-ons.
 const FEATURE_CATALOG: { key: string; name: string; description: string }[] = [
@@ -249,7 +249,7 @@ export function LicenseStatus() {
         ) : (
           <p className="text-sm text-[var(--color-text-secondary)]">
             No license installed. Upload a .lic file from your implementation partner to activate
-            SafetyLens.
+            Rakshak Lens.
           </p>
         )}
       </Card>

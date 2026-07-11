@@ -131,7 +131,7 @@ export function Login() {
             <div className="inline-flex items-center justify-center w-12 h-12 rounded-lg bg-neutral-900 text-white mb-3">
               <ShieldCheck className="w-6 h-6" />
             </div>
-            <h1 className="text-2xl font-bold text-neutral-900">SafetyLens</h1>
+            <h1 className="text-2xl font-bold text-neutral-900">Rakshak Lens</h1>
             <p className="text-sm text-neutral-500 mt-1">Industrial Safety Monitoring</p>
             <div className="mt-2 flex items-center justify-center gap-1.5 text-xs">
               {backendStatus === "connected" ? (

@@ -1,7 +1,8 @@
-"""SafetyLens camera CRUD endpoints."""
+"""Rakshak Lens camera CRUD endpoints."""
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -11,6 +12,10 @@ from pydantic import BaseModel, Field
 import audit_store
 import licensing
 import model_manager
+import object_lifecycle_analytics
+import obstruction_analytics
+import occupancy_analytics
+import queue_analytics
 import state
 from camera_connection import (
     DEFAULT_RTSP_PORT,
@@ -24,24 +29,55 @@ from camera_discovery import discover_cameras, resolve_scan_networks, test_camer
 from camera_planner import build_execution_plan, normalize_camera_record
 from config_manager import get_config, save_config
 from dependencies import require_admin
-from video_processing import restart_camera, start_camera, stop_camera
+from video_processing import (
+    _capability_schedule_state,
+    _scheduled_execution_plan,
+    restart_camera,
+    start_camera,
+    stop_camera,
+)
 
 router = APIRouter(prefix="/api", tags=["cameras"])
 
 
-def _camera_runtime_status(cam_id: str, camera: dict) -> str:
-    required_model_keys = camera.get("execution_plan", {}).get("required_model_keys", [])
-    if model_manager.missing_model_keys(required_model_keys):
-        return "awaiting_model_install"
+def _camera_runtime_status(cam_id: str, camera: dict, cfg: dict, ready_model_keys: set[str] | None = None) -> str:
     if not camera.get("enabled", True):
         return "offline"
+
     if cam_id in state.camera_threads:
-        return "running" if state.camera_frames.get(cam_id) is not None else "starting"
+        frame_updated_at = state.camera_frame_updated_at.get(cam_id)
+        frame_fresh = (
+            state.camera_frames.get(cam_id) is not None
+            and frame_updated_at is not None
+            and time.time() - frame_updated_at <= state.CAMERA_FRAME_STALE_SECONDS
+        )
+        if frame_fresh:
+            return "running"
+        return state.camera_runtime_status.get(cam_id, "starting")
+
+    execution_plan = camera.get("execution_plan", build_execution_plan(camera, cfg))
+    schedule_state = _capability_schedule_state(camera, cfg, execution_plan)
+    scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
+    required_model_keys = scheduled_plan.get("required_model_keys", [])
+    if ready_model_keys is not None:
+        missing_model_keys = [model_key for model_key in required_model_keys if model_key not in ready_model_keys]
+    else:
+        missing_model_keys = model_manager.missing_model_keys(required_model_keys)
+    if missing_model_keys:
+        return "awaiting_model_install"
     return "offline"
 
 
-def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
-    runtime_status = _camera_runtime_status(cam_id, cam)
+def _recent_detection_class_counts_max(history: list[dict[str, Any]]) -> dict[str, int]:
+    max_counts: dict[str, int] = {}
+    for sample in history:
+        for class_name, count in (sample.get("detectionClassCounts") or {}).items():
+            max_counts[str(class_name)] = max(max_counts.get(str(class_name), 0), int(count or 0))
+    return max_counts
+
+
+def _camera_public_payload(cam_id: str, cam: dict, cfg: dict, ready_model_keys: set[str] | None = None) -> dict[str, Any]:
+    runtime_status = _camera_runtime_status(cam_id, cam, cfg, ready_model_keys)
     state.camera_runtime_status[cam_id] = runtime_status
     from routers.safety_rules import _ensure_safety_rules
 
@@ -51,6 +87,14 @@ def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
         for rule_id in cam.get("safety_rule_ids", [])
         if rule_id in rule_map
     ] or cam.get("rules", [])
+    detections = state.camera_detections.get(cam_id, [])
+    detection_class_counts: dict[str, int] = {}
+    for detection in detections:
+        class_name = detection.get("class")
+        if class_name:
+            detection_class_counts[class_name] = detection_class_counts.get(class_name, 0) + 1
+    detection_history = state.camera_detection_history.get(cam_id, [])
+    recent_detection_history = detection_history[-30:]
     payload = {
         "id": cam_id,
         "name": cam["name"],
@@ -70,12 +114,54 @@ def _camera_public_payload(cam_id: str, cam: dict, cfg: dict) -> dict[str, Any]:
         "alert_classes": cam.get("alert_classes", []),
         "ppe_rule_ids": cam.get("ppe_rule_ids", []),
         "safety_rule_ids": cam.get("safety_rule_ids", []),
+        "safety_rule_overrides": cam.get("safety_rule_overrides", {}),
         "custom_long_tail_terms": cam.get("custom_long_tail_terms", []),
+        "capability_model_overrides": cam.get("capability_model_overrides", {}),
+        "fall_detection": cam.get("fall_detection", {}),
+        "capability_windows": cam.get(
+            "capability_windows",
+            (cam.get("execution_plan") or build_execution_plan(cam, cfg)).get("capability_windows", []),
+        ),
         "status": "online" if cam_id in state.camera_threads else "offline",
-        "detectionsCount": len(state.camera_detections.get(cam_id, [])),
+        "detectionsCount": len(detections),
+        "detectionClassCounts": detection_class_counts,
+        "recentDetectionHistory": recent_detection_history,
+        "recentDetectionClassCountsMax": _recent_detection_class_counts_max(recent_detection_history),
+        "scheduleTelemetry": state.camera_schedule_telemetry.get(cam_id, {}),
     }
     payload.update(public_camera_connection_fields(cam))
     return payload
+
+
+def _has_queue_zone(camera: dict[str, Any]) -> bool:
+    for zone in camera.get("zones", []):
+        zone_type = str(zone.get("type") or "").lower()
+        analytics = str(zone.get("analytics") or "").lower()
+        if zone_type in {"queue", "queue_area"} or analytics == "queue" or zone.get("queue_enabled"):
+            return True
+    return False
+
+
+def _has_obstruction_zone(camera: dict[str, Any]) -> bool:
+    for zone in camera.get("zones", []):
+        zone_type = str(zone.get("type") or "").lower()
+        analytics = str(zone.get("analytics") or "").lower()
+        if zone_type in {"route", "obstruction", "keep_clear"} or analytics == "obstruction" or zone.get("obstruction_enabled"):
+            return True
+    return False
+
+
+def _has_object_lifecycle_zone(camera: dict[str, Any]) -> bool:
+    for zone in camera.get("zones", []):
+        zone_type = str(zone.get("type") or "").lower()
+        analytics = str(zone.get("analytics") or "").lower()
+        if (
+            zone_type in {"object_watch", "object_lifecycle", "unattended_object"}
+            or analytics in {"object_lifecycle", "object_removal", "unattended_object"}
+            or zone.get("object_lifecycle_enabled")
+        ):
+            return True
+    return False
 
 
 def _next_camera_id(cfg: dict) -> str:
@@ -178,8 +264,11 @@ class CameraPlanPreviewRequest(BaseModel):
     onvif_uuid: str = ""
     discovery_fingerprint: str = ""
     safety_rule_ids: list[str] = Field(default_factory=list)
+    safety_rule_overrides: dict[str, Any] = Field(default_factory=dict)
     yoloe_classes: list[str] = Field(default_factory=list)
     custom_long_tail_terms: list[str] = Field(default_factory=list)
+    capability_model_overrides: dict[str, Any] = Field(default_factory=dict)
+    capability_windows: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CameraCreate(BaseModel):
@@ -207,7 +296,10 @@ class CameraCreate(BaseModel):
     alert_classes: list[str] = Field(default_factory=list)
     ppe_rule_ids: list[str] = Field(default_factory=list)
     safety_rule_ids: list[str] = Field(default_factory=list)
+    safety_rule_overrides: dict[str, Any] = Field(default_factory=dict)
     custom_long_tail_terms: list[str] = Field(default_factory=list)
+    capability_model_overrides: dict[str, Any] = Field(default_factory=dict)
+    capability_windows: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CameraUpdate(BaseModel):
@@ -235,7 +327,10 @@ class CameraUpdate(BaseModel):
     alert_classes: Optional[list[str]] = None
     ppe_rule_ids: Optional[list[str]] = None
     safety_rule_ids: Optional[list[str]] = None
+    safety_rule_overrides: Optional[dict[str, Any]] = None
     custom_long_tail_terms: Optional[list[str]] = None
+    capability_model_overrides: Optional[dict[str, Any]] = None
+    capability_windows: Optional[list[dict[str, Any]]] = None
 
 
 class DiscoveryScanRequest(BaseModel):
@@ -285,6 +380,13 @@ class DiscoveryImportRequest(BaseModel):
 @router.get("/cameras")
 async def get_cameras():
     cfg = get_config()
+    ready_model_keys = None
+    if model_manager.is_remote_inference_enabled():
+        ready_model_keys = {
+            model.get("model_key")
+            for model in model_manager.list_models_for_status()
+            if model.get("is_ready")
+        }
     result = []
     changed_any = False
     for cam_id, cam in cfg["cameras"].items():
@@ -293,10 +395,57 @@ async def get_cameras():
             cfg["cameras"][cam_id] = normalized_camera
             cam = normalized_camera
             changed_any = True
-        result.append(_camera_public_payload(cam_id, cam, cfg))
+        result.append(_camera_public_payload(cam_id, cam, cfg, ready_model_keys))
     if changed_any:
         save_config(cfg)
     return result
+
+
+@router.get("/cameras/{camera_id}/occupancy")
+async def get_camera_occupancy(camera_id: str):
+    cfg = get_config()
+    camera = cfg.get("cameras", {}).get(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if "office_occupancy" not in camera.get("capabilities", []):
+        raise HTTPException(status_code=404, detail="Occupancy analytics not enabled for this camera")
+    return occupancy_analytics.get_occupancy_report(camera_id, camera)
+
+
+@router.get("/cameras/{camera_id}/queue")
+async def get_camera_queue(camera_id: str):
+    cfg = get_config()
+    camera = cfg.get("cameras", {}).get(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    capabilities = set(camera.get("capabilities", []))
+    if not capabilities.intersection({"queue_monitoring", "crowd_count_threshold"}) and not _has_queue_zone(camera):
+        raise HTTPException(status_code=404, detail="Queue analytics not enabled for this camera")
+    return queue_analytics.get_queue_snapshot(camera_id, camera)
+
+
+@router.get("/cameras/{camera_id}/obstruction")
+async def get_camera_obstruction(camera_id: str):
+    cfg = get_config()
+    camera = cfg.get("cameras", {}).get(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    capabilities = set(camera.get("capabilities", []))
+    if "route_obstruction" not in capabilities and not _has_obstruction_zone(camera):
+        raise HTTPException(status_code=404, detail="Route obstruction analytics not enabled for this camera")
+    return obstruction_analytics.get_obstruction_snapshot(camera_id, camera)
+
+
+@router.get("/cameras/{camera_id}/object-lifecycle")
+async def get_camera_object_lifecycle(camera_id: str):
+    cfg = get_config()
+    camera = cfg.get("cameras", {}).get(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    capabilities = set(camera.get("capabilities", []))
+    if "object_lifecycle" not in capabilities and not _has_object_lifecycle_zone(camera):
+        raise HTTPException(status_code=404, detail="Object lifecycle analytics not enabled for this camera")
+    return object_lifecycle_analytics.get_object_lifecycle_snapshot(camera_id, camera)
 
 
 @router.post("/cameras/discover", dependencies=[Depends(require_admin)])

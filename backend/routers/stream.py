@@ -1,5 +1,5 @@
 """
-SafetyLens streaming endpoints — MJPEG stream, WebSocket alerts, VLM latest,
+Rakshak Lens streaming endpoints — MJPEG stream, WebSocket alerts, VLM latest,
 RTSP connection testing.
 """
 
@@ -21,7 +21,7 @@ import state
 import alert_store
 import auth_store
 
-logger = logging.getLogger("safetylens")
+logger = logging.getLogger("rakshak_lens")
 
 router = APIRouter(tags=["stream"])
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import psycopg2
 
-TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/safetylens_test")
+TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/rakshak_lens_test")
 
 # Set DATABASE_URL before importing alert_store
 os.environ["DATABASE_URL"] = TEST_DB_URL
@@ -78,7 +78,8 @@ def test_create_alert_returns_dict_with_expected_keys():
     expected_keys = {
         "id", "severity", "status", "rule", "cameraId", "cameraName",
         "zone", "confidence", "timestamp", "source", "description",
-        "cleanSnapshotUrl", "bboxes",
+        "cleanSnapshotUrl", "bboxes", "deliveryResults", "policyId",
+        "priority", "message", "metadata",
         "snapshotUrl", "acknowledgedBy", "acknowledgedAt",
         "resolvedAt", "snoozedUntil", "falsePositive",
     }
@@ -92,6 +93,10 @@ def test_create_alert_returns_dict_with_expected_keys():
     assert alert["source"] == "YOLO"
     assert alert["description"] == "Worker without helmet"
     assert alert["snapshotUrl"] is None
+    assert alert["deliveryResults"] == []
+    assert alert["policyId"] is None
+    assert alert["message"] is None
+    assert alert["metadata"] == {}
     assert alert["acknowledgedBy"] is None
     assert alert["falsePositive"] is False
 
@@ -389,7 +394,8 @@ def test_output_uses_camel_case():
     camel_keys = {
         "id", "severity", "status", "rule", "cameraId", "cameraName",
         "zone", "confidence", "timestamp", "source", "description",
-        "cleanSnapshotUrl", "bboxes",
+        "cleanSnapshotUrl", "bboxes", "deliveryResults", "policyId",
+        "priority", "message", "metadata",
         "snapshotUrl", "acknowledgedBy", "acknowledgedAt",
         "resolvedAt", "snoozedUntil", "falsePositive",
     }

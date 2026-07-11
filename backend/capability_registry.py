@@ -1,27 +1,45 @@
-"""Capability registry for SafetyLens camera planning."""
+"""Capability registry for Rakshak Lens camera planning."""
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, Optional, TypedDict
 
-ModelKey = Literal["coco_primary", "ppe_specialist", "yoloe_long_tail", "face_recognition", "pose_specialist"]
-CameraProfile = Literal["general_safety", "work_zone_ppe", "demo_advanced"]
+ModelKey = Literal[
+    "coco_primary",
+    "ppe_specialist",
+    "ppe_closed_set_candidate",
+    "yoloe_long_tail",
+    "fire_smoke_specialist",
+    "face_recognition",
+    "pose_specialist",
+    "plate_recognition",
+]
+CameraProfile = Literal["general_safety", "work_zone_ppe", "office_occupancy", "demo_advanced"]
 CapabilityKey = Literal[
     "person_presence",
+    "office_occupancy",
+    "crowd_count_threshold",
+    "queue_monitoring",
+    "route_obstruction",
+    "object_lifecycle",
     "vehicle_presence",
     "animal_presence",
     "mobile_phone",
     "zone_intrusion",
     "helmet_required",
+    "rider_helmet_required",
     "vest_required",
     "gloves_required",
     "hairnet_required",
     "face_mask_required",
+    "face_shield_required",
     "apron_required",
     "boots_required",
+    "harness_required",
     "goggles_required",
     "fire_smoke",
     "face_recognition",
+    "plate_recognition",
     "fall_detection",
     "custom_long_tail",
 ]
@@ -53,6 +71,66 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_association": False,
         "prompt_terms": ["person"],
         "safety_rule_ids": ["alert_person"],
+    },
+    "office_occupancy": {
+        "key": "office_occupancy",
+        "label": "Office Occupancy",
+        "group": "Core Monitoring",
+        "model_family": "coco_primary",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": True,
+        "requires_association": False,
+        "prompt_terms": ["person", "chair", "seat", "desk", "workstation"],
+        "safety_rule_ids": [],
+    },
+    "crowd_count_threshold": {
+        "key": "crowd_count_threshold",
+        "label": "Crowd Count",
+        "group": "Core Monitoring",
+        "model_family": "coco_primary",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": False,
+        "requires_association": False,
+        "prompt_terms": ["person", "people count", "crowd"],
+        "safety_rule_ids": [],
+    },
+    "queue_monitoring": {
+        "key": "queue_monitoring",
+        "label": "Queue Monitoring",
+        "group": "Core Monitoring",
+        "model_family": "coco_primary",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": True,
+        "requires_association": False,
+        "prompt_terms": ["person", "queue", "line"],
+        "safety_rule_ids": [],
+    },
+    "route_obstruction": {
+        "key": "route_obstruction",
+        "label": "Route Obstruction",
+        "group": "Core Monitoring",
+        "model_family": "coco_primary",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": True,
+        "requires_association": False,
+        "prompt_terms": ["person", "car", "truck", "bus", "motorcycle", "bicycle", "obstruction"],
+        "safety_rule_ids": [],
+    },
+    "object_lifecycle": {
+        "key": "object_lifecycle",
+        "label": "Object Lifecycle",
+        "group": "Core Monitoring",
+        "model_family": "coco_primary",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": True,
+        "requires_association": False,
+        "prompt_terms": ["backpack", "handbag", "suitcase", "watched object", "object removed"],
+        "safety_rule_ids": [],
     },
     "vehicle_presence": {
         "key": "vehicle_presence",
@@ -114,6 +192,18 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "prompt_terms": ["hard hat", "safety helmet"],
         "safety_rule_ids": ["ppe_helmet"],
     },
+    "rider_helmet_required": {
+        "key": "rider_helmet_required",
+        "label": "Rider Helmet",
+        "group": "PPE",
+        "model_family": "ppe_specialist",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": False,
+        "requires_association": True,
+        "prompt_terms": ["motorcycle helmet", "rider helmet", "helmet"],
+        "safety_rule_ids": ["ppe_rider_helmet"],
+    },
     "vest_required": {
         "key": "vest_required",
         "label": "Safety Vest",
@@ -159,8 +249,20 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_tracking": True,
         "requires_zones": False,
         "requires_association": True,
-        "prompt_terms": ["face mask"],
-        "safety_rule_ids": ["ppe_facemask"],
+        "prompt_terms": ["face mask", "surgical mask", "medical mask", "mask", "respirator"],
+        "safety_rule_ids": ["ppe_face_mask"],
+    },
+    "face_shield_required": {
+        "key": "face_shield_required",
+        "label": "Face Shield",
+        "group": "PPE",
+        "model_family": "ppe_specialist",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": False,
+        "requires_association": True,
+        "prompt_terms": ["face shield", "protective face shield", "clear face shield", "visor", "protective visor"],
+        "safety_rule_ids": ["ppe_face_shield"],
     },
     "apron_required": {
         "key": "apron_required",
@@ -171,7 +273,7 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_tracking": True,
         "requires_zones": False,
         "requires_association": True,
-        "prompt_terms": ["apron"],
+        "prompt_terms": ["apron", "protective apron", "kitchen apron", "denim apron", "work apron"],
         "safety_rule_ids": ["ppe_apron"],
     },
     "boots_required": {
@@ -183,8 +285,20 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_tracking": True,
         "requires_zones": False,
         "requires_association": True,
-        "prompt_terms": ["safety boots", "steel-toe boots"],
+        "prompt_terms": ["safety boots", "steel-toe boots", "work boots", "protective boots", "rubber boots"],
         "safety_rule_ids": ["ppe_boots"],
+    },
+    "harness_required": {
+        "key": "harness_required",
+        "label": "Safety Harness",
+        "group": "PPE",
+        "model_family": "ppe_specialist",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": False,
+        "requires_association": True,
+        "prompt_terms": ["safety harness", "fall arrest harness", "body harness", "harness", "safety lanyard", "fall protection lanyard"],
+        "safety_rule_ids": ["ppe_harness"],
     },
     "goggles_required": {
         "key": "goggles_required",
@@ -202,12 +316,12 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "key": "fire_smoke",
         "label": "Fire / Smoke",
         "group": "Safety Events",
-        "model_family": "yoloe_long_tail",
+        "model_family": "fire_smoke_specialist",
         "input_scope": "full_frame",
         "requires_tracking": False,
         "requires_zones": False,
         "requires_association": False,
-        "prompt_terms": ["fire", "smoke", "flames"],
+        "prompt_terms": ["fire", "smoke"],
         "safety_rule_ids": ["alert_fire_smoke"],
     },
     "face_recognition": {
@@ -220,6 +334,18 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_zones": False,
         "requires_association": False,
         "prompt_terms": ["face recognition", "face"],
+        "safety_rule_ids": [],
+    },
+    "plate_recognition": {
+        "key": "plate_recognition",
+        "label": "Plate Recognition",
+        "group": "Advanced",
+        "model_family": "plate_recognition",
+        "input_scope": "full_frame",
+        "requires_tracking": False,
+        "requires_zones": False,
+        "requires_association": False,
+        "prompt_terms": ["plate recognition", "license plate", "number plate", "anpr"],
         "safety_rule_ids": [],
     },
     "fall_detection": {
@@ -251,6 +377,7 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
 PROFILE_DEFAULT_CAPABILITIES: dict[CameraProfile, list[CapabilityKey]] = {
     "general_safety": ["person_presence", "mobile_phone"],
     "work_zone_ppe": ["helmet_required", "vest_required", "zone_intrusion"],
+    "office_occupancy": ["office_occupancy", "mobile_phone"],
     "demo_advanced": ["fire_smoke", "fall_detection"],
 }
 
@@ -268,8 +395,10 @@ for key, definition in CAPABILITY_REGISTRY.items():
             if prompt not in ALL_PPE_PROMPT_TERMS:
                 ALL_PPE_PROMPT_TERMS.append(prompt)
 
+RULE_ID_TO_CAPABILITY["ppe_facemask"] = "face_mask_required"
 
-def normalize_capability_key(value: str) -> CapabilityKey | None:
+
+def normalize_capability_key(value: str) -> Optional[CapabilityKey]:
     normalized = value.strip()
     return normalized if normalized in CAPABILITY_REGISTRY else None
 
@@ -293,6 +422,8 @@ def infer_profile_from_capabilities(capabilities: list[CapabilityKey]) -> Camera
     capability_set = set(capabilities)
     has_long_tail = bool({"fire_smoke", "custom_long_tail"} & capability_set)
     has_ppe = any(CAPABILITY_REGISTRY[key]["model_family"] == "ppe_specialist" for key in capability_set)
+    if "office_occupancy" in capability_set:
+        return "office_occupancy"
     if has_long_tail:
         return "demo_advanced"
     if has_ppe:

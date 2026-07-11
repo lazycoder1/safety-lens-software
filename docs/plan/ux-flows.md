@@ -1,4 +1,4 @@
-# SafetyLens — UX Flows & Interaction Design
+# Rakshak Lens — UX Flows & Interaction Design
 
 **Context for UX review:** This document breaks down every major user flow in the platform. Each flow specifies the actor, trigger, steps, decision points, error/edge states, and exit conditions. This accompanies `ui-ux-spec.md` which covers page layouts, design tokens, and architecture.
 
@@ -39,7 +39,7 @@
 ### Happy Path
 
 ```
-1. Open browser → SafetyLens loads at /live (default landing for operator role)
+1. Open browser → Rakshak Lens loads at /live (default landing for operator role)
 2. See camera grid (last-used layout preserved, e.g., 3x3)
 3. Quick scan: all camera tiles show green status dots → all normal
 4. [TIME PASSES — passive monitoring]
@@ -138,7 +138,7 @@
 
 ```
 1. Suresh receives Telegram alert: "ESCALATED: Person Fall — Cam 12 Assembly Line — Unacknowledged 3 min"
-2. Opens SafetyLens on phone browser
+2. Opens Rakshak Lens on phone browser
 3. Sees persistent banner at top: "1 escalated alert requires attention"
 4. Clicks banner → goes to Alert Center, filtered to escalated
 5. Opens alert detail:

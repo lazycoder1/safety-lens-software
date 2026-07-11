@@ -1,5 +1,5 @@
 """
-SafetyLens error log endpoints — frontend error reporting + admin query.
+Rakshak Lens error log endpoints — frontend error reporting + admin query.
 """
 
 from typing import Optional

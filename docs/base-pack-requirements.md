@@ -1,14 +1,14 @@
-# SafetyLens Base Pack — Requirements Document
+# Rakshak Lens Base Pack — Requirements Document
 
 **Last updated:** 2026-03-28
-**Audience:** Engineers joining the SafetyLens project
+**Audience:** Engineers joining the Rakshak Lens project
 **Status:** Active development
 
 ---
 
 ## What Is the Base Pack?
 
-SafetyLens Base Pack is the entry-level product Techser sells to factories. It is a software-only license priced at INR 5,00,000. The customer provides their own hardware and IP cameras. Everything runs 100% on-premise — no cloud dependency, no data leaves the site.
+Rakshak Lens Base Pack is the entry-level product Techser sells to factories. It is a software-only license priced at INR 5,00,000. The customer provides their own hardware and IP cameras. Everything runs 100% on-premise — no cloud dependency, no data leaves the site.
 
 **Scope:** Up to 10 IP cameras, 4 standard safety detections, real-time alerts, web dashboard.
 
@@ -62,7 +62,7 @@ IP Cameras (RTSP, 1080p, 5 FPS)
 FastAPI Backend (Python, single process, multi-threaded)
     +-- 1 thread per camera (video_processor)
     +-- YOLO26n inference (COCO 80 classes)
-    +-- YOLOE-11s inference (open-vocab PPE)
+    +-- YOLOE-26S inference (open-vocab PPE)
     +-- Zone enforcement (point-in-polygon)
     +-- Alert creation --> PostgreSQL
     +-- Telegram notification (fire-and-forget)
@@ -91,7 +91,7 @@ React Frontend (served as static files by FastAPI)
 | Model | File | Size | Purpose |
 |-------|------|------|---------|
 | YOLO26n | `yolo26n.pt` | 5.3 MB | COCO 80-class detection — person (class 0), cell phone (class 67), cat (class 15), dog (class 16) |
-| YOLOE-11s-seg | `yoloe-11s-seg.pt` | 27 MB | Open-vocabulary detection via text prompts — helmet, safety vest (and other PPE like hairnet, gloves) |
+| YOLOE-26S-seg | `yoloe-26s-seg.pt` | 29.6 MB | Current 2026 open-vocabulary PPE pilot path via text prompts — helmet, vest, hairnet, gloves, apron, harness, and related PPE terms |
 
 Model weights are **not** in the git repo. Download separately or copy from model storage.
 
@@ -132,7 +132,7 @@ All configuration lives in `backend/config.json` (example at `backend/config.exa
 | Zone intrusion | Point-in-polygon check on detection center vs zone polygon | `backend/server.py` lines 314-376 |
 | Mobile phone detection | YOLO26n COCO class 67 "cell phone" | `backend/server.py` lines 392-404 |
 | Animal intrusion | YOLO26n COCO classes 15 "cat", 16 "dog" | `backend/server.py` lines 393-422 |
-| PPE (helmet + vest) | YOLOE-11s-seg open-vocabulary with text prompts | `backend/server.py` lines 286-297, `yoloe-11s-seg.pt` |
+| PPE (helmet + vest) | YOLOE-26S open-vocabulary with text prompts | `backend/server.py` lines 286-297, `yoloe-26s-seg.pt` |
 | Web dashboard | React frontend, MJPEG streams, WebSocket alerts | `frontend/src/pages/LiveView.tsx`, `AlertCenter.tsx`, `Dashboard.tsx` |
 | Detection overlays | Bounding boxes + labels drawn on MJPEG frames server-side | `backend/server.py` lines 190-272 |
 | Telegram alerts | Photo + caption via Telegram Bot API, fire-and-forget | `backend/telegram_notifier.py` |

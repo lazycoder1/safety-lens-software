@@ -1,16 +1,40 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Card } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { getConfig, updateGlobalConfig, updateVlmConfig, updateTelegramConfig, testTelegramConfig, updateEmailConfig, testEmailConfig } from "@/lib/api"
+import { useAuthStore } from "@/stores/authStore"
+import {
+  getConfig,
+  updateGlobalConfig,
+  updateModelServerConfig,
+  testModelServerConfig,
+  updateVlmConfig,
+  updateTelegramConfig,
+  testTelegramConfig,
+  updateEmailConfig,
+  testEmailConfig,
+} from "@/lib/api"
 
 export function SystemSettings() {
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === "admin"
   const [global, setGlobal] = useState({
     target_fps: 6,
+    inference_fps: 2,
     yolo_conf: 0.35,
     jpeg_quality: 60,
     inference_width: 640,
     alert_cooldown: 8,
   })
+
+  const [modelServer, setModelServer] = useState({
+    enabled: false,
+    url: "",
+    token: "",
+    timeout_seconds: 30,
+    token_configured: false,
+  })
+  const [modelServerSaving, setModelServerSaving] = useState(false)
+  const [modelServerTest, setModelServerTest] = useState<{ status: string; message?: string } | null>(null)
 
   const [vlm, setVlm] = useState({
     enabled: true,
@@ -56,6 +80,14 @@ export function SystemSettings() {
         if (cfg.global) {
           setGlobal((prev) => ({ ...prev, ...cfg.global }))
         }
+        if (cfg.model_server) {
+          setModelServer((prev) => ({
+            ...prev,
+            ...cfg.model_server,
+            token: "",
+            token_configured: Boolean(cfg.model_server.token_configured),
+          }))
+        }
         if (cfg.vlm) {
           setVlm((prev) => ({
             ...prev,
@@ -94,6 +126,55 @@ export function SystemSettings() {
     globalTimer.current = setTimeout(() => {
       updateGlobalConfig(next).then(flash).catch(() => {})
     }, 500)
+  }
+
+  function patchModelServer(patch: Partial<typeof modelServer>) {
+    setModelServer((current) => ({ ...current, ...patch }))
+    setModelServerTest(null)
+  }
+
+  function modelServerPayload() {
+    const payload: Record<string, any> = {
+      enabled: modelServer.enabled,
+      url: modelServer.url.trim(),
+      timeout_seconds: modelServer.timeout_seconds,
+    }
+    if (modelServer.token.trim()) {
+      payload.token = modelServer.token.trim()
+    }
+    return payload
+  }
+
+  async function handleSaveModelServer() {
+    setModelServerSaving(true)
+    try {
+      const result = await updateModelServerConfig(modelServerPayload())
+      setModelServer((current) => ({
+        ...current,
+        ...result,
+        token: "",
+        token_configured: Boolean(result.token_configured),
+      }))
+      flash()
+    } catch (e: any) {
+      setModelServerTest({ status: "error", message: e.message })
+    } finally {
+      setModelServerSaving(false)
+    }
+  }
+
+  async function handleTestModelServer() {
+    setModelServerTest({ status: "testing" })
+    try {
+      const result = await testModelServerConfig(modelServerPayload())
+      setModelServerTest(
+        result.ok
+          ? { status: "ok", message: `${result.models_ready}/${result.models_total} models ready` }
+          : { status: "error", message: result.error }
+      )
+    } catch (e: any) {
+      setModelServerTest({ status: "error", message: e.message })
+    }
   }
 
   function patchVlm(patch: Partial<typeof vlm>) {
@@ -221,6 +302,14 @@ export function SystemSettings() {
             onChange={(v) => patchGlobal({ target_fps: v })}
           />
           <RangeField
+            label="Detection FPS"
+            value={global.inference_fps}
+            min={1}
+            max={6}
+            step={0.5}
+            onChange={(v) => patchGlobal({ inference_fps: v })}
+          />
+          <RangeField
             label="YOLO Confidence"
             value={global.yolo_conf}
             min={0.1}
@@ -259,6 +348,84 @@ export function SystemSettings() {
           />
         </div>
       </Card>
+
+      {isAdmin && (
+        <Card>
+          <h2 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">Model Server</h2>
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">Remote Inference</label>
+              <button
+                onClick={() => patchModelServer({ enabled: !modelServer.enabled })}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                  modelServer.enabled ? "bg-[var(--color-success)]" : "bg-[var(--color-bg-tertiary)] border"
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                    modelServer.enabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-[var(--color-text-primary)]">Server URL / IP</label>
+              <input
+                type="text"
+                value={modelServer.url}
+                onChange={(e) => patchModelServer({ url: e.target.value })}
+                placeholder="https://model.example.com or 10.0.0.20:8100"
+                className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-[var(--color-text-primary)]">Access Token</label>
+                <input
+                  type="password"
+                  value={modelServer.token}
+                  onChange={(e) => patchModelServer({ token: e.target.value })}
+                  placeholder={modelServer.token_configured ? "Configured" : "Optional"}
+                  className="w-full px-3 py-2 text-sm rounded-[var(--radius-md)] border bg-white placeholder:text-[var(--color-text-tertiary)] focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0"
+                />
+              </div>
+              <NumberField
+                label="Timeout (seconds)"
+                value={modelServer.timeout_seconds}
+                min={1}
+                onChange={(v) => patchModelServer({ timeout_seconds: v })}
+              />
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleSaveModelServer}
+                disabled={modelServerSaving || (modelServer.enabled && !modelServer.url.trim())}
+                className="px-4 py-2 text-sm font-medium rounded-[var(--radius-md)] bg-[var(--color-text-primary)] text-white disabled:opacity-40 cursor-pointer hover:opacity-90 transition-opacity"
+              >
+                {modelServerSaving ? "Saving..." : "Save"}
+              </button>
+              <button
+                onClick={handleTestModelServer}
+                disabled={!modelServer.enabled || !modelServer.url.trim() || modelServerTest?.status === "testing"}
+                className="px-4 py-2 text-sm font-medium rounded-[var(--radius-md)] border bg-white text-[var(--color-text-primary)] disabled:opacity-40 cursor-pointer hover:bg-[var(--color-bg-tertiary)] transition-colors"
+              >
+                {modelServerTest?.status === "testing" ? "Testing..." : "Test Connection"}
+              </button>
+              {modelServerTest?.status === "ok" && (
+                <span className="text-xs text-[var(--color-success)] font-medium">{modelServerTest.message}</span>
+              )}
+              {modelServerTest?.status === "error" && (
+                <span className="text-xs text-[var(--color-critical)] font-medium">
+                  {modelServerTest.message || "Failed"}
+                </span>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* VLM Settings */}
       <Card>

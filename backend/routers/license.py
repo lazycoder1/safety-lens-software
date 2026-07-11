@@ -1,5 +1,5 @@
 """
-SafetyLens license API endpoints — read current status and accept uploads.
+Rakshak Lens license API endpoints — read current status and accept uploads.
 
 All endpoints require admin authentication. The license page in the admin UI
 remains reachable even when the license is suspended, so a customer can
@@ -14,7 +14,7 @@ import audit_store
 import licensing
 from dependencies import require_admin
 
-logger = logging.getLogger("safetylens.routers.license")
+logger = logging.getLogger("rakshak_lens.routers.license")
 
 router = APIRouter(prefix="/api/license", tags=["license"])
 

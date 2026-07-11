@@ -1,14 +1,14 @@
-# SafetyLens Demo Pack — Requirements Document
+# Rakshak Lens Demo Pack — Requirements Document
 
 **Last updated:** 2026-03-28
-**Audience:** Engineers joining the SafetyLens project
+**Audience:** Engineers joining the Rakshak Lens project
 **Status:** Partially built — 6 of 10 detections working, ANPR/face/rules/AI search are UI mocks only
 
 ---
 
 ## What Is the Demo Pack?
 
-The Demo Pack is **not a product SKU**. It is a capability showcase that Techser uses to demo SafetyLens to implementation partners. The goal is wow factor: show 10+ detections, ANPR, face recognition, AI search, gate automation, and a rules engine all running on affordable hardware. Partners see this and decide to resell SafetyLens.
+The Demo Pack is **not a product SKU**. It is a capability showcase that Techser uses to demo Rakshak Lens to implementation partners. The goal is wow factor: show 10+ detections, ANPR, face recognition, AI search, gate automation, and a rules engine all running on affordable hardware. Partners see this and decide to resell Rakshak Lens.
 
 The demo runs on test `.mp4` videos (not live RTSP), on a desktop RTX 3050 PC or a MacBook with MPS. The inference pipeline is identical to production — only the video source differs.
 
@@ -208,7 +208,7 @@ These features work end-to-end with real inference, real alerts, real Telegram n
 | # | Feature | Key Files |
 |---|---------|-----------|
 | 1 | Multi-camera live view with detection overlays (MJPEG + WebSocket) | `backend/server.py`, `frontend/src/pages/LiveView.tsx` |
-| 2 | 6 of 10 detections (person, zone intrusion, phone, fire/smoke, PPE, vehicle) | `backend/server.py`, `yolo26n.pt`, `yoloe-11s-seg.pt` |
+| 2 | 6 of 10 detections (person, zone intrusion, phone, fire/smoke, PPE, vehicle) | `backend/server.py`, `yolo26n.pt`, `yoloe-26s-seg.pt` |
 | 3 | Alert system — PostgreSQL persistence, cooldown, severity, acknowledge/resolve/snooze | `backend/alert_store.py`, `frontend/src/pages/AlertCenter.tsx` |
 | 4 | Telegram alerts — snapshots with bounding boxes, <3s latency | `backend/telegram_notifier.py` |
 | 5 | Zone management — draw polygons, enforce in inference loop | `frontend/src/pages/ZoneManagement.tsx`, `backend/server.py` |
@@ -235,12 +235,12 @@ These features have UI that renders with mock data but **no backend**:
 | Model | File | Size | In Repo? | Purpose |
 |-------|------|------|----------|---------|
 | YOLO26n | `yolo26n.pt` | 5.3 MB | Exists (not in git) | COCO 80-class detection |
-| YOLOE-11s-seg | `yoloe-11s-seg.pt` | 27 MB | Exists (not in git) | Zero-shot PPE/fire/phone via text prompts |
+| YOLOE-26S-seg | `yoloe-26s-seg.pt` | 29.6 MB | Exists (not in git) | Current 2026 open-vocabulary PPE pilot path via text prompts |
 | YOLO26s | -- | ~15 MB | **MISSING** | Plate detection (ANPR) |
 | PaddleOCR | -- | ~10 MB | **MISSING** | Plate text reading |
 | SCRFD-2.5GF | -- | ~5 MB | **MISSING** | Face detection |
 | ArcFace | -- | ~170 MB | **MISSING** | Face embedding/matching |
-| MobileCLIP | `mobileclip_blt.ts` | 455 MB | Exists (not in git) | AI Search embeddings |
+| MobileCLIP | `mobileclip2_b.ts` | 242 MB | Exists (not in git) | YOLOE-26 text-prompt encoder artifact |
 | YOLO26n-pose | -- | ~6 MB | **MISSING** | Fall detection |
 
 Model weights are **not** in the git repo. Download separately or copy from model storage.

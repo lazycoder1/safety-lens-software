@@ -15,7 +15,7 @@ interface ModelInstallModalState {
   close: () => void
 }
 
-const SESSION_KEY = "safetylens_active_model_install_job"
+const SESSION_KEY = "rakshak_lens_active_model_install_job"
 
 export const useModelInstallModal = create<ModelInstallModalState>((set) => ({
   isOpen: false,

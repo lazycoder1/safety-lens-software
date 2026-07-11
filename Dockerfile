@@ -28,8 +28,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-# Copy model weights
-COPY yolo26n.pt yoloe-11s-seg.pt ./
+# Copy structured model packs
+COPY models/ ./models/
 
 # Copy backend code
 COPY backend/ ./backend/

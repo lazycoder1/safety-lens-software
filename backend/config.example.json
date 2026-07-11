@@ -1,6 +1,12 @@
 {
   "database": {
-    "url": "postgresql://localhost:5432/safetylens"
+    "url": "postgresql://localhost:5432/rakshak_lens"
+  },
+  "model_server": {
+    "enabled": false,
+    "url": "",
+    "token": "",
+    "timeout_seconds": 30
   },
   "telegram": {
     "enabled": false,
@@ -10,6 +16,7 @@
   },
   "global": {
     "target_fps": 6,
+    "inference_fps": 2.0,
     "yolo_conf": 0.35,
     "jpeg_quality": 60,
     "inference_width": 640,
@@ -65,7 +72,7 @@
     },
     "cam4": {
       "name": "TMEIC Main Gate",
-      "video": "tmeic/mf-main-gate-cam1-full.avi",
+      "video": "demo-pack/08-vehicle-main-gate-tmeic.avi",
       "zone": "Main Gate",
       "demo": "yolo",
       "rules": ["Person Detection", "Animal Intrusion", "Mobile Phone Usage"],
@@ -76,7 +83,7 @@
     },
     "cam5": {
       "name": "TMEIC PE Stores",
-      "video": "tmeic/pe-stores-cam01.avi",
+      "video": "demo-pack/05-ppe-zone-pe-stores-workers.avi",
       "zone": "PE Stores",
       "demo": "yolo",
       "rules": ["Person Detection", "Mobile Phone Usage"],

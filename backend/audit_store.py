@@ -1,5 +1,5 @@
 """
-Structured audit log for SafetyLens administrative actions.
+Structured audit log for Rakshak Lens administrative actions.
 """
 
 import json
@@ -11,7 +11,7 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_conn
 
-logger = logging.getLogger("safetylens.audit")
+logger = logging.getLogger("rakshak_lens.audit")
 
 
 def init_db() -> None:

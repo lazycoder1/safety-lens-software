@@ -12,27 +12,30 @@ from config_manager import get_config, save_config
 from camera_planner import normalize_camera_record
 from video_processing import restart_camera
 
-logger = logging.getLogger("safetylens.safety_rules")
+logger = logging.getLogger("rakshak_lens.safety_rules")
 
 router = APIRouter(prefix="/api", tags=["safety-rules"])
 
 DEFAULT_SAFETY_RULES = [
     # PPE rules (type="ppe", model="yoloe")
     {"id": "ppe_helmet", "name": "Helmet", "type": "ppe", "classes": ["hard hat", "safety helmet"], "model": "yoloe", "severity": "P2", "enabled": True},
+    {"id": "ppe_rider_helmet", "name": "Rider Helmet", "type": "ppe", "classes": ["motorcycle helmet", "rider helmet", "helmet"], "model": "yoloe", "severity": "P2", "enabled": True, "threshold": 5, "confidence": 0.2, "scope": "rider_vehicle"},
     {"id": "ppe_vest", "name": "Safety Vest", "type": "ppe", "classes": ["safety vest", "high visibility vest", "fluorescent vest"], "model": "yoloe", "severity": "P2", "enabled": True},
     {"id": "ppe_gloves", "name": "Gloves", "type": "ppe", "classes": ["gloves"], "model": "yoloe", "severity": "P2", "enabled": True},
     {"id": "ppe_hairnet", "name": "Hairnet", "type": "ppe", "classes": ["hairnet"], "model": "yoloe", "severity": "P3", "enabled": True},
-    {"id": "ppe_facemask", "name": "Face Mask", "type": "ppe", "classes": ["face mask"], "model": "yoloe", "severity": "P3", "enabled": True},
-    {"id": "ppe_apron", "name": "Apron", "type": "ppe", "classes": ["apron"], "model": "yoloe", "severity": "P3", "enabled": True},
+    {"id": "ppe_face_mask", "name": "Face Mask", "type": "ppe", "classes": ["face mask", "surgical mask", "medical mask", "mask", "respirator"], "model": "yoloe", "severity": "P3", "enabled": True},
+    {"id": "ppe_face_shield", "name": "Face Shield", "type": "ppe", "classes": ["face shield", "protective face shield", "clear face shield", "visor", "protective visor"], "model": "yoloe", "severity": "P3", "enabled": True},
+    {"id": "ppe_apron", "name": "Apron", "type": "ppe", "classes": ["apron", "protective apron", "kitchen apron", "denim apron", "work apron"], "model": "yoloe", "severity": "P3", "enabled": True},
     {"id": "ppe_boots", "name": "Safety Boots", "type": "ppe", "classes": ["safety boots", "steel-toe boots"], "model": "yoloe", "severity": "P2", "enabled": True},
     {"id": "ppe_goggles", "name": "Safety Goggles", "type": "ppe", "classes": ["safety goggles", "protective eyewear"], "model": "yoloe", "severity": "P2", "enabled": True},
+    {"id": "ppe_harness", "name": "Safety Harness", "type": "ppe", "classes": ["safety harness", "fall arrest harness", "body harness", "harness", "safety lanyard", "fall protection lanyard"], "model": "yoloe", "severity": "P2", "enabled": True},
     # Alert rules (type="alert", model="yolo")
     {"id": "alert_mobile_phone", "name": "Mobile Phone Usage", "type": "alert", "classes": ["cell phone"], "model": "yolo", "severity": "P3", "enabled": True},
     {"id": "alert_animal", "name": "Animal Intrusion", "type": "alert", "classes": ["dog", "cat", "deer", "animal"], "model": "yolo", "severity": "P3", "enabled": True, "threshold": 3},
     {"id": "alert_person", "name": "Person Detected", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P4", "enabled": True},
     {"id": "alert_vehicle", "name": "Vehicle Detected", "type": "alert", "classes": ["truck", "car", "motorcycle"], "model": "yolo", "severity": "P4", "enabled": True},
     {"id": "alert_zone_intrusion", "name": "Zone Intrusion", "type": "alert", "classes": ["person"], "model": "yolo", "severity": "P1", "enabled": True, "threshold": 6},
-    {"id": "alert_fire_smoke", "name": "Fire / Smoke", "type": "alert", "classes": ["fire", "smoke", "flames"], "model": "yoloe", "severity": "P1", "enabled": True, "threshold": 2},
+    {"id": "alert_fire_smoke", "name": "Fire / Smoke", "type": "alert", "classes": ["fire", "smoke"], "model": "fire_smoke_specialist", "severity": "P1", "enabled": True, "threshold": 2, "confidence": 0.35},
     {"id": "alert_fall_detection", "name": "Fall Detected", "type": "alert", "classes": ["person_fall"], "model": "pose", "severity": "P1", "enabled": True, "threshold": 8},
 ]
 
@@ -53,9 +56,10 @@ class SafetyRuleCreate(BaseModel):
     name: str
     type: str  # "ppe" | "alert"
     classes: list[str]
-    model: str = "yoloe"  # "yolo" | "yoloe"
+    model: str = "yoloe"  # "yolo" | "yoloe" | "fire_smoke_specialist" | "pose"
     severity: str = "P2"
     threshold: Optional[int] = Field(default=None, ge=1)
+    confidence: Optional[float] = Field(default=None, ge=0.01, le=1.0)
 
 
 class SafetyRuleUpdate(BaseModel):
@@ -66,6 +70,7 @@ class SafetyRuleUpdate(BaseModel):
     severity: Optional[str] = None
     enabled: Optional[bool] = None
     threshold: Optional[int] = Field(default=None, ge=1)
+    confidence: Optional[float] = Field(default=None, ge=0.01, le=1.0)
 
 
 def _migrate_config(cfg: dict):
@@ -121,12 +126,38 @@ def _migrate_config(cfg: dict):
 
 
 def _ensure_safety_rules(cfg: dict) -> list[dict]:
-    """Seed default safety rules if missing, or migrate from old format."""
+    """Seed default safety rules if missing, or migrate/backfill old configs."""
     if "safety_rules" not in cfg:
         if "ppe_rules" in cfg:
             _migrate_config(cfg)
         else:
             cfg["safety_rules"] = json.loads(json.dumps(DEFAULT_SAFETY_RULES))
+            save_config(cfg)
+    else:
+        rules = cfg.get("safety_rules", [])
+        existing_ids = {rule.get("id") for rule in rules}
+        missing_defaults = [
+            json.loads(json.dumps(rule))
+            for rule in DEFAULT_SAFETY_RULES
+            if rule["id"] not in existing_ids
+        ]
+        if missing_defaults:
+            rules.extend(missing_defaults)
+            save_config(cfg)
+        changed = False
+        default_by_id = {rule["id"]: rule for rule in DEFAULT_SAFETY_RULES}
+        for rule in rules:
+            default_rule = default_by_id.get(rule.get("id"))
+            if not default_rule:
+                continue
+            for key, value in default_rule.items():
+                if key not in rule:
+                    rule[key] = json.loads(json.dumps(value))
+                    changed = True
+            if rule.get("id") == "alert_fire_smoke" and rule.get("model") == "yoloe":
+                rule["model"] = "fire_smoke_specialist"
+                changed = True
+        if changed:
             save_config(cfg)
     return cfg["safety_rules"]
 
@@ -185,7 +216,7 @@ async def api_create_safety_rule(body: SafetyRuleCreate):
     rule = {"id": rule_id, "enabled": True, **body.model_dump(exclude_none=True)}
     rules.append(rule)
     save_config(cfg)
-    logger.info("Safety rule created", extra={"rule_id": rule_id, "name": body.name})
+    logger.info("Safety rule created", extra={"rule_id": rule_id, "rule_name": body.name})
     return rule
 
 

@@ -1,5 +1,5 @@
 """
-SafetyLens report endpoints — PDF compliance report download.
+Rakshak Lens report endpoints — PDF compliance report download.
 """
 
 import asyncio
@@ -24,7 +24,7 @@ async def download_pdf_report(
     pdf_bytes = await asyncio.to_thread(
         report_generator.generate_compliance_pdf, start, end, severity, cameraId
     )
-    filename = f"safetylens-report-{start}-to-{end}.pdf"
+    filename = f"rakshak-lens-report-{start}-to-{end}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

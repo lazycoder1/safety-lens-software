@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import type { Dispatch, ReactNode, SetStateAction } from "react"
 import { useParams, useNavigate, useLocation } from "react-router-dom"
 import {
   ArrowLeft,
@@ -18,27 +19,40 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import {
-  mockRules,
   triggerOptions,
   conditionTypes,
   actionTypes,
   presetTemplates,
-  type EngineRule,
-  type RuleCondition,
-  type RuleAction,
 } from "@/data/mockRules"
+import { createAutomationRule, getAlertOutputs, getAutomationRules, getCameras, updateAutomationRule } from "@/lib/api"
+import type { AlertOutput, Camera, EngineRule, RuleAction, RuleCondition, Severity } from "@/types"
 
 /* ── constants ───────────────────────────────────────────────────── */
 
-const CAMERA_LIST = [
-  { id: "cam-01", name: "Gate Camera" },
-  { id: "cam-02", name: "Assembly Line A" },
-  { id: "cam-03", name: "Assembly Line B" },
-  { id: "cam-04", name: "Warehouse" },
-  { id: "cam-05", name: "Parking Lot" },
+const DEFAULT_MESSAGE_TEMPLATE = "{severity} {violation_type} on {camera} in {zone}"
+
+const DAYS = [
+  { value: "mon", label: "Mon" },
+  { value: "tue", label: "Tue" },
+  { value: "wed", label: "Wed" },
+  { value: "thu", label: "Thu" },
+  { value: "fri", label: "Fri" },
+  { value: "sat", label: "Sat" },
+  { value: "sun", label: "Sun" },
 ]
 
-const PRESET_ICONS: Record<string, React.ReactNode> = {
+const ACTION_OUTPUT_IDS: Record<string, string> = {
+  send_telegram: "telegram",
+  send_email: "email",
+  webhook: "webhook",
+  play_sound: "browser_sound",
+  trigger_plc: "plc",
+  trigger_relay: "relay_buzzer",
+  relay: "relay_buzzer",
+  pushover: "pushover",
+}
+
+const PRESET_ICONS: Record<string, ReactNode> = {
   HardHat: <HardHat className="h-5 w-5" />,
   Flame: <Flame className="h-5 w-5" />,
   DoorOpen: <DoorOpen className="h-5 w-5" />,
@@ -66,8 +80,32 @@ function emptyRule(): Omit<EngineRule, "id" | "lastTriggered"> {
     elseActions: [],
     cooldownSeconds: 60,
     priority: 5,
+    severity: "P2",
+    outputIds: [],
+    messageTemplate: DEFAULT_MESSAGE_TEMPLATE,
+    schedule: null,
     preset: null,
   }
+}
+
+function severityFromActions(actions: RuleAction[], fallback: Severity = "P2"): Severity {
+  const createAlert = actions.find((action) => action.type === "create_alert")
+  const value = createAlert?.params?.severity
+  return value === "P1" || value === "P2" || value === "P3" || value === "P4" ? value : fallback
+}
+
+function outputIdsFromActions(actions: RuleAction[]): string[] {
+  return Array.from(
+    new Set(
+      actions
+        .map((action) => ACTION_OUTPUT_IDS[action.type])
+        .filter((outputId): outputId is string => Boolean(outputId))
+    )
+  )
+}
+
+function firstTimeWindow(conditions: RuleCondition[]) {
+  return conditions.find((condition) => condition.type === "time_between")?.params
 }
 
 /* ── component ───────────────────────────────────────────────────── */
@@ -78,7 +116,6 @@ export function RuleEditor() {
   const location = useLocation()
 
   const isNew = !ruleId || ruleId === "new"
-  const existing = !isNew ? mockRules.find((r) => r.id === ruleId) : null
 
   // form state
   const [name, setName] = useState("")
@@ -92,27 +129,60 @@ export function RuleEditor() {
   const [showElse, setShowElse] = useState(false)
   const [cooldown, setCooldown] = useState(60)
   const [priority, setPriority] = useState(5)
+  const [severity, setSeverity] = useState<Severity>("P2")
+  const [outputIds, setOutputIds] = useState<string[]>([])
+  const [messageTemplate, setMessageTemplate] = useState(DEFAULT_MESSAGE_TEMPLATE)
+  const [scheduleEnabled, setScheduleEnabled] = useState(false)
+  const [scheduleDays, setScheduleDays] = useState<string[]>(DAYS.map((day) => day.value))
+  const [scheduleFrom, setScheduleFrom] = useState("00:00")
+  const [scheduleTo, setScheduleTo] = useState("23:59")
   const [preset, setPreset] = useState<string | null>(null)
   const [showPresets, setShowPresets] = useState(isNew)
+  const [existingRule, setExistingRule] = useState<EngineRule | null>(null)
+  const [availableCameras, setAvailableCameras] = useState<Camera[]>([])
+  const [alertOutputs, setAlertOutputs] = useState<AlertOutput[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [loadError, setLoadError] = useState("")
+  const [saveError, setSaveError] = useState("")
 
-  // load existing rule
+  // load cameras, outputs, and existing rule
   useEffect(() => {
-    if (existing) {
-      setName(existing.name)
-      setDescription(existing.description)
-      setTrigger(existing.trigger)
-      setCameras(existing.cameras)
-      setAllCameras(existing.cameras.length === 0)
-      setConditions(existing.conditions)
-      setThenActions(existing.thenActions)
-      setElseActions(existing.elseActions)
-      setShowElse(existing.elseActions.length > 0)
-      setCooldown(existing.cooldownSeconds)
-      setPriority(existing.priority)
-      setPreset(existing.preset)
-      setShowPresets(false)
+    let mounted = true
+    async function load() {
+      setLoading(true)
+      setLoadError("")
+      try {
+        const [rules, cameraList, outputs] = await Promise.all([
+          getAutomationRules(),
+          getCameras(),
+          getAlertOutputs(),
+        ])
+        if (!mounted) return
+        setAvailableCameras(cameraList)
+        setAlertOutputs(outputs)
+        if (!isNew) {
+          const rule = rules.find((item) => item.id === ruleId)
+          if (!rule) {
+            setLoadError("Rule not found")
+            return
+          }
+          setExistingRule(rule)
+          applyRule(rule)
+          setShowPresets(false)
+        }
+      } catch (err) {
+        if (!mounted) return
+        setLoadError(err instanceof Error ? err.message : "Could not load rule editor")
+      } finally {
+        if (mounted) setLoading(false)
+      }
     }
-  }, [existing])
+    load()
+    return () => {
+      mounted = false
+    }
+  }, [isNew, ruleId])
 
   // check for preset passed via location state
   useEffect(() => {
@@ -122,10 +192,34 @@ export function RuleEditor() {
     }
   }, [location.state])
 
+  function applyRule(rule: EngineRule) {
+    setName(rule.name)
+    setDescription(rule.description)
+    setTrigger(rule.trigger)
+    setCameras(rule.cameras)
+    setAllCameras(rule.cameras.length === 0)
+    setConditions(rule.conditions)
+    setThenActions(rule.thenActions)
+    setElseActions(rule.elseActions)
+    setShowElse(rule.elseActions.length > 0)
+    setCooldown(rule.cooldownSeconds)
+    setPriority(rule.priority)
+    setSeverity(rule.severity ?? severityFromActions(rule.thenActions))
+    setOutputIds(rule.outputIds ?? outputIdsFromActions(rule.thenActions))
+    setMessageTemplate(rule.messageTemplate || DEFAULT_MESSAGE_TEMPLATE)
+    const window = rule.schedule?.windows?.[0]
+    setScheduleEnabled(Boolean(window))
+    setScheduleDays(window?.days?.length ? window.days : DAYS.map((day) => day.value))
+    setScheduleFrom(window?.from ?? "00:00")
+    setScheduleTo(window?.to ?? "23:59")
+    setPreset(rule.preset)
+  }
+
   function applyPreset(key: string) {
     const tpl = presetTemplates.find((p) => p.key === key)
     if (!tpl) return
     const t = tpl.template
+    const window = firstTimeWindow(t.conditions)
     setName(t.name)
     setDescription(t.description)
     setTrigger(t.trigger)
@@ -137,16 +231,24 @@ export function RuleEditor() {
     setShowElse(t.elseActions.length > 0)
     setCooldown(t.cooldownSeconds)
     setPriority(t.priority)
+    setSeverity(severityFromActions(t.thenActions))
+    setOutputIds(outputIdsFromActions(t.thenActions))
+    setMessageTemplate(DEFAULT_MESSAGE_TEMPLATE)
+    setScheduleEnabled(Boolean(window))
+    setScheduleDays(DAYS.map((day) => day.value))
+    setScheduleFrom(window?.from ?? "00:00")
+    setScheduleTo(window?.to ?? "23:59")
     setPreset(t.preset)
     setShowPresets(false)
   }
 
-  function handleSave() {
-    const rule: EngineRule = {
-      id: isNew ? `rule-${Date.now()}` : ruleId!,
+  async function handleSave() {
+    setSaving(true)
+    setSaveError("")
+    const payload: Omit<EngineRule, "id" | "lastTriggered"> = {
       name,
       description,
-      enabled: true,
+      enabled: existingRule?.enabled ?? true,
       trigger,
       cameras: allCameras ? [] : cameras,
       conditions,
@@ -154,11 +256,26 @@ export function RuleEditor() {
       elseActions: showElse ? elseActions : [],
       cooldownSeconds: cooldown,
       priority,
-      lastTriggered: existing?.lastTriggered ?? null,
+      severity,
+      outputIds,
+      messageTemplate,
+      schedule: scheduleEnabled
+        ? { windows: [{ days: scheduleDays, from: scheduleFrom, to: scheduleTo }] }
+        : null,
       preset,
     }
-    console.log("Saving rule:", rule)
-    navigate("/configure/rules")
+    try {
+      if (isNew) {
+        await createAutomationRule(payload)
+      } else {
+        await updateAutomationRule(ruleId!, payload)
+      }
+      navigate("/configure/rules")
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save rule")
+    } finally {
+      setSaving(false)
+    }
   }
 
   /* ── condition rows ───────────────────────────────────────────── */
@@ -278,7 +395,7 @@ export function RuleEditor() {
 
   function updateAction(
     list: RuleAction[],
-    setList: React.Dispatch<React.SetStateAction<RuleAction[]>>,
+    setList: Dispatch<SetStateAction<RuleAction[]>>,
     index: number,
     updates: Partial<RuleAction>
   ) {
@@ -297,7 +414,7 @@ export function RuleEditor() {
     a: RuleAction,
     index: number,
     list: RuleAction[],
-    setList: React.Dispatch<React.SetStateAction<RuleAction[]>>
+    setList: Dispatch<SetStateAction<RuleAction[]>>
   ) {
     switch (a.type) {
       case "create_alert":
@@ -349,7 +466,7 @@ export function RuleEditor() {
 
   function renderActionRows(
     list: RuleAction[],
-    setList: React.Dispatch<React.SetStateAction<RuleAction[]>>
+    setList: Dispatch<SetStateAction<RuleAction[]>>
   ) {
     return (
       <div className="space-y-2">
@@ -409,6 +526,26 @@ export function RuleEditor() {
 
   /* ── preset picker ─────────────────────────────────────────────── */
 
+  if (!isNew && loading) {
+    return (
+      <div className="p-6 text-sm text-[var(--color-text-secondary)]">
+        Loading rule...
+      </div>
+    )
+  }
+
+  if (!isNew && loadError) {
+    return (
+      <div className="space-y-4 p-6">
+        <Button variant="ghost" size="sm" onClick={() => navigate("/configure/rules")}>
+          <ArrowLeft className="h-4 w-4" />
+          Back
+        </Button>
+        <Card className="text-sm text-[var(--color-critical)]">{loadError}</Card>
+      </div>
+    )
+  }
+
   if (showPresets && isNew) {
     return (
       <div className="space-y-6 p-6">
@@ -466,7 +603,7 @@ export function RuleEditor() {
         </Button>
         <div>
           <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">
-            {isNew ? "Create Rule" : `Edit Rule: ${existing?.name ?? ""}`}
+            {isNew ? "Create Rule" : `Edit Rule: ${existingRule?.name ?? name}`}
           </h1>
           {preset && (
             <Badge variant="info" className="mt-1">
@@ -517,7 +654,7 @@ export function RuleEditor() {
           </label>
           {!allCameras && (
             <div className="flex flex-wrap gap-3 mt-2">
-              {CAMERA_LIST.map((cam) => (
+              {availableCameras.map((cam) => (
                 <label
                   key={cam.id}
                   className="flex items-center gap-2 text-sm text-[var(--color-text-primary)] cursor-pointer"
@@ -537,6 +674,11 @@ export function RuleEditor() {
                   {cam.name}
                 </label>
               ))}
+              {!availableCameras.length && (
+                <p className="text-xs text-[var(--color-text-tertiary)]">
+                  No cameras configured yet
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -603,6 +745,140 @@ export function RuleEditor() {
       <Card className="space-y-4">
         <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Do this...</h2>
         {renderActionRows(thenActions, setThenActions)}
+      </Card>
+
+      {/* Alert behavior */}
+      <Card className="space-y-4">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
+          Alert behavior
+        </h2>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+              Severity
+            </label>
+            <select
+              value={severity}
+              onChange={(e) => setSeverity(e.target.value as Severity)}
+              className={selectClasses}
+            >
+              <option value="P1">P1 - Critical</option>
+              <option value="P2">P2 - High</option>
+              <option value="P3">P3 - Medium</option>
+              <option value="P4">P4 - Low</option>
+            </select>
+          </div>
+
+          <div className="lg:col-span-2 space-y-1.5">
+            <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+              Notification channels
+            </label>
+            <div className="flex flex-wrap gap-3 rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white p-3">
+              {alertOutputs.map((output) => (
+                <label
+                  key={output.id}
+                  className="flex items-center gap-2 text-sm text-[var(--color-text-primary)] cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={outputIds.includes(output.id)}
+                    onChange={(e) =>
+                      setOutputIds(
+                        e.target.checked
+                          ? [...outputIds, output.id]
+                          : outputIds.filter((id) => id !== output.id)
+                      )
+                    }
+                    className="rounded"
+                  />
+                  {output.name}
+                </label>
+              ))}
+              {!alertOutputs.length && (
+                <span className="text-xs text-[var(--color-text-tertiary)]">
+                  No channels configured
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+            Message
+          </label>
+          <textarea
+            value={messageTemplate}
+            onChange={(e) => setMessageTemplate(e.target.value)}
+            rows={3}
+            className={cn(inputClasses, "resize-y")}
+          />
+        </div>
+
+        <div className="space-y-3 rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white p-3">
+          <label className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={scheduleEnabled}
+              onChange={(e) => setScheduleEnabled(e.target.checked)}
+              className="rounded"
+            />
+            Active only during selected times
+          </label>
+          {scheduleEnabled && (
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_180px_180px] gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+                  Days
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {DAYS.map((day) => (
+                    <label
+                      key={day.value}
+                      className="flex items-center gap-1.5 text-sm text-[var(--color-text-primary)] cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={scheduleDays.includes(day.value)}
+                        onChange={(e) =>
+                          setScheduleDays(
+                            e.target.checked
+                              ? [...scheduleDays, day.value]
+                              : scheduleDays.filter((value) => value !== day.value)
+                          )
+                        }
+                        className="rounded"
+                      />
+                      {day.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+                  From
+                </label>
+                <input
+                  type="time"
+                  value={scheduleFrom}
+                  onChange={(e) => setScheduleFrom(e.target.value)}
+                  className={inputClasses}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-[var(--color-text-secondary)]">
+                  To
+                </label>
+                <input
+                  type="time"
+                  value={scheduleTo}
+                  onChange={(e) => setScheduleTo(e.target.value)}
+                  className={inputClasses}
+                />
+              </div>
+            </div>
+          )}
+        </div>
       </Card>
 
       {/* Section 3: Otherwise */}
@@ -686,10 +962,15 @@ export function RuleEditor() {
 
       {/* Bottom bar */}
       <div className="flex items-center justify-end gap-3 border-t border-[var(--color-border-default)] pt-4">
+        {saveError && (
+          <p className="mr-auto text-sm text-[var(--color-critical)]">{saveError}</p>
+        )}
         <Button variant="secondary" onClick={() => navigate("/configure/rules")}>
           Cancel
         </Button>
-        <Button onClick={handleSave}>Save Rule</Button>
+        <Button onClick={handleSave} disabled={saving || !name.trim()}>
+          {saving ? "Saving..." : "Save Rule"}
+        </Button>
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-"""SafetyLens mutable application state — shared across modules."""
+"""Rakshak Lens mutable application state — shared across modules."""
 
 import logging
 import threading
@@ -8,7 +8,7 @@ from fastapi import WebSocket
 
 import model_manager
 
-logger = logging.getLogger("safetylens")
+logger = logging.getLogger("rakshak_lens")
 
 # ── Mutable state ───────────────────────────────────────────────────────────
 
@@ -17,10 +17,16 @@ model: Any = None
 yoloe_model: Any = None
 camera_frames: dict[str, Optional[bytes]] = {}
 camera_clean_frames: dict[str, Optional[bytes]] = {}
+camera_frame_updated_at: dict[str, float] = {}
+camera_worker_started_at: dict[str, float] = {}
 camera_detections: dict[str, list] = {}
+camera_detection_history: dict[str, list[dict[str, Any]]] = {}
+camera_schedule_telemetry: dict[str, dict[str, Any]] = {}
 vlm_last_results: dict[str, dict] = {}
 vlm_lock = threading.Lock()
 camera_runtime_status: dict[str, str] = {}
+
+CAMERA_FRAME_STALE_SECONDS = 5.0
 
 # Thread management: cam_id -> (Thread, Event)
 camera_threads: dict[str, tuple[threading.Thread, threading.Event]] = {}

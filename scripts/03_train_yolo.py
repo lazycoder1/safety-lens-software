@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train YOLOv8n on the auto-labeled industrial safety dataset."""
+"""Train YOLO26n on the auto-labeled industrial safety dataset."""
 import time
 import json
 from pathlib import Path
@@ -13,6 +13,8 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 EPOCHS = 50
 IMG_SIZE = 640
 BATCH = 8  # conservative for M1 Pro 32GB
+MODEL_NAME = "yolo26n.pt"
+RUN_NAME = "industrial_safety_yolo26n"
 
 
 def main():
@@ -22,12 +24,13 @@ def main():
         print("Run 02_autolabel_yolo_world.py first.")
         return
 
-    print("=== Training YOLOv8n ===")
+    print("=== Training YOLO26n ===")
     print(f"Dataset: {yaml_path}")
     print(f"Epochs: {EPOCHS}, img_size: {IMG_SIZE}, batch: {BATCH}")
+    print(f"Model: {MODEL_NAME}")
     print()
 
-    model = YOLO("yolov8n.pt")
+    model = YOLO(MODEL_NAME)
 
     start = time.time()
     results = model.train(
@@ -37,7 +40,7 @@ def main():
         batch=BATCH,
         device="mps",
         project=str(Path(__file__).parent.parent / "runs"),
-        name="industrial_safety_yolov8n",
+        name=RUN_NAME,
         verbose=True,
         plots=True,
     )
@@ -56,7 +59,7 @@ def main():
     fps = len(val_images) / inf_elapsed if inf_elapsed > 0 else 0
 
     output = {
-        "model": "yolov8n",
+        "model": MODEL_NAME.removesuffix(".pt"),
         "training": {
             "epochs": EPOCHS,
             "img_size": IMG_SIZE,
@@ -81,7 +84,7 @@ def main():
 
     out_path = RESULTS_DIR / "yolo_results.json"
     out_path.write_text(json.dumps(output, indent=2))
-    print(f"\n=== YOLOv8n Training Results ===")
+    print(f"\n=== YOLO26n Training Results ===")
     print(json.dumps(output, indent=2))
     print(f"\nSaved to: {out_path}")
 

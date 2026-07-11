@@ -57,7 +57,7 @@ def test_load_config_reads_existing_file():
     _test_config.write_text(json.dumps(custom))
     cfg = config_manager.load_config()
     assert cfg["global"]["target_fps"] == 10
-    assert "cam2" in cfg["cameras"]
+    assert cfg["cameras"] == {}
 
 
 def test_load_config_normalizes_legacy_camera_rule_fields():
@@ -81,7 +81,7 @@ def test_load_config_normalizes_legacy_camera_rule_fields():
 
     assert "ppe_hairnet" in camera["safety_rule_ids"]
     assert "ppe_gloves" in camera["safety_rule_ids"]
-    assert "ppe_facemask" in camera["safety_rule_ids"]
+    assert "ppe_face_mask" in camera["safety_rule_ids"]
     assert "alert_mobile_phone" in camera["safety_rule_ids"]
     assert "mobile_phone" in camera["alert_classes"]
     assert "ppe_hairnet" in camera["ppe_rule_ids"]
@@ -89,6 +89,68 @@ def test_load_config_normalizes_legacy_camera_rule_fields():
     assert "hairnet_required" in camera["capabilities"]
     assert camera["profile"] == "work_zone_ppe"
     assert camera["execution_plan"]["run_ppe_specialist"] is True
+
+
+def test_load_config_maps_face_mask_ppe_rule_to_person_plus_ppe_plan():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_mask": {
+                "name": "Hospital Mask Corridor",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_face_mask"],
+                "ppe_rule_ids": ["ppe_face_mask"],
+                "capabilities": ["person_presence", "face_mask_required"],
+                "yoloe_classes": ["person", "face mask"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_mask"]
+
+    assert camera["capabilities"] == ["face_mask_required"]
+    assert camera["execution_plan"]["run_coco_primary"] is True
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert camera["execution_plan"]["run_yoloe_long_tail"] is False
+    assert camera["execution_plan"]["ppe_prompt_terms"] == [
+        "face mask",
+        "surgical mask",
+        "medical mask",
+        "mask",
+        "respirator",
+    ]
+    assert "ppe_face_mask" in camera["ppe_rule_ids"]
+    assert "surgical mask" in camera["yoloe_classes"]
+    assert "medical mask" in camera["yoloe_classes"]
+    assert "respirator" in camera["yoloe_classes"]
+
+
+def test_load_config_maps_legacy_facemask_rule_id_to_face_mask_capability():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_mask_legacy": {
+                "name": "Legacy Mask Camera",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_facemask"],
+                "ppe_rule_ids": ["ppe_facemask"],
+                "yoloe_classes": ["person", "face mask"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_mask_legacy"]
+
+    assert camera["capabilities"] == ["face_mask_required"]
+    assert camera["execution_plan"]["run_coco_primary"] is True
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert "medical mask" in camera["execution_plan"]["ppe_prompt_terms"]
 
 
 def test_load_config_rebuilds_capabilities_from_safety_rule_ids_when_stale():
@@ -126,6 +188,198 @@ def test_load_config_rebuilds_capabilities_from_safety_rule_ids_when_stale():
     assert "safety helmet" in camera["yoloe_classes"]
     assert "hard hat" in camera["execution_plan"]["ppe_prompt_terms"]
     assert camera["execution_plan"]["run_ppe_specialist"] is True
+
+
+def test_load_config_uses_yaml_ppe_rule_classes_as_prompt_terms():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "safety_rules": [
+            {
+                "id": "ppe_vest",
+                "name": "Safety vest",
+                "type": "ppe",
+                "classes": ["safety vest", "reflective vest", "construction vest"],
+                "model": "yoloe",
+                "severity": "P2",
+                "enabled": True,
+            }
+        ],
+        "cameras": {
+            "cam_vest": {
+                "name": "Construction Vest Camera",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_vest"],
+                "capabilities": ["vest_required"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_vest"]
+
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert "reflective vest" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert "construction vest" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert camera["execution_plan"]["yoloe_prompt_terms"] == []
+    assert camera["custom_long_tail_terms"] == []
+    assert "reflective vest" in camera["yoloe_classes"]
+
+
+def test_load_config_maps_harness_ppe_rule_to_person_plus_ppe_plan():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_height": {
+                "name": "Work At Height",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_harness"],
+                "ppe_rule_ids": ["ppe_harness"],
+                "capabilities": ["person_presence", "harness_required"],
+                "yoloe_classes": ["person", "safety harness"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_height"]
+
+    assert camera["capabilities"] == ["harness_required"]
+    assert camera["execution_plan"]["run_coco_primary"] is True
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert camera["execution_plan"]["run_yoloe_long_tail"] is False
+    assert "safety harness" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert "safety lanyard" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert "body harness" in camera["yoloe_classes"]
+    assert "fall protection lanyard" in camera["yoloe_classes"]
+
+
+def test_load_config_maps_apron_ppe_rule_to_expanded_apron_prompts():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_apron": {
+                "name": "Cafe PPE",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_apron"],
+                "ppe_rule_ids": ["ppe_apron"],
+                "capabilities": ["person_presence", "apron_required"],
+                "yoloe_classes": ["person", "apron"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_apron"]
+
+    assert camera["capabilities"] == ["apron_required"]
+    assert camera["execution_plan"]["run_coco_primary"] is True
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert camera["execution_plan"]["run_yoloe_long_tail"] is False
+    assert "denim apron" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert "work apron" in camera["yoloe_classes"]
+
+
+def test_load_config_allows_yaml_closed_set_candidate_override_for_apron():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_apron_candidate": {
+                "name": "Cafe PPE Candidate",
+                "demo": "yolo",
+                "safety_rule_ids": ["ppe_apron"],
+                "ppe_rule_ids": ["ppe_apron"],
+                "capabilities": ["apron_required"],
+                "capability_model_overrides": {
+                    "apron_required": "ppe_closed_set_candidate",
+                },
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_apron_candidate"]
+
+    assert camera["capabilities"] == ["apron_required"]
+    assert camera["execution_plan"]["required_model_keys"] == ["ppe_closed_set_candidate"]
+    assert camera["execution_plan"]["capability_model_overrides"] == {
+        "apron_required": "ppe_closed_set_candidate",
+    }
+    assert camera["execution_plan"]["run_ppe_specialist"] is False
+    assert camera["execution_plan"]["run_ppe_closed_set_candidate"] is True
+    assert camera["execution_plan"]["ppe_prompt_terms"] == []
+    assert camera["yoloe_classes"] == []
+
+
+def test_load_config_maps_boots_ppe_rule_to_expanded_boot_prompts():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_sanitation": {
+                "name": "Sanitation Bridge",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_boots"],
+                "ppe_rule_ids": ["ppe_boots"],
+                "capabilities": ["person_presence", "boots_required"],
+                "yoloe_classes": ["person", "safety boots"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_sanitation"]
+
+    assert camera["capabilities"] == ["boots_required"]
+    assert camera["execution_plan"]["run_coco_primary"] is True
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert camera["execution_plan"]["run_yoloe_long_tail"] is False
+    assert "rubber boots" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert "protective boots" in camera["yoloe_classes"]
+
+
+def test_load_config_maps_face_shield_ppe_rule_to_person_plus_ppe_plan():
+    custom = {
+        "global": {},
+        "vlm": {},
+        "cameras": {
+            "cam_face_shield": {
+                "name": "Hospital PPE Corridor",
+                "demo": "yolo+yoloe",
+                "safety_rule_ids": ["ppe_face_shield"],
+                "ppe_rule_ids": ["ppe_face_shield"],
+                "capabilities": ["person_presence", "face_shield_required"],
+                "yoloe_classes": ["person", "face shield"],
+            }
+        },
+    }
+    _test_config.write_text(json.dumps(custom))
+
+    cfg = config_manager.load_config()
+    camera = cfg["cameras"]["cam_face_shield"]
+
+    assert camera["capabilities"] == ["face_shield_required"]
+    assert camera["execution_plan"]["run_coco_primary"] is True
+    assert camera["execution_plan"]["run_ppe_specialist"] is True
+    assert camera["execution_plan"]["run_yoloe_long_tail"] is False
+    assert camera["execution_plan"]["ppe_prompt_terms"] == [
+        "face shield",
+        "protective face shield",
+        "clear face shield",
+        "visor",
+        "protective visor",
+    ]
+    assert "ppe_face_shield" in camera["ppe_rule_ids"]
+    assert "protective face shield" in camera["yoloe_classes"]
+    assert "protective visor" in camera["yoloe_classes"]
 
 
 def test_load_config_ignores_stale_rule_labels_when_rule_ids_exist():
@@ -230,11 +484,12 @@ def test_save_config_writes_to_disk():
 
 
 def test_save_config_atomic_write():
-    """Verify no .tmp file remains after save."""
+    """Verify no temporary config file remains after save."""
     cfg = {"global": {"target_fps": 8}, "vlm": {}, "cameras": {}}
     config_manager.save_config(cfg)
     tmp = Path(str(_test_config) + ".tmp")
     assert not tmp.exists()
+    assert not list(_test_config.parent.glob(f"{_test_config.name}.*.tmp"))
 
 
 def test_save_config_updates_cache():

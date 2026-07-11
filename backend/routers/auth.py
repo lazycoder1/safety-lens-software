@@ -1,5 +1,5 @@
 """
-SafetyLens auth endpoints — login, register, me, change-password.
+Rakshak Lens auth endpoints — login, register, me, change-password.
 """
 
 from fastapi import APIRouter, Request

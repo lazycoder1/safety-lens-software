@@ -18,7 +18,7 @@ class ModelInstallRequest(BaseModel):
 @router.get("")
 async def api_list_models():
     return {
-        "models": model_manager.list_models(),
+        "models": model_manager.list_models_for_status(),
     }
 
 
@@ -50,4 +50,3 @@ async def api_retry_install_job(job_id: str):
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return job
-

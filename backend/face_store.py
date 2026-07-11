@@ -1,4 +1,4 @@
-"""Face enrollment and match-log persistence for SafetyLens."""
+"""Face enrollment and match-log persistence for Rakshak Lens."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from psycopg2.extras import RealDictCursor
 
 from db import get_conn
 
-logger = logging.getLogger("safetylens.faces")
+logger = logging.getLogger("rakshak_lens.faces")
 
 FACE_PHOTOS_DIR = Path(__file__).parent / "face_photos"
 FACE_SNAPSHOTS_DIR = Path(__file__).parent / "face_snapshots"

@@ -52,7 +52,7 @@ export function LiveAlertsPanel() {
   const visibleAlerts = hiddenBefore
     ? alerts.filter((a) => a.timestamp > hiddenBefore)
     : alerts
-  const liveAlerts = visibleAlerts.slice(0, 100)
+  const liveAlerts = visibleAlerts.slice(0, 25)
   const activeAlerts = liveAlerts.filter((a) => a.status === "active")
 
   if (!panelOpen) {
@@ -165,6 +165,12 @@ export function LiveAlertsPanel() {
                       <span>{alert.source}</span>
                       <span>|</span>
                       <span>{Math.round(alert.confidence * 100)}%</span>
+                      {alert.deliveryResults && alert.deliveryResults.length > 0 && (
+                        <>
+                          <span>|</span>
+                          <span>{alert.deliveryResults.length} outputs</span>
+                        </>
+                      )}
                     </div>
                     <div className="flex items-center gap-1">
                       <span className="text-[10px] text-blue-500">Click to view</span>
