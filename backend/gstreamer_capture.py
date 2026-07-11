@@ -26,6 +26,20 @@ _REQUIRED_ELEMENTS = (
     "appsink",
 )
 
+_NVVIDCONV_INTERPOLATION_METHOD = 1  # Bilinear; preserves detector confidence at 960px.
+
+
+def _pipeline_description(tcp_timeout_us: int) -> str:
+    return (
+        "rtspsrc name=source protocols=tcp latency=100 drop-on-latency=true "
+        f"tcp-timeout={tcp_timeout_us} "
+        "! decodebin "
+        f"! nvvidconv interpolation-method={_NVVIDCONV_INTERPOLATION_METHOD} "
+        "! capsfilter name=scale_caps "
+        "! videoconvert ! video/x-raw,format=BGR "
+        "! appsink name=sink sync=false max-buffers=1 drop=true"
+    )
+
 
 def nvdec_runtime_available() -> bool:
     """Return whether the complete in-process NVDEC pipeline is usable."""
@@ -79,13 +93,7 @@ class GStreamerCapture:
         self._scale_filter: Any = None
 
         tcp_timeout_us = max(1_000_000, int(read_timeout_ms) * 1_000)
-        pipeline = Gst.parse_launch(
-            "rtspsrc name=source protocols=tcp latency=100 drop-on-latency=true "
-            f"tcp-timeout={tcp_timeout_us} "
-            "! decodebin ! nvvidconv ! capsfilter name=scale_caps "
-            "! videoconvert ! video/x-raw,format=BGR "
-            "! appsink name=sink sync=false max-buffers=1 drop=true"
-        )
+        pipeline = Gst.parse_launch(_pipeline_description(tcp_timeout_us))
         source_element = pipeline.get_by_name("source")
         scale_filter = pipeline.get_by_name("scale_caps")
         sink = pipeline.get_by_name("sink")

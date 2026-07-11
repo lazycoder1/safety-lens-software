@@ -3,6 +3,13 @@ import pytest
 import gstreamer_capture
 
 
+def test_pipeline_uses_bilinear_scaling_for_detection_quality():
+    description = gstreamer_capture._pipeline_description(5_000_000)
+
+    assert "nvvidconv interpolation-method=1" in description
+    assert "tcp-timeout=5000000" in description
+
+
 @pytest.mark.parametrize(
     ("width", "height", "maximum", "expected"),
     [
