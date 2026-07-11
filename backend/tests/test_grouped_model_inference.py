@@ -113,3 +113,74 @@ def test_bbox_only_grouped_inference_skips_full_resolution_rendering(monkeypatch
             "capability_keys": ["rider_helmet_required"],
         },
     ]
+
+
+def test_pose_uses_shared_record_batch_instead_of_local_predict(monkeypatch):
+    pose_records = [
+        {
+            "class_id": 0,
+            "confidence": 0.9,
+            "bbox": [10, 20, 70, 80],
+            "keypoints": [[20.0, 30.0, 0.8]] * 17,
+        }
+    ]
+    captured = {}
+
+    def fake_predict_record_batches(frame, requests):
+        captured["frame"] = frame
+        captured["requests"] = requests
+        return {"coco_primary": [], "pose_specialist": pose_records}
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict_record_batches,
+    )
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pose bypassed grouped remote inference")
+        ),
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "draw_pose_detections",
+        lambda annotated, results, **_kwargs: (
+            annotated,
+            [] if results is pose_records else ["wrong pose records"],
+        ),
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "apply_camera_overlay",
+        lambda annotated, **_kwargs: annotated,
+    )
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+    execution_plan = {
+        "run_coco_primary": True,
+        "run_ppe_specialist": False,
+        "run_yoloe_long_tail": False,
+        "run_fire_smoke_specialist": False,
+        "run_pose_specialist": True,
+    }
+
+    _annotated, detections, pose_results, invocations = (
+        video_processing._run_grouped_inference(
+            "cam-test",
+            frame,
+            execution_plan,
+            conf=0.3,
+            device="cuda",
+            imgsz=960,
+        )
+    )
+
+    assert captured["frame"] is frame
+    assert [item["request_id"] for item in captured["requests"]] == [
+        "coco_primary",
+        "pose_specialist",
+    ]
+    assert detections == []
+    assert pose_results is pose_records
+    assert invocations["pose_specialist"] == 1

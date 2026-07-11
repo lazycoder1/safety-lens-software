@@ -404,19 +404,48 @@ def _is_fall(keypoints, bbox, conf_threshold: float = 0.3) -> bool:
     return bool(_fall_analysis(keypoints, bbox, conf_threshold)["isFall"])
 
 
+def _pose_observations(results) -> list[tuple[float, list[int], np.ndarray]]:
+    """Normalize local Ultralytics results or remote pose records once."""
+    if not results or len(results) == 0:
+        return []
+    if isinstance(results[0], dict):
+        observations = []
+        for record in results:
+            keypoints = record.get("keypoints")
+            bbox = record.get("bbox")
+            if not isinstance(keypoints, list) or not isinstance(bbox, list):
+                continue
+            observations.append(
+                (
+                    float(record.get("confidence", 0.0)),
+                    list(map(int, bbox)),
+                    np.asarray(keypoints, dtype=np.float32),
+                )
+            )
+        return observations
+
+    result = results[0]
+    if result.keypoints is None or result.boxes is None:
+        return []
+    keypoints_data = result.keypoints.data
+    boxes = result.boxes
+    return [
+        (
+            float(boxes.conf[index]),
+            list(map(int, boxes.xyxy[index])),
+            keypoints_data[index].cpu().numpy(),
+        )
+        for index in range(len(boxes))
+    ]
+
+
 def check_fall_detections(results, camera_id: str, frame: np.ndarray) -> list:
     """Analyze YOLO-pose results to detect fallen persons.
     Returns candidate violation dicts."""
     candidates = []
-    if not results or len(results) == 0:
+    observations = _pose_observations(results)
+    if not observations:
         return candidates
-
-    result = results[0]
-    if result.keypoints is None or result.boxes is None:
-        return candidates
-
-    keypoints_data = result.keypoints.data  # (N, 17, 3) — x, y, conf
-    boxes = result.boxes
 
     fallen_count = 0
     max_conf = 0.0
@@ -424,10 +453,7 @@ def check_fall_detections(results, camera_id: str, frame: np.ndarray) -> list:
     fall_settings = _fall_detection_settings(camera_id)
     confirmation_threshold = _fall_confirmation_threshold(fall_settings)
 
-    for i in range(len(boxes)):
-        conf = float(boxes.conf[i])
-        bbox = list(map(int, boxes.xyxy[i]))
-        kps = keypoints_data[i].cpu().numpy()  # (17, 3)
+    for i, (conf, bbox, kps) in enumerate(observations):
         analysis = _fall_analysis(kps, bbox)
         analysis["confidence"] = round(conf, 4)
         analysis["index"] = i
@@ -471,11 +497,8 @@ def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False, ca
     annotated = frame.copy()
     fall_detections = []
 
-    if not results or len(results) == 0:
-        return annotated, fall_detections
-
-    result = results[0]
-    if result.keypoints is None or result.boxes is None:
+    observations = _pose_observations(results)
+    if not observations:
         return annotated, fall_detections
 
     h_img, w_img = annotated.shape[:2]
@@ -483,15 +506,9 @@ def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False, ca
     font_thickness = max(1, int(w_img / 800))
     kp_radius = max(3, int(w_img / 400))
 
-    keypoints_data = result.keypoints.data
-    boxes = result.boxes
     fall_settings = _fall_detection_settings(camera_id)
 
-    for i in range(len(boxes)):
-        conf = float(boxes.conf[i])
-        bbox = list(map(int, boxes.xyxy[i]))
-        kps = keypoints_data[i].cpu().numpy()
-
+    for conf, bbox, kps in observations:
         analysis = _fall_analysis(kps, bbox)
         is_fallen = bool(analysis["isFall"]) and not _fall_suppression_reason(analysis, fall_settings)
 

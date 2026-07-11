@@ -1545,6 +1545,15 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
             "device": device,
             "imgsz": imgsz,
         })
+    if execution_plan.get("run_pose_specialist"):
+        model_invocations["pose_specialist"] += 1
+        batch_requests.append({
+            "request_id": "pose_specialist",
+            "model_key": "pose_specialist",
+            "conf": conf,
+            "device": device,
+            "imgsz": imgsz,
+        })
     record_batches = model_manager.predict_record_batches(frame, batch_requests)
 
     if execution_plan.get("run_coco_primary"):
@@ -1593,20 +1602,13 @@ def _run_grouped_inference(camera_id: str, frame: np.ndarray, execution_plan: di
         detections.extend(fire_detections)
 
     if execution_plan.get("run_pose_specialist"):
-        model_invocations["pose_specialist"] += 1
         annotated = _draw_stream_detection_records(
             frame,
             detections,
             camera_id,
             show_overlay=False,
         )
-        pose_results = model_manager.predict(
-            "pose_specialist",
-            frame,
-            conf=conf,
-            device=device,
-            imgsz=imgsz,
-        )
+        pose_results = record_batches["pose_specialist"]
         annotated, fall_dets = draw_pose_detections(annotated, pose_results, fall_only=False, camera_id=camera_id)
         detections.extend(_normalize_detection_batch(fall_dets, "pose_specialist"))
 

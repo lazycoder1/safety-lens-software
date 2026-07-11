@@ -176,6 +176,30 @@ def test_check_fall_detections_keeps_default_person_down_behavior(mock_cfg):
 
 
 @mock.patch("detection.get_config")
+def test_check_fall_detections_accepts_remote_pose_records(mock_cfg):
+    mock_cfg.return_value = {"cameras": {"corridor_cam": {}}}
+    frame = np.zeros((100, 200, 3), dtype=np.uint8)
+    keypoints = _pose_keypoints(exercise=True)
+
+    candidates = check_fall_detections(
+        [
+            {
+                "class_id": 0,
+                "confidence": 0.9,
+                "bbox": [0, 0, 200, 100],
+                "keypoints": keypoints,
+            }
+        ],
+        "corridor_cam",
+        frame,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["rule"] == "Fall Detected"
+    assert candidates[0]["confidence"] == 0.9
+
+
+@mock.patch("detection.get_config")
 def test_check_fall_detections_uses_camera_confirmation_threshold(mock_cfg):
     mock_cfg.return_value = {
         "cameras": {
