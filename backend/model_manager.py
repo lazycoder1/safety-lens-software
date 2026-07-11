@@ -1806,14 +1806,26 @@ def _records_from_results(results) -> list[dict[str, Any]]:
     # synchronizations per detection. Transfer the compact Nx6/Nx7 tensor to
     # host memory once, then normalize ordinary Python rows.
     rows = boxes.data.tolist()
-    return [
-        {
+    result_keypoints = getattr(results[0], "keypoints", None)
+    keypoint_rows = (
+        result_keypoints.data.tolist()
+        if result_keypoints is not None
+        else []
+    )
+    records = []
+    for index, row in enumerate(rows):
+        record = {
             "class_id": int(row[-1]),
             "confidence": float(row[-2]),
             "bbox": [int(value) for value in row[:4]],
         }
-        for row in rows
-    ]
+        if index < len(keypoint_rows):
+            record["keypoints"] = [
+                [float(value) for value in keypoint[:3]]
+                for keypoint in keypoint_rows[index]
+            ]
+        records.append(record)
+    return records
 
 
 def _bbox_iou(left: list[int], right: list[int]) -> float:
@@ -1954,6 +1966,17 @@ def _scale_remote_records_to_source(
                 min(source_height, max(0, round(float(y1) * scale_y))),
                 min(source_width, max(0, round(float(x2) * scale_x))),
                 min(source_height, max(0, round(float(y2) * scale_y))),
+            ]
+        keypoints = item.get("keypoints")
+        if isinstance(keypoints, list):
+            item["keypoints"] = [
+                [
+                    min(source_width, max(0.0, float(keypoint[0]) * scale_x)),
+                    min(source_height, max(0.0, float(keypoint[1]) * scale_y)),
+                    float(keypoint[2]),
+                ]
+                for keypoint in keypoints
+                if isinstance(keypoint, (list, tuple)) and len(keypoint) >= 3
             ]
         scaled.append(item)
     return scaled

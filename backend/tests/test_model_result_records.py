@@ -20,8 +20,14 @@ class _Boxes:
 
 
 class _Result:
-    def __init__(self, boxes):
+    def __init__(self, boxes, keypoints=None):
         self.boxes = boxes
+        self.keypoints = keypoints
+
+
+class _Keypoints:
+    def __init__(self, rows):
+        self.data = _BulkRows(rows)
 
 
 def test_result_records_use_one_bulk_host_transfer_and_preserve_semantics():
@@ -65,6 +71,26 @@ def test_result_records_support_tracked_box_rows():
         }
     ]
     assert boxes.data.tolist_calls == 1
+
+
+def test_result_records_preserve_pose_keypoints_with_one_bulk_transfer():
+    boxes = _Boxes([[10.0, 20.0, 100.0, 200.0, 0.91, 0.0]])
+    keypoints = _Keypoints(
+        [[[11.5, 22.5, 0.8], [30.25, 40.75, 0.6]]]
+    )
+
+    records = model_manager._records_from_results([_Result(boxes, keypoints)])
+
+    assert boxes.data.tolist_calls == 1
+    assert keypoints.data.tolist_calls == 1
+    assert records == [
+        {
+            "class_id": 0,
+            "confidence": 0.91,
+            "bbox": [10, 20, 100, 200],
+            "keypoints": [[11.5, 22.5, 0.8], [30.25, 40.75, 0.6]],
+        }
+    ]
 
 
 def test_result_records_handle_empty_results_without_transfer():

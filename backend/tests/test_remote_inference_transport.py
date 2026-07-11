@@ -110,6 +110,45 @@ def test_edge_resizes_oversized_remote_frame_and_restores_source_coordinates(mon
     assert remote_records[0]["bbox"] == [100, 50, 900, 500]
 
 
+def test_edge_restores_pose_keypoints_to_source_coordinates(monkeypatch):
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    remote_records = [
+        {
+            "class_id": 0,
+            "confidence": 0.9,
+            "bbox": [100, 50, 900, 500],
+            "keypoints": [[100.5, 50.25, 0.8], [900.0, 500.0, 0.6]],
+        }
+    ]
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_jpeg",
+        lambda *_args, **_kwargs: {"detections": remote_records},
+    )
+
+    detections = model_manager.predict_records(
+        "pose_specialist",
+        frame,
+        conf=0.25,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert detections == [
+        {
+            "class_id": 0,
+            "confidence": 0.9,
+            "bbox": [200, 100, 1800, 1000],
+            "keypoints": [[201.0, 100.5, 0.8], [1800.0, 1000.0, 0.6]],
+        }
+    ]
+    assert remote_records[0]["keypoints"] == [
+        [100.5, 50.25, 0.8],
+        [900.0, 500.0, 0.6],
+    ]
+
+
 def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
     frame = np.zeros((90, 160, 3), dtype=np.uint8)
     captured = {}
