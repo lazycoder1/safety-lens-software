@@ -268,6 +268,41 @@ def test_publish_stream_frame_notifies_fanout_after_both_caches_update(monkeypat
     ]
 
 
+def test_idle_empty_publication_encodes_clean_frame_once(monkeypatch):
+    frame = np.zeros((900, 1600, 3), dtype=np.uint8)
+    encode_calls = []
+    publications = []
+    monkeypatch.setattr(
+        video_processing,
+        "_render_stream_views",
+        lambda *_args, **_kwargs: pytest.fail("idle empty frame should not be annotated"),
+    )
+
+    def encode_once(clean_view, jpeg_quality):
+        encode_calls.append((clean_view.shape, jpeg_quality))
+        return b"shared-clean"
+
+    monkeypatch.setattr(video_processing, "_encode_stream_jpeg", encode_once)
+    monkeypatch.setattr(
+        video_processing.stream_fanout,
+        "publish",
+        lambda camera_id, jpeg: publications.append((camera_id, jpeg)),
+    )
+
+    video_processing._publish_stream_frame(
+        "cam1",
+        frame,
+        [],
+        jpeg_quality=70,
+        annotation_required=False,
+    )
+
+    assert encode_calls == [((480, 854, 3), 70)]
+    assert state.camera_frames["cam1"] == b"shared-clean"
+    assert state.camera_clean_frames["cam1"] == b"shared-clean"
+    assert publications == [("cam1", b"shared-clean")]
+
+
 def test_inference_snapshot_renders_large_bbox_frame_when_source_annotation_was_skipped():
     frame = np.zeros((900, 1600, 3), dtype=np.uint8)
     detections = [

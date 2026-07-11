@@ -338,9 +338,16 @@ def _publish_stream_frame(
     *,
     jpeg_quality: int,
     source_annotated: np.ndarray | None = None,
+    annotation_required: bool = True,
 ) -> None:
-    if source_annotated is None:
+    if not annotation_required:
+        clean_view = _resize_for_stream(frame)
+        clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+        annotated_jpeg = clean_jpeg
+    elif source_annotated is None:
         annotated_view, clean_view = _render_stream_views(camera_id, frame, detections)
+        annotated_jpeg = _encode_stream_jpeg(annotated_view, jpeg_quality)
+        clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
     else:
         clean_view = _resize_for_stream(frame)
         clean_height, clean_width = clean_view.shape[:2]
@@ -348,8 +355,8 @@ def _publish_stream_frame(
             annotated_view = source_annotated
         else:
             annotated_view = cv2.resize(source_annotated, (clean_width, clean_height))
-    annotated_jpeg = _encode_stream_jpeg(annotated_view, jpeg_quality)
-    clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
+        annotated_jpeg = _encode_stream_jpeg(annotated_view, jpeg_quality)
+        clean_jpeg = _encode_stream_jpeg(clean_view, jpeg_quality)
     state.camera_frames[camera_id] = annotated_jpeg
     state.camera_clean_frames[camera_id] = clean_jpeg
     state.camera_frame_updated_at[camera_id] = time.time()
@@ -2411,16 +2418,23 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     stream_had_subscribers,
                 )
                 if publish_stream_frame:
+                    detections = state.camera_detections.get(camera_id, [])
+                    source_annotated = _preserved_source_annotation(
+                        frame,
+                        last_annotated,
+                        execution_plan,
+                    )
                     try:
                         _publish_stream_frame(
                             camera_id,
                             frame,
-                            state.camera_detections.get(camera_id, []),
+                            detections,
                             jpeg_quality=jpeg_quality,
-                            source_annotated=_preserved_source_annotation(
-                                frame,
-                                last_annotated,
-                                execution_plan,
+                            source_annotated=source_annotated,
+                            annotation_required=(
+                                stream_had_subscribers
+                                or bool(detections)
+                                or source_annotated is not None
                             ),
                         )
                     except Exception:
