@@ -25,6 +25,97 @@ def test_stream_publish_due_uses_monotonic_interval():
     assert video_processing._stream_publish_due(10.0, 10.25, 4)
 
 
+def test_idle_stream_publication_uses_one_fps_heartbeat(monkeypatch):
+    monkeypatch.setattr(
+        video_processing.stream_fanout,
+        "has_subscribers",
+        lambda _camera_id: False,
+    )
+
+    assert video_processing._stream_publication_due("cam1", 0.0, 10.0, 4.0, False) == (
+        True,
+        False,
+    )
+    assert video_processing._stream_publication_due("cam1", 10.0, 10.99, 4.0, False) == (
+        False,
+        False,
+    )
+    assert video_processing._stream_publication_due("cam1", 10.0, 11.0, 4.0, False) == (
+        True,
+        False,
+    )
+
+
+def test_stream_publication_restores_active_rate_and_forces_join_frame(monkeypatch):
+    monkeypatch.setattr(
+        video_processing.stream_fanout,
+        "has_subscribers",
+        lambda _camera_id: True,
+    )
+
+    # Joining forces a fresh frame even when the configured interval has not elapsed.
+    assert video_processing._stream_publication_due("cam1", 10.0, 10.01, 4.0, False) == (
+        True,
+        True,
+    )
+    assert video_processing._stream_publication_due("cam1", 10.0, 10.24, 4.0, True) == (
+        False,
+        True,
+    )
+    assert video_processing._stream_publication_due("cam1", 10.0, 10.25, 4.0, True) == (
+        True,
+        True,
+    )
+
+
+def test_idle_stream_does_not_raise_a_slower_configured_rate(monkeypatch):
+    monkeypatch.setattr(
+        video_processing.stream_fanout,
+        "has_subscribers",
+        lambda _camera_id: False,
+    )
+
+    assert video_processing._stream_publication_due("cam1", 10.0, 11.5, 0.5, False) == (
+        False,
+        False,
+    )
+    assert video_processing._stream_publication_due("cam1", 10.0, 12.0, 0.5, False) == (
+        True,
+        False,
+    )
+
+
+def test_idle_stream_schedule_cuts_publication_work_by_three_quarters(monkeypatch):
+    demand = {"active": False}
+    monkeypatch.setattr(
+        video_processing.stream_fanout,
+        "has_subscribers",
+        lambda _camera_id: demand["active"],
+    )
+
+    def publication_count(active: bool) -> int:
+        demand["active"] = active
+        last_published_at = 0.0
+        had_subscribers = False
+        published = 0
+        for frame_index in range(64):  # Eight seconds of an 8 FPS capture.
+            now = 10.0 + frame_index / 8.0
+            due, had_subscribers = video_processing._stream_publication_due(
+                "cam1",
+                last_published_at,
+                now,
+                4.0,
+                had_subscribers,
+            )
+            if due:
+                last_published_at = now
+                published += 1
+        return published
+
+    assert publication_count(active=True) == 32
+    assert publication_count(active=False) == 8
+
+
 def test_stream_consumer_waits_for_next_published_sequence():
     async def scenario():
         hub = MjpegFanout()

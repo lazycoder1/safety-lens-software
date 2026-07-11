@@ -215,6 +215,15 @@ class MjpegFanout:
                 ),
             }
 
+    def has_subscribers(self, camera_id: str) -> bool:
+        """Return whether a camera currently has live stream demand."""
+        with self._lock:
+            channel = self._channels.get(camera_id)
+            if channel is None:
+                return False
+            self._prune_closed_subscribers_locked(channel)
+            return bool(channel.subscribers)
+
     def operational_stats(self) -> dict:
         """Expose effective limits and aggregate load for health diagnostics."""
         with self._lock:

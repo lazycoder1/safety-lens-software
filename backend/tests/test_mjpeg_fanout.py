@@ -26,8 +26,10 @@ def test_two_subscribers_share_one_prebuilt_chunk(monkeypatch):
         monkeypatch.setattr(mjpeg_fanout, "build_mjpeg_chunk", tracked_build)
         hub.publish("cam1", b"jpeg-a")
         assert build_calls == []
+        assert hub.has_subscribers("cam1") is False
         first = hub.stream("cam1")
         second = hub.stream("cam1")
+        assert hub.has_subscribers("cam1") is True
         try:
             first_chunk = await anext(first)
             second_chunk = await anext(second)
@@ -41,6 +43,7 @@ def test_two_subscribers_share_one_prebuilt_chunk(monkeypatch):
             await second.aclose()
 
         assert hub.stats("cam1")["subscribers"] == 0
+        assert hub.has_subscribers("cam1") is False
 
     asyncio.run(scenario())
 
@@ -269,6 +272,7 @@ def test_retire_ends_old_stream_and_reused_id_gets_new_channel():
         pending = asyncio.create_task(anext(old_stream))
         await asyncio.sleep(0)
         assert hub.retire("cam1") is True
+        assert hub.has_subscribers("cam1") is False
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(pending, 1)
         assert hub.stats("cam1")["subscribers"] == 0
