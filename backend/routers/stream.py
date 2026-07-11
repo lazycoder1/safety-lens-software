@@ -156,5 +156,6 @@ async def websocket_alerts(ws: WebSocket):
                 if result:
                     await broadcast_alert({"type": "updated", "data": result})
     except WebSocketDisconnect:
-        state.alert_subscribers.remove(ws)
+        if ws in state.alert_subscribers:
+            state.alert_subscribers.remove(ws)
         logger.info("WebSocket disconnected", extra={"subscribers": len(state.alert_subscribers)})

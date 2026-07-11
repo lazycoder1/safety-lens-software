@@ -1122,14 +1122,16 @@ def create_alert(
 
 
 async def broadcast_alert(msg: dict):
-    dead = []
-    for ws in state.alert_subscribers:
-        try:
-            await ws.send_json(msg)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        state.alert_subscribers.remove(ws)
+    subscribers = tuple(state.alert_subscribers)
+    if not subscribers:
+        return
+    results = await asyncio.gather(
+        *(ws.send_json(msg) for ws in subscribers),
+        return_exceptions=True,
+    )
+    for ws, result in zip(subscribers, results):
+        if isinstance(result, BaseException) and ws in state.alert_subscribers:
+            state.alert_subscribers.remove(ws)
 
 
 def call_vlm(frame: np.ndarray) -> str:
