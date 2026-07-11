@@ -6,6 +6,8 @@ import csv
 import io
 import json
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -32,6 +34,18 @@ OCR_EQUIVALENT_GROUPS = (
     set("HMN"),
 )
 SIMILAR_PLATE_MIN_SCORE = 0.88
+_ACTIVE_PLATES_CACHE_TTL_SECONDS = 5.0
+_active_plates_cache: tuple[dict, ...] | None = None
+_active_plates_cache_expires_at = 0.0
+_active_plates_cache_lock = threading.RLock()
+
+
+def invalidate_active_plates_cache() -> None:
+    """Make the next matcher reload active plate-list state."""
+    global _active_plates_cache, _active_plates_cache_expires_at
+    with _active_plates_cache_lock:
+        _active_plates_cache = None
+        _active_plates_cache_expires_at = 0.0
 
 
 def init_db() -> None:
@@ -93,6 +107,7 @@ def init_db() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_plate_reads_normalized ON plate_reads(normalized_plate)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_plate_reads_event_type ON plate_reads(event_type)")
         conn.commit()
+    invalidate_active_plates_cache()
 
 
 def normalize_plate_text(value: str | None) -> str:
@@ -161,6 +176,7 @@ def create_plate_entry(
         if conn:
             conn.rollback()
         raise ValueError("Plate already exists in this active list") from exc
+    invalidate_active_plates_cache()
     return _plate_row_to_dict(row)
 
 
@@ -204,6 +220,8 @@ def update_plate_entry(
         if conn:
             conn.rollback()
         raise ValueError("Plate already exists in this active list") from exc
+    if row is not None:
+        invalidate_active_plates_cache()
     return _plate_row_to_dict(row) if row else None
 
 
@@ -213,6 +231,8 @@ def deactivate_plate_entry(entry_id: str) -> dict | None:
             cur.execute("UPDATE plate_lists SET active = FALSE WHERE id = %s AND active = TRUE RETURNING *", (entry_id,))
             row = cur.fetchone()
         conn.commit()
+    if row is not None:
+        invalidate_active_plates_cache()
     return _plate_row_to_dict(row) if row else None
 
 
@@ -242,25 +262,25 @@ def import_plate_csv(blob: bytes) -> dict:
 
 def find_matching_plate(normalized_plate: str) -> dict | None:
     now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM plate_lists
-                WHERE active = TRUE
-                  AND normalized_plate = %s
-                  AND (valid_from IS NULL OR valid_from <= %s)
-                  AND (valid_until IS NULL OR valid_until >= %s)
-                ORDER BY
-                  CASE list_type WHEN 'blocked' THEN 1 WHEN 'whitelist' THEN 2 ELSE 3 END,
-                  created_at DESC
-                LIMIT 1
-                """,
-                (normalized_plate, now, now),
-            )
-            row = cur.fetchone()
-    return _plate_row_to_dict(row) if row else None
+    matches = [
+        row
+        for row in _active_plate_entries()
+        if row.get("normalized_plate") == normalized_plate
+        and _plate_entry_is_current(row, now)
+    ]
+    if not matches:
+        return None
+    priority = {"blocked": 1, "whitelist": 2, "visitors": 3}
+    best_priority = min(priority.get(row.get("list_type"), 4) for row in matches)
+    row = max(
+        (
+            row
+            for row in matches
+            if priority.get(row.get("list_type"), 4) == best_priority
+        ),
+        key=lambda value: str(value.get("created_at") or ""),
+    )
+    return _plate_row_to_dict(row)
 
 
 def find_similar_plate(normalized_plate: str, *, min_score: float = SIMILAR_PLATE_MIN_SCORE) -> dict | None:
@@ -268,19 +288,11 @@ def find_similar_plate(normalized_plate: str, *, min_score: float = SIMILAR_PLAT
     if len(normalized) < 6:
         return None
     now = datetime.now(timezone.utc).isoformat()
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT *
-                FROM plate_lists
-                WHERE active = TRUE
-                  AND (valid_from IS NULL OR valid_from <= %s)
-                  AND (valid_until IS NULL OR valid_until >= %s)
-                """,
-                (now, now),
-            )
-            rows = cur.fetchall()
+    rows = [
+        row
+        for row in _active_plate_entries()
+        if _plate_entry_is_current(row, now)
+    ]
 
     best: tuple[float, dict] | None = None
     for row in rows:
@@ -293,6 +305,32 @@ def find_similar_plate(normalized_plate: str, *, min_score: float = SIMILAR_PLAT
         if best is None or ranked_score > best[0]:
             best = (ranked_score, {**candidate, "similarityScore": round(score, 3)})
     return best[1] if best else None
+
+
+def _active_plate_entries() -> list[dict]:
+    global _active_plates_cache, _active_plates_cache_expires_at
+    now = time.monotonic()
+    with _active_plates_cache_lock:
+        if (
+            _active_plates_cache is not None
+            and now < _active_plates_cache_expires_at
+        ):
+            return list(_active_plates_cache)
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM plate_lists WHERE active = TRUE")
+                rows = cur.fetchall()
+        _active_plates_cache = tuple(dict(row) for row in rows)
+        _active_plates_cache_expires_at = now + _ACTIVE_PLATES_CACHE_TTL_SECONDS
+        return list(_active_plates_cache)
+
+
+def _plate_entry_is_current(row: dict, now: str) -> bool:
+    valid_from = row.get("valid_from")
+    valid_until = row.get("valid_until")
+    return (not valid_from or str(valid_from) <= now) and (
+        not valid_until or str(valid_until) >= now
+    )
 
 
 def plate_similarity_score(left: str, right: str) -> float:
