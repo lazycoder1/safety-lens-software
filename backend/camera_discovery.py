@@ -21,6 +21,7 @@ import cv2
 import requests
 
 from capability_registry import CAPABILITY_REGISTRY
+from camera_capture import open_video_capture
 from camera_connection import (
     DEFAULT_ONVIF_PORT,
     DEFAULT_RTSP_PORT,
@@ -83,6 +84,9 @@ DEFAULT_DISCOVERY_WINDOW = {
 }
 DEFAULT_DISCOVERY_EVENT_OUTPUT_IDS = ["in_app"]
 DEFAULT_DISCOVERY_EVENT_MESSAGE = "{severity} {violation_type} on {camera} in {zone}"
+DISCOVERY_PREVIEW_OPEN_TIMEOUT_MS = 1_000
+DISCOVERY_PREVIEW_READ_TIMEOUT_MS = 2_500
+DISCOVERY_CONNECTION_BUDGET_SECONDS = 12.0
 
 
 def _xml_text(parent: ET.Element | None, path: str, default: str = "") -> str:
@@ -658,29 +662,40 @@ def _ordered_curated_paths(preferred_stream: str) -> list[dict[str, str]]:
 
 
 def _capture_preview(full_rtsp_url: str) -> dict[str, Any]:
-    started = time.time()
-    cap = cv2.VideoCapture(full_rtsp_url)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    started = time.monotonic()
+    cap = open_video_capture(
+        full_rtsp_url,
+        stream_type="rtsp",
+        prefer_hardware=False,
+        open_timeout_ms=DISCOVERY_PREVIEW_OPEN_TIMEOUT_MS,
+        read_timeout_ms=DISCOVERY_PREVIEW_READ_TIMEOUT_MS,
+    )
     ok = False
     frame = None
-    for _ in range(15):
-        ok, frame = cap.read()
-        if ok and frame is not None:
-            break
-        time.sleep(0.1)
-    cap.release()
+    try:
+        if cap.isOpened():
+            ok, frame = cap.read()
+    except Exception:
+        ok = False
+        frame = None
+    finally:
+        cap.release()
     if not ok or frame is None:
-        return {"ok": False, "latency_ms": int((time.time() - started) * 1000)}
+        return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000)}
 
-    if frame.shape[1] > 320:
-        scale = 320.0 / frame.shape[1]
-        frame = cv2.resize(frame, (320, max(1, int(frame.shape[0] * scale))))
-    success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+    try:
+        if frame.shape[1] > 320:
+            scale = 320.0 / frame.shape[1]
+            frame = cv2.resize(frame, (320, max(1, int(frame.shape[0] * scale))))
+        success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+    except Exception:
+        success = False
+        buffer = None
     if not success:
-        return {"ok": False, "latency_ms": int((time.time() - started) * 1000)}
+        return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000)}
     return {
         "ok": True,
-        "latency_ms": int((time.time() - started) * 1000),
+        "latency_ms": int((time.monotonic() - started) * 1000),
         "preview_data_url": f"data:image/jpeg;base64,{base64.b64encode(buffer.tobytes()).decode('ascii')}",
         "width": int(frame.shape[1]),
         "height": int(frame.shape[0]),
@@ -730,7 +745,10 @@ def test_camera_connection(device: dict[str, Any]) -> dict[str, Any]:
         auth_state = base_auth_state
 
     errors: list[str] = []
+    probe_deadline = time.monotonic() + DISCOVERY_CONNECTION_BUDGET_SECONDS
     for candidate in stream_candidates:
+        if time.monotonic() >= probe_deadline:
+            break
         candidate_port = int(candidate.get("rtsp_port") or rtsp_port)
         full_rtsp_url = build_rtsp_url(
             {

@@ -151,21 +151,47 @@ def redact_video_source(source: str) -> str:
     return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
 
 
-def open_video_capture(source: str, *, stream_type: str):
+def _capture_timeout_ms(value: int | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(60_000, max(250, parsed))
+
+
+def open_video_capture(
+    source: str,
+    *,
+    stream_type: str,
+    prefer_hardware: bool = True,
+    open_timeout_ms: int | None = None,
+    read_timeout_ms: int | None = None,
+):
     """Open RTSP through FFmpeg with bounded blocking; preserve file behavior."""
     if stream_type != "rtsp":
         return cv2.VideoCapture(source)
 
-    if _rtsp_capture_backend() in {"nvdec", "auto"}:
+    if prefer_hardware and _rtsp_capture_backend() in {"nvdec", "auto"}:
         capture = _open_gstreamer_capture(source)
         if capture is not None:
             return capture
 
+    bounded_open_timeout_ms = _capture_timeout_ms(
+        open_timeout_ms,
+        RTSP_OPEN_TIMEOUT_MS,
+    )
+    bounded_read_timeout_ms = _capture_timeout_ms(
+        read_timeout_ms,
+        RTSP_READ_TIMEOUT_MS,
+    )
+
     parameters: list[int] = []
     if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
-        parameters.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_OPEN_TIMEOUT_MS])
+        parameters.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, bounded_open_timeout_ms])
     if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
-        parameters.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS])
+        parameters.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, bounded_read_timeout_ms])
     if hasattr(cv2, "CAP_PROP_N_THREADS"):
         parameters.extend([cv2.CAP_PROP_N_THREADS, RTSP_DECODE_THREADS])
 

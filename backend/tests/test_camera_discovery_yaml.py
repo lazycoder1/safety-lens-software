@@ -4,6 +4,7 @@ import copy
 import os
 from unittest import mock
 
+import numpy as np
 import yaml
 
 import config_manager
@@ -24,6 +25,87 @@ def test_discover_cameras_continues_when_ws_discovery_is_blocked(monkeypatch):
 
     assert result["devices"] == []
     assert any("ONVIF WS-Discovery failed" in warning for warning in result["warnings"])
+
+
+def test_capture_preview_uses_bounded_software_capture_and_releases(monkeypatch):
+    class FakeCapture:
+        released = False
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return True, np.zeros((180, 320, 3), dtype=np.uint8)
+
+        def release(self):
+            self.released = True
+
+    capture = FakeCapture()
+    open_call = {}
+
+    def open_capture(source, **kwargs):
+        open_call.update(source=source, **kwargs)
+        return capture
+
+    monkeypatch.setattr(camera_discovery, "open_video_capture", open_capture)
+
+    result = camera_discovery._capture_preview("rtsp://camera/live")
+
+    assert result["ok"] is True
+    assert result["width"] == 320
+    assert result["height"] == 180
+    assert capture.released is True
+    assert open_call == {
+        "source": "rtsp://camera/live",
+        "stream_type": "rtsp",
+        "prefer_hardware": False,
+        "open_timeout_ms": camera_discovery.DISCOVERY_PREVIEW_OPEN_TIMEOUT_MS,
+        "read_timeout_ms": camera_discovery.DISCOVERY_PREVIEW_READ_TIMEOUT_MS,
+    }
+
+
+def test_capture_preview_releases_after_decode_exception(monkeypatch):
+    class BrokenCapture:
+        released = False
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            raise RuntimeError("decoder failed")
+
+        def release(self):
+            self.released = True
+
+    capture = BrokenCapture()
+    monkeypatch.setattr(
+        camera_discovery,
+        "open_video_capture",
+        lambda *_args, **_kwargs: capture,
+    )
+
+    result = camera_discovery._capture_preview("rtsp://camera/live")
+
+    assert result["ok"] is False
+    assert capture.released is True
+
+
+def test_connection_probe_stops_starting_paths_after_budget(monkeypatch):
+    clock = iter([0.0, 0.0, 4.0, 8.0, 12.0])
+    attempted = []
+    monkeypatch.setattr(camera_discovery.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(camera_discovery, "_rtsp_options_auth_state", lambda *_args: "unknown")
+    monkeypatch.setattr(
+        camera_discovery,
+        "_capture_preview",
+        lambda url: attempted.append(url) or {"ok": False, "latency_ms": 4_000},
+    )
+
+    result = camera_discovery.test_camera_connection({"host": "camera.local"})
+
+    assert result["ok"] is False
+    assert len(attempted) == 3
+    assert len(result["attempted_paths"]) == 3
 
 
 def test_discovery_to_site_document_builds_valid_yaml_ready_cameras(tmp_path):

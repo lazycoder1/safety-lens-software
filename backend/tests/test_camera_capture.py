@@ -141,6 +141,46 @@ def test_open_rtsp_capture_uses_nvdec_when_requested(monkeypatch):
     )
 
 
+def test_open_rtsp_capture_supports_short_software_probe_timeouts(monkeypatch):
+    class FakeCapture:
+        def __init__(self):
+            self.open_call = None
+
+        def open(self, *args):
+            self.open_call = args
+            return True
+
+        def isOpened(self):
+            return False
+
+    capture = FakeCapture()
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_BACKEND", "nvdec")
+    monkeypatch.setattr(
+        camera_capture,
+        "_open_gstreamer_capture",
+        lambda _source: pytest.fail("A one-frame probe should not initialize NVDEC"),
+    )
+    monkeypatch.setattr(camera_capture.cv2, "VideoCapture", lambda: capture)
+
+    result = camera_capture.open_video_capture(
+        "rtsp://camera/live",
+        stream_type="rtsp",
+        prefer_hardware=False,
+        open_timeout_ms=1_000,
+        read_timeout_ms=2_500,
+    )
+
+    assert result is capture
+    assert capture.open_call[2] == [
+        camera_capture.cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+        1_000,
+        camera_capture.cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+        2_500,
+        camera_capture.cv2.CAP_PROP_N_THREADS,
+        camera_capture.RTSP_DECODE_THREADS,
+    ]
+
+
 def test_open_rtsp_capture_falls_back_when_nvdec_runtime_is_missing(monkeypatch):
     class FakeCapture:
         def open(self, *_args):
