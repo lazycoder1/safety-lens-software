@@ -2050,12 +2050,10 @@ def _process_detection_observation(
             )
             if not decisions:
                 continue
-            if any(decision.fallback for decision in decisions):
+            uses_fallback = any(decision.fallback for decision in decisions)
+            if uses_fallback:
                 if now - last_alert_by_rule.get(rule_key, 0) < alert_cooldown:
                     continue
-                last_alert_by_rule[rule_key] = now
-            active_violations.add(rule_key)
-            violation_window[rule_key] = []
             violation_bboxes = extract_violation_bboxes(candidate["rule"], detections, frame_w, frame_h, camera_id)
             if not snapshot_encoding_attempted:
                 snapshot_encoding_attempted = True
@@ -2072,6 +2070,7 @@ def _process_detection_observation(
                         "Alert snapshot encoding failed",
                         extra={"camera_id": camera_id, "rule": candidate["rule"]},
                     )
+            submitted_alert = False
             for decision in decisions:
                 alert = create_alert(
                     camera_id=candidate["camera_id"],
@@ -2096,12 +2095,23 @@ def _process_detection_observation(
                     clean_snapshot_jpeg=clean_snapshot_jpeg,
                 )
                 if alert:
+                    submitted_alert = True
                     if decision.rule_id:
                         policy_engine.mark_rule_triggered(decision.rule_id, cfg=current_cfg)
                     logger.debug(
                         "Detection alert queued",
                         extra={"camera_id": camera_id, "rule": candidate["rule"]},
                     )
+            if submitted_alert:
+                if uses_fallback:
+                    last_alert_by_rule[rule_key] = now
+                active_violations.add(rule_key)
+                violation_window[rule_key] = []
+            else:
+                logger.warning(
+                    "Detection alert submission failed; incident remains retryable",
+                    extra={"camera_id": camera_id, "rule": candidate["rule"]},
+                )
 
         for rule_key in list(violation_window):
             if len(violation_window[rule_key]) >= window_size and sum(violation_window[rule_key]) == 0:

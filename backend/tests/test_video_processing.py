@@ -579,6 +579,79 @@ def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
     assert {alert["clean_snapshot_jpeg"] for alert in alerts} == {b"clean"}
 
 
+def test_failed_alert_submission_does_not_activate_or_cool_down_incident(monkeypatch):
+    candidate = {
+        "camera_id": "cam1",
+        "rule": "Missing Helmet",
+        "severity": "P2",
+        "confidence": 0.9,
+        "description": "Missing helmet detected",
+        "source": "test",
+        "threshold": 1,
+    }
+    submission_results = iter((None, {"id": "alert-1"}))
+    active_violations = set()
+    violation_window = {}
+    last_alert_by_rule = {}
+
+    monkeypatch.setattr(video_processing.time, "time", lambda: 100.0)
+    monkeypatch.setattr(video_processing, "check_violations", lambda *_args: [candidate])
+    monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args: [])
+    monkeypatch.setattr(
+        video_processing,
+        "_encode_inference_snapshot_pair",
+        lambda *_args, **_kwargs: (b"annotated", b"clean"),
+    )
+    monkeypatch.setattr(
+        video_processing.policy_engine,
+        "evaluate_candidate",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                fallback=True,
+                output_ids=None,
+                rule_id="",
+                rule_name="Fallback",
+                severity="P2",
+                priority=2,
+                message=None,
+                cooldown_seconds=30,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "create_alert",
+        lambda **_kwargs: next(submission_results),
+    )
+
+    def observe():
+        video_processing._process_detection_observation(
+            "cam1",
+            np.zeros((540, 960, 3), dtype=np.uint8),
+            None,
+            [{"class": "person", "confidence": 0.9, "bbox": [1, 1, 20, 40]}],
+            None,
+            {"capabilities": [], "run_pose_specialist": False},
+            {},
+            {"global": {"jpeg_quality": 70}},
+            last_alert_by_rule=last_alert_by_rule,
+            active_violations=active_violations,
+            violation_window=violation_window,
+            alert_cooldown=30,
+            window_size=3,
+        )
+
+    observe()
+    assert active_violations == set()
+    assert last_alert_by_rule == {}
+    assert violation_window["Missing Helmet"] == [True]
+
+    observe()
+    assert active_violations == {"Missing Helmet"}
+    assert last_alert_by_rule == {"Missing Helmet": 100.0}
+    assert violation_window["Missing Helmet"] == []
+
+
 def test_empty_violation_observation_clears_after_fresh_absence():
     windows = {"Missing gloves": [False]}
     active = {"Missing gloves"}
