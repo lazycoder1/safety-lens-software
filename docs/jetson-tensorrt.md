@@ -67,6 +67,11 @@ docker compose -f docker-compose.split.yml up -d --force-recreate model-server
 
 At startup, SafetyLens verifies the sidecar, model hash, engine hash, task, and fixed image size before loading the engine. A missing, changed, mislabeled, or unloadable artifact is rejected and PyTorch is loaded. If TensorRT fails during inference, the same request is retried once after loading the source PyTorch model; runtime status exposes the active backend and fallback error.
 
+Configured fixed-shape COCO and PPE TensorRT runtimes are also executed during
+model-server initialization. Model readiness therefore includes engine
+deserialization and warm-up instead of deferring multi-second cold work to the
+first camera frame. A warm-up failure activates the same safe PyTorch fallback.
+
 ## Roll back
 
 Unset `SAFETYLENS_COCO_TENSORRT_ENGINE` and recreate the model-server service. Keep the `.pt` source on disk even when TensorRT is enabled because it is the safe runtime fallback.

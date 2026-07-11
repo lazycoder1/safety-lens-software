@@ -209,6 +209,123 @@ def test_low_resolution_coco_engine_is_warmed_before_camera_inference(tmp_path, 
     assert [call[1]["imgsz"] for call in calls] == [512, 512, 512]
 
 
+def test_fixed_tensorrt_runtime_is_warmed_before_reporting_ready(monkeypatch):
+    calls = []
+
+    class FakeHandle:
+        def predict(self, frame, **kwargs):
+            calls.append((frame.shape, kwargs))
+            return ["result"]
+
+    runtime = model_manager._new_model_runtime()
+    runtime.update(
+        handle=FakeHandle(),
+        runtime_backend="tensorrt",
+        fixed_imgsz=960,
+        warmed=False,
+    )
+    monkeypatch.setitem(model_manager._MODEL_RUNTIMES, "coco_primary", runtime)
+    monkeypatch.setattr(config_manager, "get_config", lambda: {"global": {"device": "cuda"}})
+
+    assert model_manager._warm_configured_fixed_runtime("coco_primary") is True
+    assert runtime["warmed"] is True
+    assert [call[1]["imgsz"] for call in calls] == [960, 960]
+
+    model_manager._predict_with_runtime(
+        "coco_primary",
+        runtime,
+        np.zeros((32, 32, 3), dtype=np.uint8),
+        conf=0.4,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert [call[1]["imgsz"] for call in calls] == [960, 960, 960]
+
+
+def test_fixed_runtime_warm_failure_clears_prompt_state_for_fallback(monkeypatch):
+    class FailingHandle:
+        def predict(self, *_args, **_kwargs):
+            raise RuntimeError("warm failed")
+
+    runtime = model_manager._new_model_runtime()
+    runtime.update(
+        handle=FailingHandle(),
+        runtime_backend="tensorrt",
+        fallback_path="/models/ppe.pt",
+        fixed_imgsz=960,
+        fixed_classes=["hard hat"],
+        fixed_class_groups=["helmet_required"],
+        current_classes=["hard hat"],
+        class_embeddings={("hard hat",): object()},
+    )
+
+    def activate(active_runtime, error):
+        assert str(error) == "warm failed"
+        active_runtime.update(
+            handle=object(),
+            runtime_backend="pytorch_fallback",
+            fallback_path=None,
+            fixed_imgsz=None,
+            fixed_classes=[],
+            fixed_class_groups=[],
+            current_classes=[],
+            class_embeddings={},
+            warmed=False,
+        )
+
+    monkeypatch.setitem(model_manager._MODEL_RUNTIMES, "ppe_specialist", runtime)
+    monkeypatch.setattr(model_manager, "_activate_pytorch_fallback", activate)
+    monkeypatch.setattr(config_manager, "get_config", lambda: {"global": {"device": "cuda"}})
+
+    assert model_manager._warm_configured_fixed_runtime("ppe_specialist") is False
+    assert runtime["runtime_backend"] == "pytorch_fallback"
+    assert runtime["current_classes"] == []
+    assert runtime["class_embeddings"] == {}
+
+
+def test_ppe_engine_classes_are_checked_after_warm_without_a_second_load(monkeypatch):
+    class MismatchedHandle:
+        names = {0: "safety vest"}
+
+        def predict(self, *_args, **_kwargs):
+            return ["result"]
+
+    runtime = model_manager._new_model_runtime()
+    runtime.update(
+        handle=MismatchedHandle(),
+        runtime_backend="tensorrt",
+        fallback_path="/models/ppe.pt",
+        fixed_imgsz=960,
+        fixed_classes=["hard hat"],
+        fixed_class_groups=["helmet_required"],
+        current_classes=["hard hat"],
+    )
+    fallback_errors = []
+
+    def activate(active_runtime, error):
+        fallback_errors.append(str(error))
+        active_runtime.update(
+            handle=object(),
+            runtime_backend="pytorch_fallback",
+            fallback_path=None,
+            fixed_imgsz=None,
+            fixed_classes=[],
+            fixed_class_groups=[],
+            current_classes=[],
+            class_embeddings={},
+            warmed=False,
+        )
+
+    monkeypatch.setitem(model_manager._MODEL_RUNTIMES, "ppe_specialist", runtime)
+    monkeypatch.setattr(model_manager, "_activate_pytorch_fallback", activate)
+    monkeypatch.setattr(config_manager, "get_config", lambda: {"global": {"device": "cuda"}})
+
+    assert model_manager._warm_configured_fixed_runtime("ppe_specialist") is False
+    assert fallback_errors == ["TensorRT engine classes do not match its manifest"]
+    assert runtime["runtime_backend"] == "pytorch_fallback"
+
+
 def test_tensorrt_load_failure_uses_pytorch(tmp_path, monkeypatch):
     source, engine = _write_valid_artifacts(tmp_path)
     calls = []
@@ -318,6 +435,8 @@ def test_pytorch_fallback_releases_engine_and_updates_runtime(monkeypatch):
     assert runtime["fallback_path"] is None
     assert runtime["fixed_imgsz"] is None
     assert runtime["fixed_class_groups"] == []
+    assert runtime["current_classes"] == []
+    assert runtime["class_embeddings"] == {}
     assert runtime["warmed"] is False
 
 

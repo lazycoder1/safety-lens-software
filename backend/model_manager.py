@@ -1406,9 +1406,6 @@ def _load_runtime(model_key: ModelKey, source_path: Path) -> None:
     if model_key == "ppe_specialist" and backend == "tensorrt":
         try:
             handle = YOLO(str(runtime_path), task="segment")
-            engine_classes = [str(value) for value in handle.names.values()]
-            if engine_classes != fixed_classes:
-                raise RuntimeError("TensorRT engine classes do not match its manifest")
         except Exception as exc:
             logger.exception(
                 "TensorRT model load failed; using PyTorch",
@@ -1501,6 +1498,8 @@ def initialize() -> None:
             logger.exception("Model load failed during initialization", extra={"model_key": model_key})
             with _MODEL_LOCK:
                 _set_model_state(model_key, status="failed", error=str(exc), active_path=existing_path, job_id=None)
+    for model_key in MODEL_DEFINITIONS:
+        _warm_configured_fixed_runtime(model_key)
     _warm_configured_low_res_coco_runtime()
     _sync_state_compat()
 
@@ -1662,11 +1661,12 @@ def _run_install_job(job_id: str):
             for model_key in asset_model_keys:
                 _update_job(job_id, stage="loading", current_model_key=model_key)
                 _load_runtime(model_key, active_path)
+                _update_job(job_id, stage="warming_up", current_model_key=model_key)
+                _warm_configured_fixed_runtime(model_key)
                 if model_key == "coco_primary":
                     _warm_configured_low_res_coco_runtime(active_path)
                 with _MODEL_LOCK:
                     _set_model_state(model_key, status="ready", error=None, active_path=active_path, job_id=None)
-                _update_job(job_id, stage="warming_up", current_model_key=model_key)
 
         _update_job(job_id, status="ready", stage="ready", progress_percent=100.0, error=None)
         _sync_state_compat()
@@ -1860,6 +1860,42 @@ def _warm_configured_low_res_coco_runtime(source_path: Optional[Path] = None) ->
     return used_low_res
 
 
+def _warm_configured_fixed_runtime(model_key: ModelKey) -> bool:
+    """Deserialize and execute fixed TensorRT runtimes before reporting ready."""
+    runtime = _MODEL_RUNTIMES[model_key]
+    with runtime["lock"]:
+        if runtime.get("runtime_backend") != "tensorrt" or runtime.get("warmed"):
+            return False
+        try:
+            _predict_with_runtime(
+                model_key,
+                runtime,
+                np.zeros((32, 32, 3), dtype=np.uint8),
+                conf=0.25,
+                device=_runtime_device(_configured_local_device()),
+                imgsz=16_384,
+                classes=list(runtime.get("fixed_classes") or []) or None,
+            )
+            if model_key == "ppe_specialist":
+                engine_classes = [str(value) for value in runtime["handle"].names.values()]
+                if engine_classes != list(runtime.get("fixed_classes") or []):
+                    raise RuntimeError("TensorRT engine classes do not match its manifest")
+        except Exception as exc:
+            logger.exception(
+                "TensorRT warm-up failed; activating PyTorch fallback",
+                extra={"model_key": model_key, "runtime_path": runtime.get("runtime_path")},
+            )
+            try:
+                _activate_pytorch_fallback(runtime, exc)
+            except Exception:
+                logger.exception(
+                    "TensorRT warm-up fallback failed",
+                    extra={"model_key": model_key},
+                )
+            return False
+        return True
+
+
 def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> None:
     fallback_path = runtime.get("fallback_path")
     if not fallback_path:
@@ -1885,6 +1921,8 @@ def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> Non
     runtime["fixed_imgsz"] = None
     runtime["fixed_classes"] = []
     runtime["fixed_class_groups"] = []
+    runtime["current_classes"] = []
+    runtime["class_embeddings"] = {}
     runtime["warmed"] = False
 
 
