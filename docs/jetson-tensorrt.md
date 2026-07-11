@@ -38,6 +38,27 @@ docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
   --workspace 2
 ```
 
+When production must remain running on an 8 GB Jetson, use the constrained
+two-stage builder. It exports ONNX in a short-lived child process so its CUDA
+allocator is released before `trtexec` chooses heuristic tactics within a 256
+MiB workspace. The final engine is still wrapped with Ultralytics metadata and
+receives the same hash-verified manifest:
+
+```bash
+docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
+  python /app/scripts/export_tensorrt_engine.py \
+  --source /app/models/coco_primary/yolo26s.pt \
+  --output /app/models/coco_primary/yolo26s-512.engine \
+  --imgsz 512 \
+  --low-memory \
+  --low-memory-workspace-mib 256
+```
+
+This mode trades build time and some tactic search breadth for a substantially
+lower peak-memory build. Keep an external memory watchdog when exporting beside
+live services; the export remains atomic, so a failed or killed build does not
+replace the configured engine.
+
 Set `SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE` to this artifact. SafetyLens uses
 it only when the decoded frame's largest dimension is no greater than the
 engine's fixed image size and that size is smaller than the requested inference
