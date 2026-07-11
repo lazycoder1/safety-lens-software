@@ -2,6 +2,9 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
+import scripts.export_tensorrt_engine as export_module
 from scripts.export_tensorrt_engine import export_engine
 
 
@@ -37,6 +40,7 @@ def test_fixed_prompt_export_freezes_classes_and_writes_manifest(tmp_path, monke
 
     monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=fake_yolo))
     monkeypatch.setitem(sys.modules, "tensorrt", SimpleNamespace(__version__="test-version"))
+    monkeypatch.setattr(export_module, "_require_fixed_prompt_dependencies", lambda: None)
 
     report = export_engine(
         source_path=source,
@@ -57,3 +61,39 @@ def test_fixed_prompt_export_freezes_classes_and_writes_manifest(tmp_path, monke
     assert manifest["classes"] == ["hard hat", "safety helmet"]
     assert manifest["classGroups"] == ["helmet_required", "helmet_required"]
     assert report["engine"] == str(output)
+
+
+def test_fixed_prompt_export_fails_before_model_load_when_clip_is_missing(tmp_path, monkeypatch):
+    source = tmp_path / "ppe.pt"
+    output = tmp_path / "ppe.engine"
+    encoder = tmp_path / "mobileclip2_b.ts"
+    source.write_bytes(b"pytorch-model")
+    encoder.write_bytes(b"text-encoder")
+    model_loaded = False
+
+    def fake_yolo(_path):
+        nonlocal model_loaded
+        model_loaded = True
+        raise AssertionError("model loading must not start without export dependencies")
+
+    def missing_dependency():
+        raise RuntimeError("pinned CLIP missing")
+
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=fake_yolo))
+    monkeypatch.setattr(export_module, "_require_fixed_prompt_dependencies", missing_dependency)
+
+    with pytest.raises(RuntimeError, match="pinned CLIP missing"):
+        export_engine(
+            source_path=source,
+            output_path=output,
+            imgsz=512,
+            workspace=2.0,
+            device=0,
+            force=False,
+            classes=["helmet"],
+            class_groups=["rider_helmet_required"],
+            text_encoder_path=encoder,
+        )
+
+    assert model_loaded is False
+    assert output.exists() is False

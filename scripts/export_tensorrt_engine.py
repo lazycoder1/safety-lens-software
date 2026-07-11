@@ -17,6 +17,16 @@ sys.path.insert(0, str(ROOT / "backend"))
 from tensorrt_engine import build_manifest, manifest_path, write_manifest  # noqa: E402
 
 
+def _require_fixed_prompt_dependencies() -> None:
+    try:
+        import clip  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "Fixed-prompt export requires the pinned Ultralytics CLIP dependency; "
+            "rebuild the model-server image before exporting"
+        ) from exc
+
+
 def export_engine(
     *,
     source_path: Path,
@@ -37,9 +47,6 @@ def export_engine(
         raise FileExistsError(f"Refusing to overwrite existing engine: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from ultralytics import YOLO
-    import tensorrt
-
     classes = list(classes or [])
     class_groups = list(class_groups or [])
     if any(not value.strip() for value in classes) or len(classes) != len(set(classes)):
@@ -48,6 +55,12 @@ def export_engine(
         raise ValueError("Each fixed prompt class requires one non-empty semantic class group")
     if not classes and class_groups:
         raise ValueError("Semantic class groups require fixed prompt classes")
+    if classes:
+        _require_fixed_prompt_dependencies()
+
+    from ultralytics import YOLO
+    import tensorrt
+
     with tempfile.TemporaryDirectory(prefix="tensorrt-export-", dir=output_path.parent) as temporary_dir:
         temporary_source = Path(temporary_dir) / source_path.name
         shutil.copy2(source_path, temporary_source)

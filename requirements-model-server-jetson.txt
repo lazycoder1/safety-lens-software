@@ -3,5 +3,9 @@
 fastapi==0.115.14
 uvicorn==0.30.6
 pydantic==2.10.6
+# Fixed-prompt YOLOE export calls model.set_classes(), which otherwise makes
+# Ultralytics clone and install CLIP at runtime. Pin the exact upstream commit
+# so the model-server image remains reproducible and exports can stay offline.
+clip @ git+https://github.com/ultralytics/CLIP.git@0fa238b2ba553fe76dc158348d8e34625e3e2470
 # PP-OCRv6 ANPR requires PaddleOCR. Install a Jetson-compatible PaddlePaddle
 # wheel for the target JetPack release, then install paddleocr==3.7.0.

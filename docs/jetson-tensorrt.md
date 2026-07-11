@@ -20,6 +20,12 @@ docker compose -f docker-compose.split.yml run --rm --no-deps model-server \
 
 The export writes `yolo26s.engine` and `yolo26s.engine.json`. The sidecar records hashes for both the source model and engine, the fixed image size, precision, task, and TensorRT version. Export is deliberately offline because it can take several minutes and consume most of an 8 GB Jetson's memory.
 
+The Jetson model-server image pins the Ultralytics CLIP revision needed by
+fixed-prompt YOLOE export. If that dependency is missing, the export command
+fails before loading weights or initializing CUDA instead of allowing
+Ultralytics to clone packages at runtime. Rebuild the image while network access
+is available, then perform device-specific engine exports offline.
+
 Sites with mixed camera resolutions can also build a smaller engine without
 replacing the primary engine:
 
