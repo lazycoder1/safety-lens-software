@@ -172,14 +172,14 @@ All processing on-prem. No data leaves the device. No internet required.
 ### Detection Modes Working
 | Mode | How It Works | Cameras Using It |
 |------|-------------|-----------------|
-| `yolo` | YOLO26n COCO, fixed safety-relevant classes | cam1, cam2 |
+| `yolo` | YOLO26s COCO, fixed safety-relevant classes | cam1, cam2 |
 | `yoloe` | YOLOE-26S open-vocab, text-prompt classes, live-editable | cam3 |
 | `yolo+vlm` | YOLO + periodic VLM scene analysis | Disabled (saves RAM) |
 
 ### Models on Disk
 | Model | File | Size | Status |
 |-------|------|------|--------|
-| YOLO26n | `models/coco_primary/yolo26n.pt` | 5.3MB | In use for COCO detections |
+| YOLO26s | `models/coco_primary/yolo26s.pt` | device-specific | Default for COCO detections |
 | YOLOE-26S-seg | `models/yoloe_open_vocab/yoloe-26s-seg.pt` | 29.6MB | Pilot path for open-vocabulary PPE prompts |
 | MobileCLIP text encoder | `backend/mobileclip_blt.ts` / `backend/mobileclip2_b.ts` | model-dependent | Used by YOLOE text prompts |
 

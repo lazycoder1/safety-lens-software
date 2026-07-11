@@ -131,8 +131,17 @@ if [[ -z "${JWT_SECRET:-}" ]]; then
   log "JWT_SECRET is empty; a persistent signing key will be created under the runtime state directory."
 fi
 
-if [[ ! -f "$PROJECT_DIR/models/coco_primary/yolo26n.pt" ]]; then
-  warn "COCO model missing (models/coco_primary/yolo26n.pt). Cameras will stay paused until it is installed."
+COCO_MODEL_VARIANT="${SAFETYLENS_COCO_MODEL:-yolo26s}"
+case "$COCO_MODEL_VARIANT" in
+  yolo26n|yolo26s|yolo26m) ;;
+  *)
+    warn "Unknown SAFETYLENS_COCO_MODEL=$COCO_MODEL_VARIANT; checking the yolo26s default instead."
+    COCO_MODEL_VARIANT="yolo26s"
+    ;;
+esac
+COCO_MODEL_FILE="$COCO_MODEL_VARIANT.pt"
+if [[ ! -f "$PROJECT_DIR/models/coco_primary/$COCO_MODEL_FILE" ]]; then
+  warn "COCO model missing (models/coco_primary/$COCO_MODEL_FILE). Cameras will stay paused until it is installed."
 fi
 
 if [[ ! -f "$PROJECT_DIR/models/yoloe_open_vocab/yoloe-26s-seg.pt" ]]; then

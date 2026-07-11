@@ -32,3 +32,20 @@ def test_jetson_model_server_image_contains_anpr_runtime_module():
     dockerfile = (ROOT / "Dockerfile.model-server-jetson").read_text()
 
     assert "COPY backend/plate_analyzer.py ./backend/plate_analyzer.py" in dockerfile
+
+
+def test_split_services_default_to_same_small_coco_model():
+    compose = yaml.safe_load((ROOT / "docker-compose.split.yml").read_text())
+
+    for service_name in ("edge", "model-server"):
+        assert compose["services"][service_name]["environment"]["SAFETYLENS_COCO_MODEL"] == (
+            "${SAFETYLENS_COCO_MODEL:-yolo26s}"
+        )
+
+
+def test_monolithic_backend_defaults_to_small_coco_model():
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+
+    assert compose["services"]["backend"]["environment"]["SAFETYLENS_COCO_MODEL"] == (
+        "${SAFETYLENS_COCO_MODEL:-yolo26s}"
+    )

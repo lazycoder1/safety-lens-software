@@ -103,7 +103,7 @@ The backend GitHub deploy intentionally does not ship:
 
 - `test-videos/`
 - `models/`
-- root-level model weights such as `yolo26n.pt`
+- root-level model weights such as `yolo26s.pt`
 - `backend/config.json` (direct host/JSON deployments only)
 
 Those files are gitignored and should stay out of the repo.
@@ -127,6 +127,7 @@ Add `--with-env` only if you also want to copy the local `.env` to the host inst
 
 - The backend entrypoint currently needs to run from `backend/`, so the service starts `uvicorn server:app` with `WorkingDirectory=.../backend`.
 - The backend imports `bcrypt`, `jwt`, and file-upload support at runtime, so those packages are included in `requirements.txt`.
-- If `models/coco_primary/yolo26n.pt` or `models/yoloe_open_vocab/yoloe-26s-seg.pt` are missing, the backend can still boot, but cameras that need those models stay paused until the models are installed.
+- COCO inference defaults to the accuracy-first `models/coco_primary/yolo26s.pt`. Nano is available only when `SAFETYLENS_COCO_MODEL=yolo26n` is set explicitly.
+- If the selected COCO model or `models/yoloe_open_vocab/yoloe-26s-seg.pt` is missing, the backend can still boot, but cameras that need those models stay paused until the models are installed.
 - For a Vercel-hosted frontend, put Caddy or Nginx in front of the backend so the browser gets TLS and WebSockets on a stable public hostname.
 - The current `test-videos/` folder is about `1.5 GB`, so keeping it out of Git and syncing it directly is the right shape for the demo backend.

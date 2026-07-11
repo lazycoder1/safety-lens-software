@@ -12,6 +12,12 @@ REMOTE_PORT="22"
 REMOTE_DIR="/opt/rakshak-lens/video-analytics"
 SYNC_CONFIG="yes"
 SYNC_ENV="no"
+COCO_MODEL_VARIANT="${SAFETYLENS_COCO_MODEL:-yolo26s}"
+
+case "$COCO_MODEL_VARIANT" in
+  yolo26n|yolo26s|yolo26m) ;;
+  *) COCO_MODEL_VARIANT="yolo26s" ;;
+esac
 
 log() {
   printf '[sync-assets] %s\n' "$*"
@@ -159,8 +165,8 @@ fi
 sync_dir "$PROJECT_DIR/test-videos" "$REMOTE_DIR/test-videos" "test-videos"
 sync_dir "$PROJECT_DIR/models" "$REMOTE_DIR/models" "models"
 
-sync_first_existing_file "$REMOTE_DIR/models/coco_primary/yolo26n.pt" "models/coco_primary/yolo26n.pt" \
-  "$PROJECT_DIR/models/coco_primary/yolo26n.pt"
+sync_first_existing_file "$REMOTE_DIR/models/coco_primary/$COCO_MODEL_VARIANT.pt" "models/coco_primary/$COCO_MODEL_VARIANT.pt" \
+  "$PROJECT_DIR/models/coco_primary/$COCO_MODEL_VARIANT.pt"
 
 sync_first_existing_file "$REMOTE_DIR/models/yoloe_open_vocab/yoloe-26s-seg.pt" "models/yoloe_open_vocab/yoloe-26s-seg.pt" \
   "$PROJECT_DIR/models/yoloe_open_vocab/yoloe-26s-seg.pt"

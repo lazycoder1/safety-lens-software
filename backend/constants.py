@@ -2,6 +2,8 @@
 Rakshak Lens constants — paths, class maps, color palettes, public routes.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 import math
 import os
@@ -27,7 +29,19 @@ def _finite_env_float(
 # ── Paths ───────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).parent.parent
-YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "coco_primary" / "yolo26n.pt"
+COCO_MODEL_VARIANTS = frozenset({"yolo26n", "yolo26s", "yolo26m"})
+DEFAULT_COCO_MODEL_VARIANT = "yolo26s"
+
+
+def resolve_coco_model_variant(configured_model: str | None) -> str:
+    configured_model = str(configured_model or "").strip()
+    if configured_model in COCO_MODEL_VARIANTS:
+        return configured_model
+    return DEFAULT_COCO_MODEL_VARIANT
+
+
+COCO_MODEL_VARIANT = resolve_coco_model_variant(os.environ.get("SAFETYLENS_COCO_MODEL"))
+YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "coco_primary" / f"{COCO_MODEL_VARIANT}.pt"
 YOLOE_MODEL_PATH = PROJECT_ROOT / "models" / "yoloe_open_vocab" / "yoloe-26s-seg.pt"
 VIDEO_DIR = PROJECT_ROOT / "test-videos"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")

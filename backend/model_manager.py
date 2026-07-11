@@ -27,10 +27,10 @@ from constants import (
     MODEL_METADATA_LOG_REMINDER_SECONDS,
     MODEL_METADATA_TIMEOUT_SECONDS,
     MODEL_METADATA_TTL_SECONDS,
-    MODEL_SERVER_TIMEOUT_SECONDS,
     MODEL_SERVER_TOKEN,
     MODEL_SERVER_URL,
     PROJECT_ROOT,
+    resolve_coco_model_variant,
 )
 from tensorrt_engine import validate_engine
 
@@ -80,13 +80,20 @@ _COCO_MODEL_OPTIONS: dict[str, dict[str, str]] = {
         "warmup_behavior": "Full-frame medium COCO detect warmup",
     },
 }
-_COCO_MODEL_VARIANT = os.environ.get("SAFETYLENS_COCO_MODEL", "yolo26n").strip()
-if _COCO_MODEL_VARIANT not in _COCO_MODEL_OPTIONS:
-    logger.warning(
-        "Unknown COCO model variant configured; falling back to nano",
-        extra={"configured_model": _COCO_MODEL_VARIANT},
-    )
-    _COCO_MODEL_VARIANT = "yolo26n"
+def _resolve_coco_model_variant(configured_model: str | None) -> str:
+    configured_model = str(configured_model or "").strip()
+    selected_model = resolve_coco_model_variant(configured_model)
+    if configured_model and configured_model != selected_model:
+        logger.warning(
+            "Unknown COCO model variant configured; falling back to small",
+            extra={"configured_model": configured_model},
+        )
+    return selected_model
+
+
+_COCO_MODEL_VARIANT = _resolve_coco_model_variant(
+    os.environ.get("SAFETYLENS_COCO_MODEL")
+)
 _COCO_MODEL_CONFIG = _COCO_MODEL_OPTIONS[_COCO_MODEL_VARIANT]
 
 
