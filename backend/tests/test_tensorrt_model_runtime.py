@@ -177,6 +177,38 @@ def test_low_resolution_coco_failure_falls_through_to_primary_runtime(tmp_path, 
     assert model_manager._COCO_LOW_RES_RUNTIME["runtime_backend"] == "tensorrt_failed"
 
 
+def test_low_resolution_coco_engine_is_warmed_before_camera_inference(tmp_path, monkeypatch):
+    source, engine = _write_valid_artifacts(tmp_path, imgsz=512)
+    calls = []
+
+    class FakeHandle:
+        def predict(self, frame, **kwargs):
+            calls.append((frame.shape, kwargs))
+            return ["result"]
+
+    monkeypatch.setenv("SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(model_manager, "_COCO_LOW_RES_RUNTIME", model_manager._new_model_runtime())
+    monkeypatch.setitem(model_manager._MODEL_STATES["coco_primary"], "active_path", str(source))
+    monkeypatch.setitem(model_manager._MODEL_STATES["coco_primary"], "status", "ready")
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=lambda path, task=None: FakeHandle()))
+    monkeypatch.setattr(config_manager, "get_config", lambda: {"global": {"device": "cuda"}})
+
+    assert model_manager._warm_configured_low_res_coco_runtime() is True
+    assert [call[1]["imgsz"] for call in calls] == [512, 512]
+
+    used, result = model_manager._predict_with_low_res_coco_runtime(
+        np.zeros((288, 352, 3), dtype=np.uint8),
+        source_path=source,
+        conf=0.4,
+        device="cuda",
+        imgsz=960,
+    )
+
+    assert used is True
+    assert result == ["result"]
+    assert [call[1]["imgsz"] for call in calls] == [512, 512, 512]
+
+
 def test_tensorrt_load_failure_uses_pytorch(tmp_path, monkeypatch):
     source, engine = _write_valid_artifacts(tmp_path)
     calls = []

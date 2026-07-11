@@ -37,7 +37,9 @@ it only when the decoded frame's largest dimension is no greater than the
 engine's fixed image size and that size is smaller than the requested inference
 size or equal to it. Higher-resolution cameras continue to use the primary 960px engine. A
 missing, invalid, unloadable, or failing optional engine falls through to the
-primary runtime for the same request.
+primary runtime for the same request. Configured low-resolution engines are
+validated, loaded, and warmed during model-server initialization so the first
+camera inference does not pay engine deserialization and warm-up latency.
 
 For a fixed-prompt YOLOE PPE engine, repeat `--class` in the exact order the camera plan uses and provide the MobileCLIP encoder:
 

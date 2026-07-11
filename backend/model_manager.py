@@ -1501,6 +1501,7 @@ def initialize() -> None:
             logger.exception("Model load failed during initialization", extra={"model_key": model_key})
             with _MODEL_LOCK:
                 _set_model_state(model_key, status="failed", error=str(exc), active_path=existing_path, job_id=None)
+    _warm_configured_low_res_coco_runtime()
     _sync_state_compat()
 
 
@@ -1661,6 +1662,8 @@ def _run_install_job(job_id: str):
             for model_key in asset_model_keys:
                 _update_job(job_id, stage="loading", current_model_key=model_key)
                 _load_runtime(model_key, active_path)
+                if model_key == "coco_primary":
+                    _warm_configured_low_res_coco_runtime(active_path)
                 with _MODEL_LOCK:
                     _set_model_state(model_key, status="ready", error=None, active_path=active_path, job_id=None)
                 _update_job(job_id, stage="warming_up", current_model_key=model_key)
@@ -1793,7 +1796,6 @@ def _predict_with_low_res_coco_runtime(
             or fixed_imgsz > imgsz
         ):
             return False, None
-
         if runtime["handle"] is None:
             try:
                 from ultralytics import YOLO
@@ -1836,6 +1838,26 @@ def _predict_with_low_res_coco_runtime(
                 extra={"engine_path": str(engine_path)},
             )
             return False, None
+
+
+def _warm_configured_low_res_coco_runtime(source_path: Optional[Path] = None) -> bool:
+    """Make configured low-resolution inference ready before cameras start."""
+    if source_path is None:
+        with _MODEL_LOCK:
+            state = _MODEL_STATES["coco_primary"]
+            active_path = state.get("active_path") if state.get("status") == "ready" else None
+        if not active_path:
+            return False
+        source_path = Path(active_path)
+    device = _runtime_device(_configured_local_device())
+    used_low_res, _result = _predict_with_low_res_coco_runtime(
+        np.zeros((32, 32, 3), dtype=np.uint8),
+        source_path=source_path,
+        conf=0.25,
+        device=device,
+        imgsz=16_384,
+    )
+    return used_low_res
 
 
 def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> None:
