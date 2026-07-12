@@ -1,5 +1,10 @@
 # Jetson RT-DETRv4 Small placement experiment — 2026-07-12
 
+> **2026-07-13 capacity note:** the no-RT-DETR batch-4 tier is now 21 cameras
+> at 4 FPS after partial-group smoothing. The measured conditional RT-DETRv4-S
+> tier remains 18 cameras plus one device-wide specialist FPS until that mixed
+> workload is re-gated against the new profile.
+
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
 ## Decision

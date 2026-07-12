@@ -72,6 +72,22 @@ def _specialist_due(sequence: int, duty: float) -> bool:
     return math.floor((sequence + 1) * duty) > math.floor(sequence * duty)
 
 
+def _phase_group_cardinality(
+    camera_index: int,
+    cameras: int,
+    mode: str,
+    group_size: int,
+) -> int:
+    if mode == "aligned":
+        return cameras
+    if mode == "paired":
+        group_size = 2
+    elif mode == "staggered":
+        group_size = 1
+    group_start = (camera_index // group_size) * group_size
+    return min(group_size, cameras - group_start)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8100")
@@ -123,6 +139,11 @@ def main() -> int:
         choices=(2, 4, 8),
         default=4,
         help="Camera arrival group used by --phase-mode grouped",
+    )
+    parser.add_argument(
+        "--phase-remainder-hint",
+        action="store_true",
+        help="Pass the known phase-group cardinality to edge microbatch routing",
     )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -181,7 +202,11 @@ def main() -> int:
     reports: list[dict] = [{} for _ in range(args.cameras)]
 
     def post(
-        camera_index: int, sequence: int, phone_probe: bool, specialist: bool
+        camera_index: int,
+        sequence: int,
+        phone_probe: bool,
+        specialist: bool,
+        frame_batch_size_hint: int | None,
     ) -> None:
         maximum_dimension = args.phone_probe_width if phone_probe else 640
         frame = frame_sets[camera_index % len(frame_sets)][maximum_dimension]
@@ -207,7 +232,11 @@ def main() -> int:
                 }
             )
         if edge_model_manager is not None:
-            results = edge_model_manager.predict_record_batches(frame, batch)
+            results = edge_model_manager.predict_record_batches(
+                frame,
+                batch,
+                frame_batch_size_hint=frame_batch_size_hint,
+            )
             expected = {item["request_id"] for item in batch}
             if set(results) != expected:
                 raise RuntimeError("edge returned an incomplete grouped result")
@@ -282,6 +311,16 @@ def main() -> int:
         failures = 0
         specialist_requests = 0
         specialist_deferred = False
+        frame_batch_size_hint = (
+            _phase_group_cardinality(
+                camera_index,
+                args.cameras,
+                args.phase_mode,
+                args.phase_group_size,
+            )
+            if args.phase_remainder_hint
+            else None
+        )
         while True:
             scheduled = started + sequence * period
             if scheduled >= deadline:
@@ -318,6 +357,7 @@ def main() -> int:
                     sequence,
                     phone_probe,
                     specialist,
+                    frame_batch_size_hint,
                 )
             except Exception as exc:
                 if edge_model_manager is not None and isinstance(
@@ -382,6 +422,7 @@ def main() -> int:
         "transport": args.transport,
         "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,
         "phase_mode": args.phase_mode,
+        "phase_remainder_hint": args.phase_remainder_hint,
         "edge_primary_batch": (
             edge_model_manager.remote_primary_batch_stats()
             if edge_model_manager is not None

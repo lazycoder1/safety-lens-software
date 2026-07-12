@@ -1,5 +1,9 @@
 # Jetson primary batch-8 experiment — 2026-07-13
 
+> **Later 2026-07-13 update:** batch-8 remains rejected, but partial-group
+> smoothing raises the batch-4 tier from 20 to 21 cameras at 4 FPS. See
+> `jetson-partial-group-smoothing-2026-07-13.md`.
+
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
 ## Decision

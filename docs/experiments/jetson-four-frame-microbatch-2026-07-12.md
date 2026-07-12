@@ -1,5 +1,9 @@
 # Jetson four-frame TensorRT microbatch experiment (2026-07-12)
 
+> **2026-07-13 update:** the 14 ms partial-group smoothing follow-up promotes
+> 21 cameras at 4 FPS. See
+> `jetson-partial-group-smoothing-2026-07-13.md` for the current boundary.
+
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
 This experiment tests whether the proven two-frame cross-camera microbatch can
