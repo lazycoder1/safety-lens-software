@@ -1,10 +1,11 @@
 # Jetson RT-DETRv4 Small placement experiment — 2026-07-12
 
 > **2026-07-13 capacity note:** the no-RT-DETR batch-4 tier is 21 cameras at
-> 4 FPS after partial-group smoothing. Re-gating RT-DETRv4-S against that
-> profile found an 18-camera throughput boundary at one device-wide specialist
-> FPS, but no repeatably freshness-safe tier while RT-DETR runs in an
-> independent CUDA context. Do not deploy that unsynchronised topology.
+> 4 FPS after partial-group smoothing. Phase-aware substitution repeatably
+> sustained 20 cameras at an effective 4 FPS plus one device-wide RT-DETRv4-S
+> FPS, with every PPE pass preserved and maximum primary latency below 235 ms.
+> The 21-camera probes exceeded the 250 ms freshness limit. The substitution
+> topology is benchmark-proven but is not yet integrated into live alerts.
 
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
@@ -27,11 +28,12 @@ proved these conservative mixed-load tiers:
 - 15 cameras at 4 FPS plus two aggregate RT-DETRv4 specialist FPS.
 
 The current no-RT-DETR pipeline supports 21 camera-equivalents at 4 FPS. An
-earlier follow-up against the batch-4 pipeline completed 18 cameras at 4 FPS
-plus one device-wide RT-DETRv4 specialist FPS. Re-gating after partial-group
-smoothing confirmed that 18 cameras remains the zero-drop throughput boundary,
-but independent RT-DETR execution causes non-monotonic primary tail-latency
-spikes. RT-DETRv4 was not deployed.
+earlier additive follow-up found an 18-camera zero-drop throughput boundary but
+unacceptable tail jitter. Replacing selected scheduled YOLO frame slots instead
+of adding work raised the repeatably freshness-safe experimental boundary to
+20 cameras at effective 4 FPS plus one device-wide RT-DETRv4 specialist FPS.
+RT-DETRv4 was not deployed because its results are not yet merged into the live
+tracker and alert path.
 
 ## Question
 
@@ -308,6 +310,45 @@ model server was restored. The next viable scheduler must use camera deadlines
 or known phase gaps and must skip a conditional RT-DETR opportunity when the
 remaining idle window is shorter than its measured runtime. It must not hold
 or queue an already-admitted primary request behind specialist work.
+
+## Phase-aware primary substitution — 2026-07-13
+
+The next experiment replaced scheduled primary slots instead of adding an
+independent specialist workload. Both benchmark processes used the same Jetson
+monotonic timestamp. The edge harness omitted selected YOLO slots and counted
+them as effective decisions only when the RT-DETR harness completed the exact
+same number of frames. A verifier rejects count mismatches, overloads,
+failures, stale RT groups, effective camera rates below 4 FPS, or primary
+latency above 250 ms.
+
+At 18 cameras, the grouped phase shape is `4+4+4+4+2`. Once every two seconds,
+the final YOLO batch-2 slot was replaced by RT-DETRv4-S batch-2. At 20 cameras,
+one four-camera phase was split into YOLO batch-2 plus RT-DETR batch-2. A PPE
+pass that coincided with a substituted slot was deferred by one camera frame,
+so total PPE coverage was preserved rather than dropped.
+
+| Topology | Duration | YOLO + RT effective decisions | Drops / failures | Effective minimum camera FPS | PPE passes | Primary p95 | Primary maximum | RT-DETR achieved | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 18 cameras, remainder substitution, run 1 | 60 s | 4,260 + 60 = 4,320 | 0 / 0 | 4.000 | 468 | 133.987 ms | 209.138 ms | 1.000 FPS | pass |
+| 18 cameras, remainder substitution, run 2 | 60 s | 4,260 + 60 = 4,320 | 0 / 0 | 4.000 | 468 | 128.284 ms | 223.588 ms | 1.000 FPS | pass |
+| 20 cameras, split-phase substitution, run 1 | 60 s | 4,740 + 60 = 4,800 | 0 / 0 | 4.000 | 520 | 149.169 ms | 232.960 ms | 1.000 FPS | pass |
+| 20 cameras, split-phase substitution, run 2 | 60 s | 4,740 + 60 = 4,800 | 0 / 0 | 4.000 | 520 | 153.003 ms | 234.691 ms | 1.000 FPS | pass |
+| 21 cameras, batch-2 split probe | 30 s | 2,490 + 30 = 2,520 | 0 / 0 | 4.000 | 273 | 181.924 ms | 264.536 ms | 1.000 FPS | reject tail |
+| 21 cameras, batch-1 singleton probe | 30 s | 2,490 + 30 = 2,520 | 0 / 0 | 4.000 | 273 | 175.492 ms | 265.010 ms | 1.000 FPS | reject tail |
+
+All four passing 18- and 20-camera runs had zero stale RT-DETR groups. The
+20-camera result is the current experimental conditional boundary. It is two
+cameras better than additive coexistence and only one camera below the current
+no-RT-DETR tier because the specialist consumes an existing detector slot
+instead of creating new GPU demand.
+
+This does not promote RT-DETR as the universal primary. Substitution should be
+limited to phone-qualified person tracks and relevant camera profiles, with
+tracking carrying context between frames. The labelled evidence establishes
+better phone recall and person association, not complete vehicle and animal
+parity. Production integration must route RT-DETR COCO records through the same
+coordinate scaling, tracker, zone, rule, and alert contracts before this tier
+can be deployed.
 
 ## Production restoration
 

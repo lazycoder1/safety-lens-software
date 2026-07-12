@@ -119,6 +119,25 @@ def main() -> int:
     parser.add_argument("--max-inflight", type=int, default=2)
     parser.add_argument("--admission-timeout", type=float, default=0.065)
     parser.add_argument(
+        "--start-at-monotonic",
+        type=float,
+        default=0.0,
+        help="Optional shared host monotonic timestamp for synchronized workloads",
+    )
+    parser.add_argument(
+        "--substitute-cameras",
+        nargs="*",
+        type=int,
+        default=[],
+        help="Camera indexes whose due primary slot is supplied by another detector",
+    )
+    parser.add_argument(
+        "--substitute-duty",
+        type=float,
+        default=0.0,
+        help="Fraction of primary slots replaced on --substitute-cameras",
+    )
+    parser.add_argument(
         "--transport",
         choices=("edge", "raw", "jpeg"),
         default="raw",
@@ -157,6 +176,18 @@ def main() -> int:
         parser.error("phone-probe-width must be between 160 and 1920")
     if args.max_inflight < 1 or args.admission_timeout < 0:
         parser.error("max-inflight must be positive and admission-timeout non-negative")
+    if args.start_at_monotonic < 0:
+        parser.error("start-at-monotonic must be non-negative")
+    if not 0 <= args.substitute_duty <= 1:
+        parser.error("substitute-duty must be between 0 and 1")
+    if len(set(args.substitute_cameras)) != len(args.substitute_cameras) or any(
+        camera < 0 or camera >= args.cameras for camera in args.substitute_cameras
+    ):
+        parser.error("substitute-cameras must be unique valid camera indexes")
+    if bool(args.substitute_cameras) != (args.substitute_duty > 0):
+        parser.error(
+            "substitute-cameras and a positive substitute-duty are required together"
+        )
     if not 20 <= args.jpeg_quality <= 100:
         parser.error("jpeg-quality must be between 20 and 100")
 
@@ -200,6 +231,7 @@ def main() -> int:
     period = 1.0 / args.fps
     probe_every = max(1, round(args.phone_probe_interval * args.fps))
     reports: list[dict] = [{} for _ in range(args.cameras)]
+    substitution_cameras = set(args.substitute_cameras)
 
     def post(
         camera_index: int,
@@ -310,6 +342,7 @@ def main() -> int:
         overloads = 0
         failures = 0
         specialist_requests = 0
+        substituted_requests = 0
         specialist_deferred = False
         frame_batch_size_hint = (
             _phase_group_cardinality(
@@ -343,6 +376,18 @@ def main() -> int:
                 specialist_deferred = True
             elif specialist:
                 specialist_deferred = False
+            substitute_primary = (
+                camera_index in substitution_cameras
+                and _specialist_due(sequence, args.substitute_duty)
+            )
+            if substitute_primary:
+                # The external detector supplies this primary decision. Keep
+                # PPE coverage by moving a coincident specialist pass forward
+                # one camera frame instead of silently dropping it.
+                specialist_deferred = specialist_deferred or specialist
+                substituted_requests += 1
+                sequence += 1
+                continue
             admitted_externally = edge_model_manager is None
             if admitted_externally and not admission.acquire(
                 timeout=args.admission_timeout
@@ -379,9 +424,14 @@ def main() -> int:
             "scheduled": sequence,
             "successes": len(latencies),
             "specialist_requests": specialist_requests,
+            "substituted_requests": substituted_requests,
             "overloads": overloads,
             "failures": failures,
             "achieved_fps": round(len(latencies) / args.duration, 3),
+            "effective_fps": round(
+                (len(latencies) + substituted_requests) / args.duration,
+                3,
+            ),
             "latencies_ms": latencies,
         }
 
@@ -393,7 +443,10 @@ def main() -> int:
     for thread in threads:
         thread.start()
     barrier.wait()
-    benchmark_start = time.monotonic() + 0.25
+    ready_at = time.monotonic()
+    benchmark_start = args.start_at_monotonic or ready_at + 0.25
+    if benchmark_start < ready_at + 0.05:
+        raise RuntimeError("shared benchmark start is not far enough in the future")
     start_event.set()
     for thread in threads:
         thread.join(timeout=args.duration + 15.0)
@@ -415,6 +468,11 @@ def main() -> int:
         "duration_seconds": args.duration,
         "specialist_duty_target": args.specialist_duty,
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
+        "substitute_cameras": sorted(substitution_cameras),
+        "substitute_duty_target": args.substitute_duty,
+        "substituted_requests": sum(
+            report["substituted_requests"] for report in reports
+        ),
         "phone_context_duty_target": args.phone_context_duty,
         "phone_probe_width": args.phone_probe_width,
         "avoid_phone_specialist_overlap": args.avoid_phone_specialist_overlap,
@@ -434,9 +492,14 @@ def main() -> int:
             else None
         ),
         "requests": len(all_latencies),
+        "effective_requests": len(all_latencies)
+        + sum(report["substituted_requests"] for report in reports),
         "overloads": sum(report["overloads"] for report in reports),
         "failures": sum(report["failures"] for report in reports),
         "minimum_camera_fps": min(report["achieved_fps"] for report in reports),
+        "minimum_effective_camera_fps": min(
+            report["effective_fps"] for report in reports
+        ),
         "latency_ms": {
             "median": round(statistics.median(all_latencies), 3)
             if all_latencies

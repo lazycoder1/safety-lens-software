@@ -31,6 +31,12 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--warmups", type=int, default=10)
     parser.add_argument(
+        "--start-at-monotonic",
+        type=float,
+        default=0.0,
+        help="Optional shared host monotonic timestamp for synchronized workloads",
+    )
+    parser.add_argument(
         "--stale-after",
         type=float,
         default=0.0,
@@ -43,10 +49,11 @@ def main() -> int:
         or args.duration <= 0
         or args.warmups < 1
         or args.stale_after < 0
+        or args.start_at_monotonic < 0
     ):
         parser.error(
             "target-fps, duration, and warmups must be positive; "
-            "stale-after must be non-negative"
+            "stale-after and start-at-monotonic must be non-negative"
         )
 
     frames = []
@@ -67,7 +74,10 @@ def main() -> int:
 
     group_interval = model.batch_size / args.target_fps
     stale_after = args.stale_after or group_interval
-    benchmark_start = time.monotonic() + 0.25
+    ready_at = time.monotonic()
+    benchmark_start = args.start_at_monotonic or ready_at + 0.25
+    if benchmark_start < ready_at + 0.05:
+        raise RuntimeError("shared benchmark start is not far enough in the future")
     deadline = benchmark_start + args.duration
     group_index = 0
     latencies_ms: list[float] = []
