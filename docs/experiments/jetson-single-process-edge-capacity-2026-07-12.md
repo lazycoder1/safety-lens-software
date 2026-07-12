@@ -69,6 +69,28 @@ camera then activates the high-resolution phone-probe path. That heavier mix
 was established in the prior admission experiment and was not promoted by this
 connection-warmup change.
 
+## Admission-wait follow-up
+
+The exact-edge benchmark exposed `--admission-timeout`, but edge mode initially
+left the production module's 65 ms constant unchanged. The harness now applies
+the requested timeout to the exact model-manager admission path before starting
+workers.
+
+Twelve cameras were retested with the 960px phone probe active once per second
+and 11.1% PPE specialist duty:
+
+| Admission wait | Completed | Drops / failures | Minimum FPS | Median | p95 | Maximum |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 65 ms | 1435 / 1440 | 5 / 0 | 3.967 | — | 94.636 ms | 136.665 ms |
+| 80 ms | 1431 / 1440 | 9 / 0 | 3.900 | 30.982 ms | 114.298 ms | 176.797 ms |
+| 100 ms | 1433 / 1440 | 7 / 0 | 3.900 | 32.529 ms | 114.222 ms | 199.303 ms |
+
+Longer waits convert contention into queue time without clearing the
+twelve-camera tier. Both candidates raised median and tail latency, and neither
+completed every scheduled job. Keep the 65 ms production wait. A clean twelfth
+camera requires less service work or real cross-camera batching, not a deeper
+client queue.
+
 ## Ingest versus inference
 
 Twelve simultaneous RTSP/NVDEC pipelines have separately sustained 8 decoded

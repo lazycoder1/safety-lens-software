@@ -130,6 +130,7 @@ def main() -> int:
         edge_settings = edge_model_manager._remote_settings()
         if not edge_settings.get("url"):
             parser.error("edge transport requires an enabled remote model server")
+        edge_model_manager._REMOTE_JOB_ADMISSION_WAIT_SECONDS = args.admission_timeout
     admission = threading.BoundedSemaphore(args.max_inflight)
     barrier = threading.Barrier(args.cameras + 1)
     start_event = threading.Event()
