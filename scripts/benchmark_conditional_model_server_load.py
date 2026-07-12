@@ -124,8 +124,14 @@ def main() -> int:
         import model_manager
 
         edge_model_manager = model_manager
+        edge_settings = edge_model_manager._remote_settings()
+        if not edge_settings.get("url"):
+            parser.error("edge transport requires an enabled remote model server")
     admission = threading.BoundedSemaphore(args.max_inflight)
     barrier = threading.Barrier(args.cameras + 1)
+    start_event = threading.Event()
+    prewarm_failures: list[int] = []
+    prewarm_lock = threading.Lock()
     period = 1.0 / args.fps
     probe_every = max(1, round(args.phone_probe_interval * args.fps))
     reports: list[dict] = [{} for _ in range(args.cameras)]
@@ -203,7 +209,19 @@ def main() -> int:
             raise RuntimeError("model server returned an incomplete grouped result")
 
     def run_camera(camera_index: int) -> None:
+        if edge_model_manager is not None:
+            try:
+                edge_model_manager._remote_get(
+                    "/api/health",
+                    timeout_seconds=2.0,
+                )
+            except Exception:
+                with prewarm_lock:
+                    prewarm_failures.append(camera_index)
         barrier.wait()
+        start_event.wait()
+        if camera_index in prewarm_failures:
+            return
         started = benchmark_start + _phase_offset(
             camera_index,
             args.cameras,
@@ -274,7 +292,7 @@ def main() -> int:
             "latencies_ms": latencies,
         }
 
-    benchmark_start = time.monotonic() + 0.25
+    benchmark_start = 0.0
     threads = [
         threading.Thread(target=run_camera, args=(index,), daemon=True)
         for index in range(args.cameras)
@@ -282,10 +300,16 @@ def main() -> int:
     for thread in threads:
         thread.start()
     barrier.wait()
+    benchmark_start = time.monotonic() + 0.25
+    start_event.set()
     for thread in threads:
         thread.join(timeout=args.duration + 15.0)
     if any(thread.is_alive() for thread in threads):
         raise RuntimeError("camera load worker did not stop")
+    if prewarm_failures:
+        raise RuntimeError(
+            f"edge session prewarm failed for {len(prewarm_failures)} camera workers"
+        )
 
     all_latencies = [
         latency

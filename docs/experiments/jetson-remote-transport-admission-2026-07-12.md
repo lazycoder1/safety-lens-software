@@ -92,6 +92,7 @@ slots reduced twelve-camera overloads from 10 to 8 of 1200, while p95 moved
 from 71.621 to 81.395 ms. It did not prove a new end-to-end planning limit.
 
 For that reason, production uses three slots for better near-saturation
-completion, but the published supported number remains eleven conditional
-cameras until twelve workers are exercised inside one edge process. Both live
-cameras accumulated zero inference drops or failures throughout the follow-up.
+completion. The later single-process edge-capacity experiment exercised the
+exact shared-admission path: eleven conditional cameras completed without a
+drop, while twelve shed five of 1440 jobs. Both live cameras accumulated zero
+inference drops or failures throughout the follow-up.

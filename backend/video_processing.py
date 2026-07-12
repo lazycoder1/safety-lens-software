@@ -2733,7 +2733,11 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                 return
             continue
 
-        inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{camera_id}-inference")
+        inference_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"{camera_id}-inference",
+            initializer=model_manager.warm_remote_inference_session,
+        )
         pending_inference = None
         next_inference_at = inference_scheduler.next_inference_slot(
             camera_id,

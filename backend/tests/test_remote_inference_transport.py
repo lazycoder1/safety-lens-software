@@ -39,6 +39,33 @@ def test_remote_http_session_is_reused_per_thread():
     assert worker_sessions[0] is not main_session
 
 
+def test_remote_inference_session_prewarm_uses_thread_local_health_get(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_get",
+        lambda path, *, timeout_seconds: captured.update(
+            path=path,
+            timeout_seconds=timeout_seconds,
+        ) or {"status": "ok"},
+    )
+
+    assert model_manager.warm_remote_inference_session() is True
+    assert captured == {"path": "/api/health", "timeout_seconds": 2.0}
+
+
+def test_remote_inference_session_prewarm_is_best_effort(monkeypatch):
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("offline")),
+    )
+
+    assert model_manager.warm_remote_inference_session() is False
+
+
 def test_edge_uses_raw_jpeg_transport(monkeypatch):
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
     captured = {}

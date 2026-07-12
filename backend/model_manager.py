@@ -446,6 +446,20 @@ def _remote_session():
     return session
 
 
+def warm_remote_inference_session() -> bool:
+    """Establish this inference thread's keep-alive socket before admission."""
+    if not is_remote_inference_enabled():
+        return False
+    try:
+        payload = _remote_get("/api/health", timeout_seconds=2.0)
+    except Exception:
+        # Camera inference remains retryable through its normal request path.
+        # A transient startup outage must not break the executor thread.
+        logger.debug("Remote inference session prewarm failed", exc_info=True)
+        return False
+    return isinstance(payload, dict)
+
+
 def _remote_get(path: str, *, timeout_seconds: float | None = None) -> dict[str, Any]:
     settings = _remote_settings()
     timeout = settings["timeout_seconds"] if timeout_seconds is None else max(0.25, float(timeout_seconds))
