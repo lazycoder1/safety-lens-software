@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 import alert_store
 import diagnostics
+import model_manager
 from config_manager import get_config
 from constants import VIDEO_DIR
 from routers.safety_rules import _ensure_safety_rules
@@ -121,6 +122,9 @@ def _build_health():
     snapshot["alerts_count"] = alert_store.get_stats()["total"]
     pipeline_stats = get_alert_pipeline_stats()
     snapshot["alertPipeline"] = pipeline_stats
+    snapshot["inferenceTransport"] = {
+        "primaryFrameBatch": model_manager.remote_primary_batch_stats(),
+    }
     _apply_persistence_health(snapshot, pipeline_stats)
     _apply_outbox_health(snapshot, pipeline_stats)
     return snapshot

@@ -2,16 +2,18 @@
 
 ## Decision
 
-Keep the implementation as an opt-in candidate and retain the known-good
-production containers until the fifteen-camera result is repeated. Pairing two
-compatible primary-only frames on the edge *before* remote admission moves the
-measured conditional Small-model inference boundary from fourteen to fifteen
-camera-equivalents at 4 FPS. Sixteen remains beyond the zero-drop boundary.
+Promote the opt-in profile on the tested Orin NX while retaining the previous
+containers for rollback. Pairing two compatible primary-only frames on the
+edge *before* remote admission moves the measured conditional Small-model
+inference boundary from fourteen to fifteen camera-equivalents at 4 FPS.
+Sixteen remains beyond the zero-drop boundary.
 
 This is an inference-capacity result, not a claim that fifteen simultaneous
-RTSP decoders have been validated. The two office cameras were restored after
-the isolated benchmark and both camera workers restarted on the known-good
-production images.
+RTSP decoders have been validated. The two office cameras are running the
+candidate with the previous production images preserved as stopped rollback
+containers. The reusable non-secret settings are recorded in
+`deploy/jetson-batch2.env.example`; generic defaults remain disabled because
+the batch-2 engine is an external, device-specific artifact.
 
 ## Architecture under test
 
@@ -51,8 +53,9 @@ scheduled evaluations, so it is not a supported tier.
 
 The harness exercised the real edge `predict_record_batches()` path with raw
 transport, 640px YOLO26 Small INT8 primary inference, 11.1% Small PPE duty,
-phone/PPE overlap avoidance, and 4 FPS per camera. Each run lasted 30 seconds.
-The candidate model server kept both batch-1 and batch-2 engines resident, so
+phone/PPE overlap avoidance, and 4 FPS per camera. Runs lasted 30 seconds unless
+the table identifies the 60-second promotion gate. The candidate model server
+kept both batch-1 and batch-2 engines resident, so
 the same-window disabled run is the fair comparison rather than an older warm
 baseline from a different server process.
 
@@ -63,22 +66,26 @@ baseline from a different server process.
 | 14 / 6 ms / 4 / 75 ms | 1679 / 1680 | 1 | 181 | 749 | 0 | 25.826 ms | 108.394 ms | 180.869 ms |
 | 14 / 6 ms / 4 / 100 ms | 1680 / 1680 | 0 | 182 | 749 | 0 | 25.842 ms | 109.277 ms | 182.230 ms |
 | 15 / 6 ms / 4 / 100 ms | 1800 / 1800 | 0 | 195 | 749 | 107 | 26.064 ms | 134.277 ms | 201.362 ms |
+| 15 / 6 ms / 4 / 100 ms, clean repeat | 1798 / 1800 | 2 | 193 | 749 | 107 | 25.950 ms | 137.744 ms | 211.313 ms |
+| 15 / 6 ms / 4 / 125 ms, 60 seconds | 3600 / 3600 | 0 | 390 | 1498 | 214 | 25.871 ms | 132.703 ms | 225.699 ms |
 | 16 / 6 ms / 4 / 100 ms | 1916 / 1920 | 4 | 204 | 856 | 0 | 26.068 ms | 141.926 ms | 226.679 ms |
 
-All 749 eligible pairs at fourteen and fifteen cameras executed without a
-pairing timeout. Fifteen is odd, so its remaining camera correctly exercised
-107 single-frame timeout fallbacks. The passing maximum latency of 201.362 ms
-remained inside the 250 ms frame period. Sixteen crossed the zero-drop gate
-despite all primary-only frames pairing.
+The first 100 ms fifteen-camera run passed, but its clean-start repeat dropped
+two specialist frames. It was therefore not promoted. Raising only the bounded
+admission wait to 125 ms completed a longer 3,600-request gate with all 390
+specialist calls preserved. Fifteen is odd, so its remaining camera correctly
+exercised 214 single-frame timeout fallbacks. The 225.699 ms maximum remained
+inside the 250 ms frame period. Sixteen crossed the zero-drop gate despite all
+primary-only frames pairing.
 
 ## Bottlenecks exposed
 
 1. Specialist bursts now define the boundary. Primary pairing removes most
    primary contention, but specialist frames deliberately bypass this batch
    engine and can still synchronize across paired cameras.
-2. Four bounded admission slots and a 100 ms wait are required for the passing
-   tier on this Jetson. Three slots or the former 75 ms bound still shed one or
-   more jobs in the same-window candidate runs.
+2. Four bounded admission slots and a 125 ms wait are required for the repeated
+   passing tier on this Jetson. The 100 ms setting produced one clean run but
+   shed two specialist jobs after a clean restart.
 3. The batch-2 engine is currently an external device artifact, not a versioned
    deployment asset. Enabling the edge rendezvous without the matching engine
    would merely serialize two batch-1 calls on the server and should not be
@@ -88,11 +95,32 @@ despite all primary-only frames pairing.
    corrected candidate included the current `tensorrt_engine.py`; immutable
    build provenance should replace ad-hoc candidate tag inheritance.
 
-## Promotion gate
+## Live-camera promotion
 
-Repeat the fifteen-camera 1800/1800 run from a clean candidate startup, then
-run the two live office cameras on the opt-in settings and require fresh frames,
-zero inference overloads/failures, correct alert routing, and successful
-rolling fallback with the batch route disabled. Until that completes, the
-checked-in defaults remain off and production stays on the certified
-fourteen-camera configuration.
+The exact pushed revision was rolled out with the old edge and model-server
+containers retained for atomic rollback. During the live soak:
+
+- both `cam1` and `cam2` stayed `online` and `running`;
+- 1,050 inference cycles completed with zero overload drops and zero failures;
+- recent detections included person, motorcycle, car, truck, bicycle, helmet,
+  bowl, and cup;
+- 15 real two-frame batch requests executed without a route or inference error;
+- 1,013 eligible requests used the bounded singleton fallback because the
+  static and active cameras ran at different motion-adaptive cadences;
+- the alert persistence worker remained accepting and failure-free, and the
+  delivery outbox had zero due work.
+
+An ordered model-server then edge restart reloaded the batch-2 engine, restored
+both cameras to `online`/`running`, executed seven new primary pairs in the
+first 30 seconds, and retained zero overloads and failures. The validated
+profile is also installed on the device as
+`/opt/rakshak-lens/jetson-batch2-850650b.env`.
+
+No new qualifying violation occurred during the soak, so it did not create a
+new semantic alert. The unchanged alert persistence and delivery path remained
+healthy; alert-positive behavior continues to rely on the existing rule tests
+and labelled replay gates rather than manufacturing a live external alert.
+
+The health endpoint now exposes non-sensitive primary-batch counters under
+`inferenceTransport.primaryFrameBatch`, making pairing, fallback, overload, and
+rolling-route behavior operationally visible.

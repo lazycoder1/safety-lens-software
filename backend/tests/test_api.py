@@ -174,6 +174,18 @@ def test_health():
         "rejectedSubscribers",
         "rejectedByCamera",
     } <= set(data["streamFanout"])
+    assert {
+        "enabled",
+        "wait_ms",
+        "target_imgsz",
+        "pending",
+        "eligible_requests",
+        "paired_requests",
+        "pairs_executed",
+        "timeout_fallbacks",
+        "route_fallbacks",
+        "admission_overloads",
+    } <= set(data["inferenceTransport"]["primaryFrameBatch"])
 
 
 def test_error_reporting_is_public_but_error_query_requires_auth():
