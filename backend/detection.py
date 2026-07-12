@@ -1438,7 +1438,10 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
 # Per-severity cooldown multipliers (base_cooldown * multiplier)
 SEVERITY_COOLDOWN_MULT = {"P1": 1, "P2": 1, "P3": 2, "P4": 5}
 
-_MOBILE_PHONE_PERSON_X_PADDING = 0.20
+# A hand-held phone often sits just outside the detector's torso-aligned person
+# box. Jetson evaluation found 0.25 to be the smallest padding that recovered
+# that pose without admitting any of the labelled desk/phone negatives.
+_MOBILE_PHONE_PERSON_X_PADDING = 0.25
 _MOBILE_PHONE_PERSON_Y_PADDING = 0.10
 _MOBILE_PHONE_MAX_PERSON_AREA_RATIO = 0.08
 _MOBILE_PHONE_MAX_PERSON_RELATIVE_Y = 0.85

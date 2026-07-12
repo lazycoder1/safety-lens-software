@@ -322,6 +322,21 @@ def test_check_violations_mobile_phone_keeps_valid_close_phone(mock_cfg):
     assert len(violations) == 1
 
 
+@mock.patch("detection.get_config")
+def test_check_violations_mobile_phone_accepts_phone_held_just_outside_person_box(mock_cfg):
+    mock_cfg.return_value = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone"])
+
+    violations = check_violations(
+        [
+            _det("person", bbox=[0, 0, 100, 200]),
+            _det("cell phone", bbox=[118, 60, 128, 80]),
+        ],
+        "cam1",
+    )
+
+    assert len(violations) == 1
+
+
 # ── check_violations — animal intrusion ──────────────────────────────────────
 
 @mock.patch("detection.get_config")
