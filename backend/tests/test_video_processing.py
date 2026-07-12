@@ -572,6 +572,36 @@ def test_detection_history_records_schedule_suppression_telemetry():
     assert state.camera_schedule_telemetry["cam_apron"]["scheduleState"] == schedule
 
 
+def test_detection_history_records_high_resolution_phone_probe_telemetry():
+    state.camera_detection_history.clear()
+    state.camera_schedule_telemetry.clear()
+    phone = {"class": "cell phone", "confidence": 0.58}
+
+    video_processing._record_detection_history(
+        "cam_phone",
+        [phone],
+        schedule_state={},
+        model_invocations={"coco_primary": 1},
+        runtime_probe_reason=video_processing._MOBILE_PHONE_PROBE_REASON,
+    )
+    video_processing._record_detection_history(
+        "cam_phone",
+        [],
+        schedule_state={},
+        model_invocations={"coco_primary": 1},
+        runtime_probe_reason=video_processing._MOBILE_PHONE_PROBE_REASON,
+    )
+
+    telemetry = state.camera_schedule_telemetry["cam_phone"]["phoneProbe"]
+    assert telemetry["probeCount"] == 2
+    assert telemetry["hitProbeCount"] == 1
+    assert telemetry["lastProbePhoneDetections"] == 0
+    assert telemetry["lastHitAt"]
+    assert state.camera_detection_history["cam_phone"][-1]["runtimeProbeReason"] == (
+        "mobile_phone_small_object_recall"
+    )
+
+
 def test_violation_window_ignores_stale_display_frames_for_detection_rules():
     windows = {"Missing gloves": [True, True]}
     video_processing._advance_violation_window(

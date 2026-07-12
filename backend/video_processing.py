@@ -108,6 +108,7 @@ _COCO_CLASS_TO_CAPABILITIES = {
     "suitcase": ["object_lifecycle"],
     "umbrella": ["object_lifecycle"],
 }
+_MOBILE_PHONE_PROBE_REASON = "mobile_phone_small_object_recall"
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
 PLATE_LOG_COOLDOWN_SECONDS = 10.0
@@ -842,6 +843,7 @@ def _record_detection_history(
     *,
     schedule_state: dict | None = None,
     model_invocations: dict | None = None,
+    runtime_probe_reason: str | None = None,
 ) -> None:
     class_counts: dict[str, int] = {}
     for detection in detections:
@@ -857,16 +859,34 @@ def _record_detection_history(
         sample["scheduleState"] = schedule_state
     if model_invocations is not None:
         sample["modelInvocationCounts"] = model_invocations
+    if runtime_probe_reason:
+        sample["runtimeProbeReason"] = runtime_probe_reason
     history = state.camera_detection_history.setdefault(camera_id, [])
     history.append(sample)
     if len(history) > DETECTION_HISTORY_LIMIT:
         del history[:-DETECTION_HISTORY_LIMIT]
     if schedule_state is not None or model_invocations is not None:
-        state.camera_schedule_telemetry[camera_id] = {
+        previous_telemetry = state.camera_schedule_telemetry.get(camera_id, {})
+        telemetry = {
             "timestamp": sample["timestamp"],
             "scheduleState": schedule_state or {},
             "modelInvocationCounts": model_invocations or {},
         }
+        phone_probe = dict(previous_telemetry.get("phoneProbe") or {})
+        if runtime_probe_reason == _MOBILE_PHONE_PROBE_REASON:
+            phone_detections = class_counts.get("cell phone", 0)
+            phone_probe.update(
+                probeCount=int(phone_probe.get("probeCount") or 0) + 1,
+                hitProbeCount=int(phone_probe.get("hitProbeCount") or 0),
+                lastProbeAt=sample["timestamp"],
+                lastProbePhoneDetections=phone_detections,
+            )
+            if phone_detections:
+                phone_probe["hitProbeCount"] = int(phone_probe.get("hitProbeCount") or 0) + 1
+                phone_probe["lastHitAt"] = sample["timestamp"]
+        if phone_probe:
+            telemetry["phoneProbe"] = phone_probe
+        state.camera_schedule_telemetry[camera_id] = telemetry
 
 
 def _advance_violation_window(
@@ -1330,7 +1350,7 @@ def _mobile_phone_probe_execution_plan(
 
     probed = deepcopy(execution_plan)
     probed["coco_inference_width_override"] = probe_width
-    probed["runtime_probe_reason"] = "mobile_phone_small_object_recall"
+    probed["runtime_probe_reason"] = _MOBILE_PHONE_PROBE_REASON
     return probed, True
 
 
@@ -2777,6 +2797,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             detections,
                             schedule_state=result["schedule_state"],
                             model_invocations=result["model_invocations"],
+                            runtime_probe_reason=result["scheduled_plan"].get("runtime_probe_reason"),
                         )
                         alert_confirmation_required = _process_detection_observation(
                             camera_id,

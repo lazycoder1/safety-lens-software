@@ -12,6 +12,31 @@ import video_processing
 _REAL_THREAD = threading.Thread
 
 
+def test_phone_probe_health_reports_runtime_counts_and_ages(monkeypatch):
+    monkeypatch.setattr(
+        state,
+        "camera_schedule_telemetry",
+        {
+            "cam-phone": {
+                "phoneProbe": {
+                    "probeCount": 7,
+                    "hitProbeCount": 2,
+                    "lastProbeAt": "1970-01-01T00:01:30+00:00",
+                    "lastHitAt": "1970-01-01T00:01:20+00:00",
+                    "lastProbePhoneDetections": 0,
+                }
+            }
+        },
+    )
+
+    health = diagnostics._phone_probe_health("cam-phone", 100.0)
+
+    assert health["probeCount"] == 7
+    assert health["hitProbeCount"] == 2
+    assert health["lastProbeAgeSeconds"] == 10.0
+    assert health["lastHitAgeSeconds"] == 20.0
+
+
 @pytest.fixture
 def lifecycle_state(monkeypatch):
     monkeypatch.setattr(state, "camera_threads", {})

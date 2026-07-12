@@ -71,6 +71,26 @@ def _registered_worker_is_alive(
         return False
 
 
+def _phone_probe_health(camera_id: str, now: float) -> dict:
+    phone_probe = dict(
+        state.camera_schedule_telemetry.get(camera_id, {}).get("phoneProbe") or {}
+    )
+    for timestamp_key, age_key in (
+        ("lastProbeAt", "lastProbeAgeSeconds"),
+        ("lastHitAt", "lastHitAgeSeconds"),
+    ):
+        timestamp = phone_probe.get(timestamp_key)
+        if not timestamp:
+            phone_probe[age_key] = None
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            phone_probe[age_key] = round(max(0.0, now - parsed.timestamp()), 1)
+        except (TypeError, ValueError):
+            phone_probe[age_key] = None
+    return phone_probe
+
+
 def _diagnostic_secret_values(config: dict) -> list[str]:
     values = [
         config.get("database", {}).get("url"),
@@ -165,6 +185,7 @@ def build_health_snapshot() -> dict:
                     "runtimeStatus": runtime_status,
                     "connection": connection_health,
                     "inference": state.get_camera_inference_health(cam_id),
+                    "phoneProbe": _phone_probe_health(cam_id, now),
                     "detectionsCount": len(state.camera_detections.get(cam_id, [])),
                     "stream": {
                         "sequence": stream_stats["sequence"],

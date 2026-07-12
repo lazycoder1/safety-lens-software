@@ -105,6 +105,9 @@ For example, a one-second phone probe needs at least 1 inference FPS. The
 default mobile-phone rule requires two person-associated detections; raise its
 per-rule threshold only after measuring site recall, because sparse probes and
 small-object misses otherwise prevent short phone-use events from alerting.
+`GET /api/health` exposes each camera's `phoneProbe` counters, last probe/hit
+timestamps, ages, and most recent phone count so probe execution can be
+distinguished from downstream alert confirmation or delivery failures.
 
 ## Enable it
 
