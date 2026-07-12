@@ -1,6 +1,7 @@
 import base64
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -819,6 +820,89 @@ def test_edge_groups_four_primary_frames_before_remote_admission(monkeypatch):
     assert batcher.stats()["pairs_executed"] == 1
 
 
+def test_edge_batch4_profile_flushes_two_primary_frames_via_batch2(monkeypatch):
+    batcher = model_manager._RemotePrimaryFrameBatcher(
+        0.1,
+        batch_size=4,
+        batch2_early_flush_seconds=0.005,
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch2_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_primary_batch2",
+        lambda items: {
+            "results": {
+                f"frame-{index}": [{"class_id": index}] for index in range(len(items))
+            }
+        },
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_primary_batch4",
+        lambda _items: pytest.fail("two frames must use the batch-2 route"),
+    )
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    requests = [
+        {
+            "request_id": f"camera-{index}",
+            "model_key": "coco_primary",
+            "conf": 0.35,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": [],
+        }
+        for index in range(2)
+    ]
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(batcher.submit, [frame] * 2, requests))
+    elapsed = time.monotonic() - started
+
+    assert [records[0]["class_id"] for handled, records in outcomes] == [0, 1]
+    assert all(handled for handled, _records in outcomes)
+    assert elapsed < 0.08
+    assert batcher.stats()["batch2_requests"] == 2
+    assert batcher.stats()["batch2_executed"] == 1
+    assert batcher.stats()["batch4_executed"] == 0
+    assert batcher.stats()["timeout_fallbacks"] == 0
+
+
+def test_edge_batch4_profile_does_not_flush_without_batch2_route(monkeypatch):
+    batcher = model_manager._RemotePrimaryFrameBatcher(
+        0.01,
+        batch_size=4,
+        batch2_early_flush_seconds=0.002,
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch2_route_may_run", lambda: False
+    )
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+    request = {
+        "request_id": "primary",
+        "model_key": "coco_primary",
+        "conf": 0.35,
+        "device": "cuda",
+        "imgsz": 640,
+        "classes": [],
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(batcher.submit, [frame] * 2, [request] * 2))
+
+    assert outcomes == [(False, []), (False, [])]
+    assert batcher.stats()["batch2_executed"] == 0
+    assert batcher.stats()["timeout_fallbacks"] == 2
+
+
 def test_edge_batch4_partial_primary_group_times_out_without_leaking(monkeypatch):
     batcher = model_manager._RemotePrimaryFrameBatcher(0.001, batch_size=4)
     monkeypatch.setattr(
@@ -1151,6 +1235,75 @@ def test_edge_groups_four_matching_primary_ppe_frames(monkeypatch):
     ] == [0, 1, 2, 3]
     assert batcher.stats()["paired_requests"] == 4
     assert batcher.stats()["pairs_executed"] == 1
+
+
+def test_edge_batch4_profile_flushes_two_specialist_frames_via_batch2(monkeypatch):
+    batcher = model_manager._RemoteSpecialistFrameBatcher(
+        0.1,
+        batch_size=4,
+        batch2_early_flush_seconds=0.005,
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch2_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_specialist_batch2",
+        lambda items: {
+            "results": {
+                f"frame-{index}": {
+                    "coco_primary": [{"class_id": index}],
+                    "ppe_specialist": [{"class_id": index + 10}],
+                }
+                for index in range(len(items))
+            }
+        },
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_specialist_batch4",
+        lambda _items: pytest.fail("two frames must use the batch-2 route"),
+    )
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    def requests(index):
+        return [
+            {
+                "request_id": f"coco-{index}",
+                "model_key": "coco_primary",
+                "conf": 0.15,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": [],
+            },
+            {
+                "request_id": f"ppe-{index}",
+                "model_key": "ppe_specialist",
+                "conf": 0.2,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": ["helmet"],
+            },
+        ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(batcher.submit, frame, requests(index)) for index in range(2)
+        ]
+        outcomes = [future.result() for future in futures]
+
+    assert all(handled for handled, _records in outcomes)
+    assert [
+        records[f"coco-{index}"][0]["class_id"]
+        for index, (_handled, records) in enumerate(outcomes)
+    ] == [0, 1]
+    assert batcher.stats()["batch2_requests"] == 2
+    assert batcher.stats()["batch2_executed"] == 1
+    assert batcher.stats()["batch4_executed"] == 0
+    assert batcher.stats()["timeout_fallbacks"] == 0
 
 
 def test_edge_specialist_batch_requires_matching_prompt_sets(monkeypatch):

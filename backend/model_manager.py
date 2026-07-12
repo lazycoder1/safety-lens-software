@@ -131,6 +131,12 @@ _REMOTE_SPECIALIST_BATCH_WAIT_SECONDS = _bounded_env_float(
 _REMOTE_FRAME_BATCH_SIZE = (
     4 if os.environ.get("SAFETYLENS_REMOTE_FRAME_BATCH_SIZE", "2").strip() == "4" else 2
 )
+_REMOTE_BATCH2_EARLY_FLUSH_SECONDS = _bounded_env_float(
+    "SAFETYLENS_REMOTE_BATCH2_EARLY_FLUSH_SECONDS",
+    0.0,
+    minimum=0.0,
+    maximum=0.02,
+)
 _COCO_LOW_RES_ENGINE_ENV = "SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE"
 _COCO_BATCH2_ENGINE_ENV = "SAFETYLENS_COCO_BATCH2_TENSORRT_ENGINE"
 _COCO_BATCH4_ENGINE_ENV = "SAFETYLENS_COCO_BATCH4_TENSORRT_ENGINE"
@@ -3521,11 +3527,21 @@ def _scale_remote_records_to_source(
 class _RemotePrimaryFrameBatcher:
     """Group compatible primary frames before remote admission."""
 
-    def __init__(self, wait_seconds: float, batch_size: int = 2):
+    def __init__(
+        self,
+        wait_seconds: float,
+        batch_size: int = 2,
+        batch2_early_flush_seconds: float = 0.0,
+    ):
         if batch_size not in {2, 4}:
             raise ValueError("Remote frame batch size must be 2 or 4")
         self.wait_seconds = wait_seconds
         self.batch_size = batch_size
+        self.batch2_early_flush_seconds = (
+            min(wait_seconds, max(0.0, batch2_early_flush_seconds))
+            if batch_size == 4
+            else 0.0
+        )
         self._lock = threading.Lock()
         self._pending: dict[tuple[float, str, int], list[dict[str, Any]]] = {}
         self._counters = {
@@ -3535,7 +3551,85 @@ class _RemotePrimaryFrameBatcher:
             "timeout_fallbacks": 0,
             "route_fallbacks": 0,
             "admission_overloads": 0,
+            "batch2_requests": 0,
+            "batch2_executed": 0,
+            "batch4_requests": 0,
+            "batch4_executed": 0,
         }
+
+    def _claim_batch(
+        self,
+        key: tuple[float, str, int],
+        current: dict[str, Any],
+        batch_size: int,
+    ) -> list[dict[str, Any]] | None:
+        with self._lock:
+            pending = self._pending.get(key)
+            if (
+                pending is None
+                or len(pending) != batch_size
+                or not any(item is current for item in pending)
+            ):
+                return None
+            items = self._pending.pop(key)
+            self._counters["paired_requests"] += batch_size
+            self._counters[f"batch{batch_size}_requests"] += batch_size
+            return items
+
+    def _execute_batch(
+        self,
+        items: list[dict[str, Any]],
+        batch_size: int,
+        current: dict[str, Any],
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        admitted = False
+        try:
+            admitted = _REMOTE_JOB_ADMISSION.acquire(
+                timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
+            )
+            if not admitted:
+                with self._lock:
+                    self._counters["admission_overloads"] += batch_size
+                raise RemoteInferenceOverloadedError(
+                    "Remote inference is at its bounded concurrency limit"
+                )
+            with self._lock:
+                self._counters["pairs_executed"] += 1
+                self._counters[f"batch{batch_size}_executed"] += 1
+            response = (
+                _remote_post_raw_primary_batch4(items)
+                if batch_size == 4
+                else _remote_post_raw_primary_batch2(items)
+            )
+            if response is None:
+                with self._lock:
+                    self._counters["route_fallbacks"] += batch_size
+            else:
+                results = response.get("results")
+                expected = {f"frame-{index}" for index in range(batch_size)}
+                if not isinstance(results, dict) or set(results) != expected:
+                    raise RuntimeError(
+                        "Model server returned an incomplete primary frame batch"
+                    )
+                for index, item in enumerate(items):
+                    request_id = f"frame-{index}"
+                    item["records"] = _scale_remote_records_to_source(
+                        results[request_id],
+                        item["source_shape"],
+                        item["inference_shape"],
+                    )
+                    item["handled"] = True
+        except Exception as exc:
+            for item in items:
+                item["error"] = exc
+        finally:
+            if admitted:
+                _REMOTE_JOB_ADMISSION.release()
+            for item in items:
+                item["event"].set()
+        if current["error"] is not None:
+            raise current["error"]
+        return current["handled"], current["records"]
 
     def _eligible(self, request: dict[str, Any]) -> bool:
         route_available = (
@@ -3581,57 +3675,24 @@ class _RemotePrimaryFrameBatcher:
             if len(pending) == self.batch_size:
                 items = self._pending.pop(key)
                 self._counters["paired_requests"] += self.batch_size
+                self._counters[f"batch{self.batch_size}_requests"] += self.batch_size
 
         if items is not None:
-            admitted = False
-            try:
-                admitted = _REMOTE_JOB_ADMISSION.acquire(
-                    timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
-                )
-                if not admitted:
-                    with self._lock:
-                        self._counters["admission_overloads"] += self.batch_size
-                    raise RemoteInferenceOverloadedError(
-                        "Remote inference is at its bounded concurrency limit"
-                    )
-                with self._lock:
-                    self._counters["pairs_executed"] += 1
-                response = (
-                    _remote_post_raw_primary_batch4(items)
-                    if self.batch_size == 4
-                    else _remote_post_raw_primary_batch2(items)
-                )
-                if response is None:
-                    with self._lock:
-                        self._counters["route_fallbacks"] += self.batch_size
-                else:
-                    results = response.get("results")
-                    expected = {f"frame-{index}" for index in range(self.batch_size)}
-                    if not isinstance(results, dict) or set(results) != expected:
-                        raise RuntimeError(
-                            "Model server returned an incomplete primary frame batch"
-                        )
-                    for index, item in enumerate(items):
-                        request_id = f"frame-{index}"
-                        item["records"] = _scale_remote_records_to_source(
-                            results[request_id],
-                            item["source_shape"],
-                            item["inference_shape"],
-                        )
-                        item["handled"] = True
-            except Exception as exc:
-                for item in items:
-                    item["error"] = exc
-            finally:
-                if admitted:
-                    _REMOTE_JOB_ADMISSION.release()
-                for item in items:
-                    item["event"].set()
-            if current["error"] is not None:
-                raise current["error"]
-            return current["handled"], current["records"]
+            return self._execute_batch(items, self.batch_size, current)
 
-        if current["event"].wait(self.wait_seconds):
+        wait_started = time.monotonic()
+        if self.batch2_early_flush_seconds > 0:
+            if current["event"].wait(self.batch2_early_flush_seconds):
+                if current["error"] is not None:
+                    raise current["error"]
+                return current["handled"], current["records"]
+            if _remote_primary_batch2_route_may_run():
+                items = self._claim_batch(key, current, 2)
+                if items is not None:
+                    return self._execute_batch(items, 2, current)
+
+        remaining_wait = max(0.0, self.wait_seconds - (time.monotonic() - wait_started))
+        if current["event"].wait(remaining_wait):
             if current["error"] is not None:
                 raise current["error"]
             return current["handled"], current["records"]
@@ -3658,6 +3719,9 @@ class _RemotePrimaryFrameBatcher:
                 "enabled": self.wait_seconds > 0,
                 "batch_size": self.batch_size,
                 "wait_ms": round(self.wait_seconds * 1000, 3),
+                "batch2_early_flush_ms": round(
+                    self.batch2_early_flush_seconds * 1000, 3
+                ),
                 "target_imgsz": _REMOTE_PRIMARY_BATCH_IMGSZ,
                 "pending": sum(len(items) for items in self._pending.values()),
                 **self._counters,
@@ -3667,6 +3731,7 @@ class _RemotePrimaryFrameBatcher:
 _REMOTE_PRIMARY_FRAME_BATCHER = _RemotePrimaryFrameBatcher(
     _REMOTE_PRIMARY_BATCH_WAIT_SECONDS,
     _REMOTE_FRAME_BATCH_SIZE,
+    _REMOTE_BATCH2_EARLY_FLUSH_SECONDS,
 )
 
 
@@ -3677,11 +3742,21 @@ def remote_primary_batch_stats() -> dict[str, Any]:
 class _RemoteSpecialistFrameBatcher:
     """Group matching primary+PPE frames before remote admission."""
 
-    def __init__(self, wait_seconds: float, batch_size: int = 2):
+    def __init__(
+        self,
+        wait_seconds: float,
+        batch_size: int = 2,
+        batch2_early_flush_seconds: float = 0.0,
+    ):
         if batch_size not in {2, 4}:
             raise ValueError("Remote frame batch size must be 2 or 4")
         self.wait_seconds = wait_seconds
         self.batch_size = batch_size
+        self.batch2_early_flush_seconds = (
+            min(wait_seconds, max(0.0, batch2_early_flush_seconds))
+            if batch_size == 4
+            else 0.0
+        )
         self._lock = threading.Lock()
         self._pending: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         self._counters = {
@@ -3691,7 +3766,97 @@ class _RemoteSpecialistFrameBatcher:
             "timeout_fallbacks": 0,
             "route_fallbacks": 0,
             "admission_overloads": 0,
+            "batch2_requests": 0,
+            "batch2_executed": 0,
+            "batch4_requests": 0,
+            "batch4_executed": 0,
         }
+
+    def _claim_batch(
+        self,
+        key: tuple[Any, ...],
+        current: dict[str, Any],
+        batch_size: int,
+    ) -> list[dict[str, Any]] | None:
+        with self._lock:
+            pending = self._pending.get(key)
+            if (
+                pending is None
+                or len(pending) != batch_size
+                or not any(item is current for item in pending)
+            ):
+                return None
+            items = self._pending.pop(key)
+            self._counters["paired_requests"] += batch_size
+            self._counters[f"batch{batch_size}_requests"] += batch_size
+            return items
+
+    def _execute_batch(
+        self,
+        items: list[dict[str, Any]],
+        batch_size: int,
+        current: dict[str, Any],
+    ) -> tuple[bool, dict[str, list[dict[str, Any]]]]:
+        admitted = False
+        try:
+            admitted = _REMOTE_JOB_ADMISSION.acquire(
+                timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
+            )
+            if not admitted:
+                with self._lock:
+                    self._counters["admission_overloads"] += batch_size
+                raise RemoteInferenceOverloadedError(
+                    "Remote inference is at its bounded concurrency limit"
+                )
+            with self._lock:
+                self._counters["pairs_executed"] += 1
+                self._counters[f"batch{batch_size}_executed"] += 1
+            response = (
+                _remote_post_raw_specialist_batch4(items)
+                if batch_size == 4
+                else _remote_post_raw_specialist_batch2(items)
+            )
+            if response is None:
+                with self._lock:
+                    self._counters["route_fallbacks"] += batch_size
+            else:
+                results = response.get("results")
+                expected = {f"frame-{index}" for index in range(batch_size)}
+                if not isinstance(results, dict) or set(results) != expected:
+                    raise RuntimeError(
+                        "Model server returned an incomplete specialist frame batch"
+                    )
+                for index, item in enumerate(items):
+                    frame_results = results[f"frame-{index}"]
+                    if not isinstance(frame_results, dict) or set(frame_results) != {
+                        "coco_primary",
+                        "ppe_specialist",
+                    }:
+                        raise RuntimeError(
+                            "Model server returned incomplete specialist results"
+                        )
+                    item["records"] = {
+                        item["requests"][model_key]["request_id"]: (
+                            _scale_remote_records_to_source(
+                                records,
+                                item["source_shape"],
+                                item["inference_shape"],
+                            )
+                        )
+                        for model_key, records in frame_results.items()
+                    }
+                    item["handled"] = True
+        except Exception as exc:
+            for item in items:
+                item["error"] = exc
+        finally:
+            if admitted:
+                _REMOTE_JOB_ADMISSION.release()
+            for item in items:
+                item["event"].set()
+        if current["error"] is not None:
+            raise current["error"]
+        return current["handled"], current["records"]
 
     def _request_map(
         self,
@@ -3761,71 +3926,24 @@ class _RemoteSpecialistFrameBatcher:
             if len(pending) == self.batch_size:
                 items = self._pending.pop(key)
                 self._counters["paired_requests"] += self.batch_size
+                self._counters[f"batch{self.batch_size}_requests"] += self.batch_size
 
         if items is not None:
-            admitted = False
-            try:
-                admitted = _REMOTE_JOB_ADMISSION.acquire(
-                    timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
-                )
-                if not admitted:
-                    with self._lock:
-                        self._counters["admission_overloads"] += self.batch_size
-                    raise RemoteInferenceOverloadedError(
-                        "Remote inference is at its bounded concurrency limit"
-                    )
-                with self._lock:
-                    self._counters["pairs_executed"] += 1
-                response = (
-                    _remote_post_raw_specialist_batch4(items)
-                    if self.batch_size == 4
-                    else _remote_post_raw_specialist_batch2(items)
-                )
-                if response is None:
-                    with self._lock:
-                        self._counters["route_fallbacks"] += self.batch_size
-                else:
-                    results = response.get("results")
-                    expected = {f"frame-{index}" for index in range(self.batch_size)}
-                    if not isinstance(results, dict) or set(results) != expected:
-                        raise RuntimeError(
-                            "Model server returned an incomplete specialist frame batch"
-                        )
-                    for index, item in enumerate(items):
-                        frame_results = results[f"frame-{index}"]
-                        if not isinstance(frame_results, dict) or set(
-                            frame_results
-                        ) != {
-                            "coco_primary",
-                            "ppe_specialist",
-                        }:
-                            raise RuntimeError(
-                                "Model server returned incomplete specialist results"
-                            )
-                        item["records"] = {
-                            item["requests"][model_key]["request_id"]: (
-                                _scale_remote_records_to_source(
-                                    records,
-                                    item["source_shape"],
-                                    item["inference_shape"],
-                                )
-                            )
-                            for model_key, records in frame_results.items()
-                        }
-                        item["handled"] = True
-            except Exception as exc:
-                for item in items:
-                    item["error"] = exc
-            finally:
-                if admitted:
-                    _REMOTE_JOB_ADMISSION.release()
-                for item in items:
-                    item["event"].set()
-            if current["error"] is not None:
-                raise current["error"]
-            return current["handled"], current["records"]
+            return self._execute_batch(items, self.batch_size, current)
 
-        if current["event"].wait(self.wait_seconds):
+        wait_started = time.monotonic()
+        if self.batch2_early_flush_seconds > 0:
+            if current["event"].wait(self.batch2_early_flush_seconds):
+                if current["error"] is not None:
+                    raise current["error"]
+                return current["handled"], current["records"]
+            if _remote_specialist_batch2_route_may_run():
+                items = self._claim_batch(key, current, 2)
+                if items is not None:
+                    return self._execute_batch(items, 2, current)
+
+        remaining_wait = max(0.0, self.wait_seconds - (time.monotonic() - wait_started))
+        if current["event"].wait(remaining_wait):
             if current["error"] is not None:
                 raise current["error"]
             return current["handled"], current["records"]
@@ -3850,6 +3968,9 @@ class _RemoteSpecialistFrameBatcher:
                 "enabled": self.wait_seconds > 0,
                 "batch_size": self.batch_size,
                 "wait_ms": round(self.wait_seconds * 1000, 3),
+                "batch2_early_flush_ms": round(
+                    self.batch2_early_flush_seconds * 1000, 3
+                ),
                 "target_imgsz": _REMOTE_PRIMARY_BATCH_IMGSZ,
                 "pending": sum(len(items) for items in self._pending.values()),
                 **self._counters,
@@ -3859,6 +3980,7 @@ class _RemoteSpecialistFrameBatcher:
 _REMOTE_SPECIALIST_FRAME_BATCHER = _RemoteSpecialistFrameBatcher(
     _REMOTE_SPECIALIST_BATCH_WAIT_SECONDS,
     _REMOTE_FRAME_BATCH_SIZE,
+    _REMOTE_BATCH2_EARLY_FLUSH_SECONDS,
 )
 
 
