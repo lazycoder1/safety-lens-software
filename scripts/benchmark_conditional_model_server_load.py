@@ -73,7 +73,14 @@ def main() -> int:
     parser.add_argument("--specialist-duty", type=float, default=0.111)
     parser.add_argument("--phone-probe-interval", type=float, default=1.0)
     parser.add_argument("--max-inflight", type=int, default=2)
-    parser.add_argument("--admission-timeout", type=float, default=0.05)
+    parser.add_argument("--admission-timeout", type=float, default=0.065)
+    parser.add_argument(
+        "--transport",
+        choices=("raw", "jpeg"),
+        default="raw",
+        help="Frame transport used for the grouped model-server request.",
+    )
+    parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument(
         "--phase-mode",
         choices=("aligned", "paired", "staggered"),
@@ -87,6 +94,8 @@ def main() -> int:
         parser.error("specialist-duty must be between 0 and 1")
     if args.max_inflight < 1 or args.admission_timeout < 0:
         parser.error("max-inflight must be positive and admission-timeout non-negative")
+    if not 20 <= args.jpeg_quality <= 100:
+        parser.error("jpeg-quality must be between 20 and 100")
 
     frame_sets: list[dict[int, np.ndarray]] = []
     for path in args.frames:
@@ -129,19 +138,37 @@ def main() -> int:
                     "classes": PPE_CLASSES,
                 }
             )
-        height, width, channels = frame.shape
-        headers = {
-            "Content-Type": "application/octet-stream",
-            "X-Rakshak-Inference-Batch": json.dumps(batch, separators=(",", ":")),
-            "X-Rakshak-Frame-Width": str(width),
-            "X-Rakshak-Frame-Height": str(height),
-            "X-Rakshak-Frame-Channels": str(channels),
-        }
+        batch_header = json.dumps(batch, separators=(",", ":"))
+        if args.transport == "raw":
+            height, width, channels = frame.shape
+            body = frame.tobytes()
+            endpoint = "/api/infer/raw/batch"
+            headers = {
+                "Content-Type": "application/octet-stream",
+                "X-Rakshak-Inference-Batch": batch_header,
+                "X-Rakshak-Frame-Width": str(width),
+                "X-Rakshak-Frame-Height": str(height),
+                "X-Rakshak-Frame-Channels": str(channels),
+            }
+        else:
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
+            )
+            if not ok:
+                raise RuntimeError("could not encode benchmark frame")
+            body = encoded.tobytes()
+            endpoint = "/api/infer/jpeg/batch"
+            headers = {
+                "Content-Type": "image/jpeg",
+                "X-Rakshak-Inference-Batch": batch_header,
+            }
         if token:
             headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(
-            f"{args.url.rstrip('/')}/api/infer/raw/batch",
-            data=frame.tobytes(),
+            f"{args.url.rstrip('/')}{endpoint}",
+            data=body,
             headers=headers,
             method="POST",
         )
@@ -232,6 +259,9 @@ def main() -> int:
         "duration_seconds": args.duration,
         "specialist_duty_target": args.specialist_duty,
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
+        "admission_timeout_seconds": args.admission_timeout,
+        "transport": args.transport,
+        "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,
         "phase_mode": args.phase_mode,
         "requests": len(all_latencies),
         "overloads": sum(report["overloads"] for report in reports),

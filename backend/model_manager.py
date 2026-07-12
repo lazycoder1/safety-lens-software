@@ -50,7 +50,10 @@ _REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="remote-model-pair",
 )
 _REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(2)
-_REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.05
+# The phase scheduler keeps normal camera arrivals staggered. A 65 ms bounded
+# wait absorbed the remaining Jetson service-time jitter at ten 4 FPS camera
+# equivalents (960/960 requests) while eleven cameras still shed overload.
+_REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.065
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
 _REMOTE_RAW_TRANSPORT_ENV = "SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT"
