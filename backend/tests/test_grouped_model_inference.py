@@ -183,9 +183,10 @@ def test_other_ppe_gate_requires_person_inside_ppe_evaluation_zone():
     assert active is plan
 
 
-def test_mobile_phone_probe_periodically_overrides_only_coco_width():
+def test_mobile_phone_probe_defers_ppe_without_losing_the_due_probe():
     plan = {
         "capabilities": ["mobile_phone", "rider_helmet_required"],
+        "required_model_keys": ["coco_primary", "ppe_specialist"],
         "run_coco_primary": True,
         "run_ppe_specialist": True,
         "ppe_prompt_terms": ["helmet"],
@@ -224,10 +225,18 @@ def test_mobile_phone_probe_periodically_overrides_only_coco_width():
     assert probed is not plan
     assert probed["coco_inference_width_override"] == 960
     assert probed["runtime_probe_reason"] == "mobile_phone_small_object_recall"
+    assert probed["run_ppe_specialist"] is False
+    assert probed["ppe_prompt_terms"] == []
+    assert probed["required_model_keys"] == ["coco_primary"]
+    assert probed["runtime_deferred_model_keys"] == ["ppe_specialist"]
+    assert probed["runtime_specialist_deferral_reason"] == (
+        "deferred_for_mobile_phone_probe"
+    )
     assert waiting is plan
     assert waiting_due is False
     assert waiting_suppressed is False
     assert "coco_inference_width_override" not in plan
+    assert plan["run_ppe_specialist"] is True
 
 
 def test_mobile_phone_probe_waits_for_primary_person_context():

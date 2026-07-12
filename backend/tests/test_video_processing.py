@@ -629,6 +629,25 @@ def test_detection_history_records_context_suppressed_phone_probe_telemetry():
     assert telemetry["lastContextSuppressedAt"]
 
 
+def test_detection_history_records_phone_probe_specialist_deferral():
+    state.camera_detection_history.clear()
+    state.camera_schedule_telemetry.clear()
+
+    video_processing._record_detection_history(
+        "cam_phone",
+        [],
+        schedule_state={},
+        model_invocations={"coco_primary": 1, "ppe_specialist": 0},
+        runtime_probe_reason=video_processing._MOBILE_PHONE_PROBE_REASON,
+        runtime_deferred_model_keys=["ppe_specialist"],
+    )
+
+    sample = state.camera_detection_history["cam_phone"][-1]
+    telemetry = state.camera_schedule_telemetry["cam_phone"]
+    assert sample["runtimeDeferredModelKeys"] == ["ppe_specialist"]
+    assert telemetry["runtimeDeferredModelKeys"] == ["ppe_specialist"]
+
+
 def test_violation_window_ignores_stale_display_frames_for_detection_rules():
     windows = {"Missing gloves": [True, True]}
     video_processing._advance_violation_window(
@@ -655,6 +674,20 @@ def test_violation_window_advances_on_fresh_detection_observation():
     assert windows["Missing gloves"] == [True, True, True]
 
 
+def test_violation_window_preserves_ppe_votes_when_specialist_is_deferred():
+    windows = {"Missing gloves": [True, True]}
+    video_processing._advance_violation_window(
+        windows,
+        {},
+        window_size=15,
+        fresh_detection_evaluated=True,
+        fresh_fall_evaluated=False,
+        fresh_ppe_evaluated=False,
+    )
+
+    assert windows["Missing gloves"] == [True, True]
+
+
 def test_empty_violation_observation_does_not_clear_on_stale_display_frame():
     windows = {"Missing gloves": [True]}
     active = {"Missing gloves"}
@@ -665,6 +698,23 @@ def test_empty_violation_observation_does_not_clear_on_stale_display_frame():
         window_size=15,
         fresh_detection_evaluated=False,
         fresh_fall_evaluated=False,
+    )
+
+    assert windows["Missing gloves"] == [True]
+    assert active == {"Missing gloves"}
+
+
+def test_empty_primary_observation_does_not_clear_deferred_ppe_rule():
+    windows = {"Missing gloves": [True]}
+    active = {"Missing gloves"}
+
+    video_processing._record_empty_violation_observation(
+        windows,
+        active,
+        window_size=15,
+        fresh_detection_evaluated=True,
+        fresh_fall_evaluated=False,
+        fresh_ppe_evaluated=False,
     )
 
     assert windows["Missing gloves"] == [True]
@@ -841,7 +891,11 @@ def test_alert_burst_encodes_one_snapshot_pair_per_observation(monkeypatch):
         None,
         [{"class": "person", "confidence": 0.9, "bbox": [1, 1, 20, 40]}],
         None,
-        {"capabilities": [], "run_pose_specialist": False},
+        {
+            "capabilities": [],
+            "run_pose_specialist": False,
+            "run_ppe_specialist": True,
+        },
         {},
         {"global": {"jpeg_quality": 70}},
         last_alert_by_rule={},
@@ -911,7 +965,11 @@ def test_failed_alert_submission_does_not_activate_or_cool_down_incident(monkeyp
             None,
             [{"class": "person", "confidence": 0.9, "bbox": [1, 1, 20, 40]}],
             None,
-            {"capabilities": [], "run_pose_specialist": False},
+            {
+                "capabilities": [],
+                "run_pose_specialist": False,
+                "run_ppe_specialist": True,
+            },
             {},
             {"global": {"jpeg_quality": 70}},
             last_alert_by_rule=last_alert_by_rule,

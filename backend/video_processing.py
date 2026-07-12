@@ -111,6 +111,7 @@ _COCO_CLASS_TO_CAPABILITIES = {
 }
 _MOBILE_PHONE_PROBE_REASON = "mobile_phone_small_object_recall"
 _MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON = "awaiting_primary_person_context"
+_PPE_PHONE_PROBE_DEFERRAL_REASON = "deferred_for_mobile_phone_probe"
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
 PLATE_LOG_COOLDOWN_SECONDS = 10.0
@@ -847,6 +848,7 @@ def _record_detection_history(
     model_invocations: dict | None = None,
     runtime_probe_reason: str | None = None,
     runtime_probe_suppression_reason: str | None = None,
+    runtime_deferred_model_keys: list[str] | None = None,
 ) -> None:
     class_counts: dict[str, int] = {}
     for detection in detections:
@@ -866,6 +868,8 @@ def _record_detection_history(
         sample["runtimeProbeReason"] = runtime_probe_reason
     if runtime_probe_suppression_reason:
         sample["runtimeProbeSuppressionReason"] = runtime_probe_suppression_reason
+    if runtime_deferred_model_keys:
+        sample["runtimeDeferredModelKeys"] = list(runtime_deferred_model_keys)
     history = state.camera_detection_history.setdefault(camera_id, [])
     history.append(sample)
     if len(history) > DETECTION_HISTORY_LIMIT:
@@ -877,6 +881,10 @@ def _record_detection_history(
             "scheduleState": schedule_state or {},
             "modelInvocationCounts": model_invocations or {},
         }
+        if runtime_deferred_model_keys:
+            telemetry["runtimeDeferredModelKeys"] = list(
+                runtime_deferred_model_keys
+            )
         phone_probe = dict(previous_telemetry.get("phoneProbe") or {})
         if runtime_probe_reason == _MOBILE_PHONE_PROBE_REASON:
             phone_detections = class_counts.get("cell phone", 0)
@@ -913,16 +921,21 @@ def _advance_violation_window(
     window_size: int,
     fresh_detection_evaluated: bool,
     fresh_fall_evaluated: bool,
+    fresh_ppe_evaluated: bool = True,
 ) -> None:
     """Advance confirmation windows only when the source model produced a fresh observation."""
     all_tracked = set(violation_window) | set(current_violation_rules)
     for rule_key in all_tracked:
+        observed = rule_key in current_violation_rules
         if rule_key == "Fall Detected":
             if not fresh_fall_evaluated:
                 continue
-        elif not fresh_detection_evaluated:
-            continue
-        violation_window.setdefault(rule_key, []).append(rule_key in current_violation_rules)
+        else:
+            if not fresh_detection_evaluated:
+                continue
+            if rule_key.startswith("Missing ") and not fresh_ppe_evaluated:
+                continue
+        violation_window.setdefault(rule_key, []).append(observed)
         if len(violation_window[rule_key]) > window_size:
             violation_window[rule_key] = violation_window[rule_key][-window_size:]
 
@@ -934,11 +947,14 @@ def _record_empty_violation_observation(
     window_size: int,
     fresh_detection_evaluated: bool,
     fresh_fall_evaluated: bool,
+    fresh_ppe_evaluated: bool = True,
 ) -> None:
     for rule_key in list(violation_window):
         if rule_key == "Fall Detected":
             if not fresh_fall_evaluated:
                 continue
+        elif rule_key.startswith("Missing ") and not fresh_ppe_evaluated:
+            continue
         elif not fresh_detection_evaluated:
             continue
         violation_window[rule_key].append(False)
@@ -1387,6 +1403,23 @@ def _mobile_phone_probe_execution_plan(
     probed = deepcopy(execution_plan)
     probed["coco_inference_width_override"] = probe_width
     probed["runtime_probe_reason"] = _MOBILE_PHONE_PROBE_REASON
+    if probed.get("run_ppe_specialist"):
+        probed["run_ppe_specialist"] = False
+        probed["ppe_prompt_terms"] = []
+        probed["required_model_keys"] = [
+            model_key
+            for model_key in probed.get("required_model_keys", [])
+            if model_key != "ppe_specialist"
+        ]
+        deferred_model_keys = list(
+            probed.get("runtime_deferred_model_keys") or []
+        )
+        if "ppe_specialist" not in deferred_model_keys:
+            deferred_model_keys.append("ppe_specialist")
+        probed["runtime_deferred_model_keys"] = deferred_model_keys
+        probed["runtime_specialist_deferral_reason"] = (
+            _PPE_PHONE_PROBE_DEFERRAL_REASON
+        )
     return probed, True, False
 
 
@@ -2486,6 +2519,10 @@ def _process_detection_observation(
     has_fall_candidates = False
     fall_candidates = []
     fresh_fall_evaluated = scheduled_plan.get("run_pose_specialist") and fresh_pose_results is not None
+    fresh_ppe_evaluated = bool(
+        scheduled_plan.get("run_ppe_specialist")
+        or scheduled_plan.get("run_ppe_closed_set_candidate")
+    )
     if fresh_fall_evaluated:
         fall_candidates = check_fall_detections(fresh_pose_results, camera_id, frame)
         has_fall_candidates = len(fall_candidates) > 0
@@ -2511,6 +2548,7 @@ def _process_detection_observation(
             window_size=window_size,
             fresh_detection_evaluated=True,
             fresh_fall_evaluated=fresh_fall_evaluated,
+            fresh_ppe_evaluated=fresh_ppe_evaluated,
         )
 
         for rule_key in list(active_violations):
@@ -2617,6 +2655,7 @@ def _process_detection_observation(
             window_size=window_size,
             fresh_detection_evaluated=True,
             fresh_fall_evaluated=fresh_fall_evaluated,
+            fresh_ppe_evaluated=fresh_ppe_evaluated,
         )
     return _alert_confirmation_required(active_violations, violation_window)
 
@@ -2848,6 +2887,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             runtime_probe_suppression_reason=result[
                                 "scheduled_plan"
                             ].get("runtime_probe_suppression_reason"),
+                            runtime_deferred_model_keys=result[
+                                "scheduled_plan"
+                            ].get("runtime_deferred_model_keys"),
                         )
                         alert_confirmation_required = _process_detection_observation(
                             camera_id,

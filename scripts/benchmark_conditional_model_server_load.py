@@ -74,6 +74,11 @@ def main() -> int:
     parser.add_argument("--phone-probe-interval", type=float, default=1.0)
     parser.add_argument("--phone-probe-width", type=int, default=960)
     parser.add_argument(
+        "--avoid-phone-specialist-overlap",
+        action="store_true",
+        help="Defer a due specialist pass by one frame when a phone probe is due.",
+    )
+    parser.add_argument(
         "--phone-context-duty",
         type=float,
         default=1.0,
@@ -238,6 +243,7 @@ def main() -> int:
         overloads = 0
         failures = 0
         specialist_requests = 0
+        specialist_deferred = False
         while True:
             scheduled = started + sequence * period
             if scheduled >= deadline:
@@ -245,13 +251,21 @@ def main() -> int:
             remaining = scheduled - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
-            specialist = _specialist_due(sequence, args.specialist_duty)
+            specialist = specialist_deferred or _specialist_due(
+                sequence,
+                args.specialist_duty,
+            )
             phone_probe_slot = sequence % probe_every == 0
             phone_probe_index = sequence // probe_every
             phone_probe = phone_probe_slot and _specialist_due(
                 phone_probe_index + camera_index,
                 args.phone_context_duty,
             )
+            if args.avoid_phone_specialist_overlap and phone_probe and specialist:
+                specialist = False
+                specialist_deferred = True
+            elif specialist:
+                specialist_deferred = False
             admitted_externally = edge_model_manager is None
             if admitted_externally and not admission.acquire(
                 timeout=args.admission_timeout
@@ -330,6 +344,7 @@ def main() -> int:
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
         "phone_context_duty_target": args.phone_context_duty,
         "phone_probe_width": args.phone_probe_width,
+        "avoid_phone_specialist_overlap": args.avoid_phone_specialist_overlap,
         "admission_timeout_seconds": args.admission_timeout,
         "transport": args.transport,
         "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,
