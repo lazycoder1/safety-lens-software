@@ -270,10 +270,44 @@ GPU, OOM, or throttling errors, so thermal pressure does not explain the tail.
 The non-monotonic tail is consistent with unsynchronised work from the separate
 TensorRT/CUDA context occasionally colliding with a primary batch. RT-DETRv4-S
 must therefore enter the pipeline as a low-priority conditional phone-recall
-specialist behind shared admission control. The primary scheduler must be able
-to defer an RT-DETR launch when primary or PPE work is queued. Until that
-integration is implemented and re-gated, the supported production capacity
-remains 21 cameras at 4 FPS without RT-DETR.
+specialist. However, the follow-up below proves that a simple exclusive lease
+is not sufficient: low-priority work must never create a convoy of blocked
+primary requests. Until a deadline-aware integration is implemented and
+re-gated, the supported production capacity remains 21 cameras at 4 FPS
+without RT-DETR.
+
+## Exclusive low-priority admission rejection — 2026-07-13
+
+A priority-aware reader/writer gate was implemented and tested as a Jetson
+candidate. Existing primary and PPE requests remained concurrent readers. The
+external RT-DETR context could acquire a crash-safe 125 ms writer lease only
+while no primary request was active or waiting. A second version aligned lease
+grants atomically to the instant the active primary set drained.
+
+The local gate and remote-transport suite passed 81 tests. The candidate model
+server loaded all three models, warmed both batch-4 TensorRT engines, and
+completed a 21-camera no-RT-DETR control without drops. Mixed-load measurements
+nevertheless rejected both lease policies:
+
+| Policy | Cameras | Primary successes | Drops / failures | Minimum camera FPS | Primary p95 | Primary maximum | RT-DETR achieved | Skipped RT groups | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Gate only, no RT control | 21 | 2,520 / 2,520 | 0 / 0 | 4.000 | 187.909 ms | 263.379 ms | — | — | throughput pass |
+| Immediate idle lease | 18 | 4,320 / 4,320 | 0 / 0 | 4.000 | 175.981 ms | 387.407 ms | 0.933 FPS | 3 / 38 | reject |
+| Primary-drain-aligned lease | 18 | 5,030 / 5,040 | 10 / 0 | 3.957 | 177.134 ms | 1,037.203 ms | 0.867 FPS | 4 / 30 | reject |
+
+Mutual exclusion made each RT-DETR batch faster: its median dropped to about
+31 ms because it no longer competed with primary CUDA work. It still made the
+system worse. The immediate policy caused 26 primary waits averaging 31.1 ms,
+with a 53.8 ms maximum. Drain alignment caused 26 waits averaging 34.4 ms.
+When each lease released, the blocked primary requests woke together, creating
+an inference burst; the aligned version eventually overloaded ten requests and
+produced a one-second tail.
+
+The candidate was rejected, its code was not shipped, and the proven batch-4
+model server was restored. The next viable scheduler must use camera deadlines
+or known phase gaps and must skip a conditional RT-DETR opportunity when the
+remaining idle window is shorter than its measured runtime. It must not hold
+or queue an already-admitted primary request behind specialist work.
 
 ## Production restoration
 
