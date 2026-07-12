@@ -239,6 +239,7 @@ def test_check_violations_mobile_phone(mock_cfg):
     assert violations[0]["rule"] == "Mobile Phone Usage"
     assert violations[0]["severity"] == "P3"
     assert violations[0]["confidence"] == 0.75
+    assert violations[0]["threshold"] == 2
 
 
 @mock.patch("detection.get_config")

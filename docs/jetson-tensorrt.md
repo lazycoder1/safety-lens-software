@@ -99,6 +99,13 @@ without moving every inference off the compact path. Configure a width only
 when a matching fixed COCO engine is installed, and validate the interval under
 the site's full camera load.
 
+The probe can only run on a scheduled inference opportunity, so keep
+`global.inference_fps` at least as high as the reciprocal of the probe interval.
+For example, a one-second phone probe needs at least 1 inference FPS. The
+default mobile-phone rule requires two person-associated detections; raise its
+per-rule threshold only after measuring site recall, because sparse probes and
+small-object misses otherwise prevent short phone-use events from alerting.
+
 ## Enable it
 
 Set the absolute engine path for the model-server service and recreate that service:
