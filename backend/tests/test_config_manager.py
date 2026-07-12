@@ -1,8 +1,6 @@
 """Tests for config_manager module — thread-safe config persistence."""
 
 import json
-import os
-import shutil
 import tempfile
 import threading
 from copy import deepcopy
@@ -14,7 +12,7 @@ import pytest
 _tmpdir = tempfile.mkdtemp()
 _test_config = Path(_tmpdir) / "test_config.json"
 
-import config_manager
+import config_manager  # noqa: E402
 
 config_manager.CONFIG_PATH = _test_config
 
@@ -733,6 +731,17 @@ def test_default_config_vlm_keywords():
     kw = cfg["vlm"]["violation_keywords"]
     assert "not wearing" in kw
     assert "blocked" in kw
+
+
+def test_default_config_keeps_phone_inference_on_the_compact_primary():
+    global_config = config_manager.DEFAULT_CONFIG["global"]
+
+    assert global_config["coco_inference_width"] == 640
+    assert global_config["mobile_phone_inference_width"] == 640
+    assert (
+        global_config["mobile_phone_inference_width"]
+        == global_config["coco_inference_width"]
+    )
 
 
 # ── database + telegram sections ─────────────────────────────────────────────

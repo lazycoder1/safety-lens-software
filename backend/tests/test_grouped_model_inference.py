@@ -312,6 +312,34 @@ def test_mobile_phone_probe_is_disabled_for_non_phone_plan():
     assert suppressed is False
 
 
+def test_mobile_phone_probe_is_disabled_when_primary_already_uses_probe_width():
+    plan = {
+        "capabilities": ["mobile_phone"],
+        "run_coco_primary": True,
+    }
+    cfg = {
+        "global": {
+            "coco_inference_width": 640,
+            "mobile_phone_inference_width": 640,
+            "mobile_phone_probe_interval_seconds": 1.0,
+        }
+    }
+
+    result, due, suppressed = video_processing._mobile_phone_probe_execution_plan(
+        plan,
+        cfg,
+        now=10.0,
+        last_probe_at=None,
+        previous_detections=[
+            {"class": "person", "model_family": "coco_primary"},
+        ],
+    )
+
+    assert result is plan
+    assert due is False
+    assert suppressed is False
+
+
 def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch):
     captured = {}
 

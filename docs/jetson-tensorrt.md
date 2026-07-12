@@ -92,14 +92,21 @@ configured size. Only set this after the matching fixed-size PPE engine passes
 site accuracy validation; a configured width without its matching engine can
 discard source detail before a larger fallback runtime receives the frame.
 
-For phone-enabled cameras, `global.mobile_phone_inference_width` and
-`global.mobile_phone_probe_interval_seconds` can periodically route only the
-COCO request through the larger fixed engine. This recovers small-object detail
-without moving every inference off the compact path. Configure a width only
-when a matching fixed COCO engine is installed, and validate the interval under
-the site's full camera load.
+For phone-enabled cameras, keep `global.mobile_phone_inference_width` equal to
+`global.coco_inference_width` unless a larger fixed engine proves additional
+person-associated phone recall on representative site footage. Setting a
+larger width periodically routes the COCO request through that fixed engine,
+so it is a measurable accuracy-versus-capacity tradeoff rather than a safe
+default. The July 2026 Orin validation found identical actionable phone recall
+at 640px INT8 and 960px FP16, while retiring the 960px burst raised the clean
+conditional tier from eleven to thirteen cameras at 4 inference FPS.
 
-The probe can only run on a scheduled inference opportunity, so keep
+Configure a larger width only when a matching fixed COCO engine is installed,
+the larger engine recovers labelled cases that the compact engine misses, and
+the probe interval passes the site's full mixed-model camera load. When the two
+widths are equal, SafetyLens intentionally skips the redundant phone probe.
+
+An enabled larger probe can only run on a scheduled inference opportunity, so keep
 `global.inference_fps` at least as high as the reciprocal of the probe interval.
 For example, a one-second phone probe needs at least 1 inference FPS. The
 default mobile-phone rule requires two person-associated detections; raise its

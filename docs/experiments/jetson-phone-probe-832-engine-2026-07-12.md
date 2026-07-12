@@ -1,5 +1,11 @@
 # Jetson 832px phone-probe engine experiment — 2026-07-12
 
+> Superseded later the same day by the calibrated 640px INT8 Small result in
+> `jetson-small-primary-filter-rfdetr-2026-07-12.md`. The 832px result remains
+> useful evidence that an isolated engine speedup does not establish a camera
+> tier, but the production recommendation is now to retire the larger phone
+> probe entirely.
+
 ## Decision
 
 Keep the deployed 960px YOLO26 Small TensorRT engine for the contextual mobile

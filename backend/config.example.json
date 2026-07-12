@@ -23,7 +23,7 @@
     "inference_width": 640,
     "coco_inference_width": 640,
     "ppe_inference_width": 640,
-    "mobile_phone_inference_width": 960,
+    "mobile_phone_inference_width": 640,
     "mobile_phone_probe_interval_seconds": 1.0,
     "device": "mps",
     "alert_cooldown": 60
