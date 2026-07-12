@@ -116,41 +116,67 @@ class ModelInstallRequest(BaseModel):
 
 def _parse_inference_batch(batch_json: str) -> List[InferenceBatchItem]:
     if len(batch_json) > 16_384:
-        raise HTTPException(status_code=413, detail="Inference batch metadata is too large")
+        raise HTTPException(
+            status_code=413, detail="Inference batch metadata is too large"
+        )
     try:
         payload = json.loads(batch_json)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid inference batch metadata") from exc
+        raise HTTPException(
+            status_code=400, detail="Invalid inference batch metadata"
+        ) from exc
     if not isinstance(payload, list) or not 1 <= len(payload) <= 8:
-        raise HTTPException(status_code=400, detail="Inference batch must contain 1 to 8 requests")
+        raise HTTPException(
+            status_code=400, detail="Inference batch must contain 1 to 8 requests"
+        )
     try:
         batch = [InferenceBatchItem(**item) for item in payload]
     except (TypeError, ValidationError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid inference batch request") from exc
+        raise HTTPException(
+            status_code=400, detail="Invalid inference batch request"
+        ) from exc
     request_ids = [item.request_id for item in batch]
     if len(set(request_ids)) != len(request_ids):
-        raise HTTPException(status_code=400, detail="Inference batch request IDs must be unique")
+        raise HTTPException(
+            status_code=400, detail="Inference batch request IDs must be unique"
+        )
     return batch
 
 
-def _parse_primary_frame_batch(batch_json: str) -> List[PrimaryFrameBatchItem]:
+def _parse_primary_frame_batch(
+    batch_json: str,
+    expected_count: int = 2,
+) -> List[PrimaryFrameBatchItem]:
     if len(batch_json) > 4_096:
-        raise HTTPException(status_code=413, detail="Primary frame batch metadata is too large")
+        raise HTTPException(
+            status_code=413, detail="Primary frame batch metadata is too large"
+        )
     try:
         payload = json.loads(batch_json)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid primary frame batch metadata") from exc
-    if not isinstance(payload, list) or len(payload) != 2:
-        raise HTTPException(status_code=400, detail="Primary frame batch must contain exactly two frames")
+        raise HTTPException(
+            status_code=400, detail="Invalid primary frame batch metadata"
+        ) from exc
+    if not isinstance(payload, list) or len(payload) != expected_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Primary frame batch must contain exactly {expected_count} frames",
+        )
     try:
         batch = [PrimaryFrameBatchItem(**item) for item in payload]
     except (TypeError, ValidationError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid primary frame batch request") from exc
-    if len({item.request_id for item in batch}) != 2:
-        raise HTTPException(status_code=400, detail="Primary frame request IDs must be unique")
+        raise HTTPException(
+            status_code=400, detail="Invalid primary frame batch request"
+        ) from exc
+    if len({item.request_id for item in batch}) != expected_count:
+        raise HTTPException(
+            status_code=400, detail="Primary frame request IDs must be unique"
+        )
     compatibility = {(item.conf, item.device, item.imgsz) for item in batch}
     if len(compatibility) != 1:
-        raise HTTPException(status_code=400, detail="Primary frame batch settings must match")
+        raise HTTPException(
+            status_code=400, detail="Primary frame batch settings must match"
+        )
     for item in batch:
         expected = item.frame_width * item.frame_height * item.frame_channels
         if item.frame_channels != 3 or item.byte_length != expected:
@@ -160,6 +186,7 @@ def _parse_primary_frame_batch(batch_json: str) -> List[PrimaryFrameBatchItem]:
 
 def _parse_specialist_frame_batch(
     batch_json: str,
+    expected_count: int = 2,
 ) -> List[SpecialistFrameBatchItem]:
     if len(batch_json) > 8_192:
         raise HTTPException(
@@ -173,10 +200,12 @@ def _parse_specialist_frame_batch(
             status_code=400,
             detail="Invalid specialist frame batch metadata",
         ) from exc
-    if not isinstance(payload, list) or len(payload) != 2:
+    if not isinstance(payload, list) or len(payload) != expected_count:
         raise HTTPException(
             status_code=400,
-            detail="Specialist frame batch must contain exactly two frames",
+            detail=(
+                f"Specialist frame batch must contain exactly {expected_count} frames"
+            ),
         )
     try:
         batch = [SpecialistFrameBatchItem(**item) for item in payload]
@@ -185,7 +214,7 @@ def _parse_specialist_frame_batch(
             status_code=400,
             detail="Invalid specialist frame batch request",
         ) from exc
-    if len({item.request_id for item in batch}) != 2:
+    if len({item.request_id for item in batch}) != expected_count:
         raise HTTPException(
             status_code=400,
             detail="Specialist frame request IDs must be unique",
@@ -390,6 +419,7 @@ def health():
         "models_ready": len(ready),
         "models_total": len(models),
         "specialist_batch_concurrent": _SPECIALIST_BATCH_CONCURRENT,
+        "fixed_batch_runtimes": model_manager.fixed_batch_runtime_status(),
         "anpr_ocr": anpr_ocr,
     }
 
@@ -401,7 +431,9 @@ def list_models(authorization: Optional[str] = Header(default=None)):
 
 
 @app.post("/api/models/install")
-async def install_models(body: ModelInstallRequest, authorization: Optional[str] = Header(default=None)):
+async def install_models(
+    body: ModelInstallRequest, authorization: Optional[str] = Header(default=None)
+):
     _require_model_server_token(authorization)
     try:
         return model_manager.install_models(body.model_keys)
@@ -412,7 +444,9 @@ async def install_models(body: ModelInstallRequest, authorization: Optional[str]
 
 
 @app.get("/api/models/install/{job_id}")
-async def get_install_job(job_id: str, authorization: Optional[str] = Header(default=None)):
+async def get_install_job(
+    job_id: str, authorization: Optional[str] = Header(default=None)
+):
     _require_model_server_token(authorization)
     job = model_manager.get_install_job(job_id)
     if not job:
@@ -421,7 +455,9 @@ async def get_install_job(job_id: str, authorization: Optional[str] = Header(def
 
 
 @app.post("/api/models/install/{job_id}/retry")
-async def retry_install_job(job_id: str, authorization: Optional[str] = Header(default=None)):
+async def retry_install_job(
+    job_id: str, authorization: Optional[str] = Header(default=None)
+):
     _require_model_server_token(authorization)
     try:
         return model_manager.retry_install_job(job_id)
@@ -432,7 +468,9 @@ async def retry_install_job(job_id: str, authorization: Optional[str] = Header(d
 
 
 @app.post("/api/infer")
-def infer(body: InferenceRequest, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def infer(
+    body: InferenceRequest, authorization: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
     _require_model_server_token(authorization)
     try:
         frame_bytes = base64.b64decode(body.frame_jpeg_b64)
@@ -447,8 +485,11 @@ def infer(body: InferenceRequest, authorization: Optional[str] = Header(default=
         classes=body.classes,
     )
 
+
 @app.post("/api/anpr")
-def anpr(body: AnprRequest, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+def anpr(
+    body: AnprRequest, authorization: Optional[str] = Header(default=None)
+) -> Dict[str, Any]:
     _require_model_server_token(authorization)
     try:
         frame_bytes = base64.b64decode(body.frame_jpeg_b64)
@@ -557,22 +598,22 @@ def infer_raw_batch(
         raise HTTPException(status_code=400, detail="Invalid raw frame shape")
     expected_bytes = frame_width * frame_height * frame_channels
     if len(frame_bytes) != expected_bytes:
-        raise HTTPException(status_code=400, detail="Raw frame byte length does not match shape")
+        raise HTTPException(
+            status_code=400, detail="Raw frame byte length does not match shape"
+        )
     frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
         (frame_height, frame_width, frame_channels)
     )
     return _run_inference_batch(frame, batch)
 
 
-@app.post("/api/infer/raw/primary-batch2")
-def infer_raw_primary_batch2(
-    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
-    batch_json: str = Header(..., alias="X-Rakshak-Primary-Frame-Batch"),
-    authorization: Optional[str] = Header(default=None),
+def _infer_raw_primary_frame_batch(
+    frame_bytes: bytes,
+    batch_json: str,
+    expected_count: int,
 ) -> Dict[str, Any]:
-    """Run two compatible primary frames, falling back sequentially if needed."""
-    _require_model_server_token(authorization)
-    batch = _parse_primary_frame_batch(batch_json)
+    """Run one compatible primary frame group."""
+    batch = _parse_primary_frame_batch(batch_json, expected_count)
     if len(frame_bytes) != sum(item.byte_length for item in batch):
         raise HTTPException(
             status_code=400,
@@ -609,7 +650,7 @@ def infer_raw_primary_batch2(
                 )["detections"]
                 for frame, item in zip(frames, batch)
             ]
-        if len(records) != 2:
+        if len(records) != expected_count:
             raise RuntimeError("Primary frame batch returned the wrong result count")
     except Exception as exc:
         logger.exception("Primary frame batch inference failed")
@@ -618,22 +659,37 @@ def infer_raw_primary_batch2(
             detail="Primary frame batch inference failed",
         ) from exc
     return {
-        "results": {
-            item.request_id: result
-            for item, result in zip(batch, records)
-        }
+        "results": {item.request_id: result for item, result in zip(batch, records)}
     }
 
 
-@app.post("/api/infer/raw/specialist-batch2")
-def infer_raw_specialist_batch2(
+@app.post("/api/infer/raw/primary-batch2")
+def infer_raw_primary_batch2(
     frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
-    batch_json: str = Header(..., alias="X-Rakshak-Specialist-Frame-Batch"),
+    batch_json: str = Header(..., alias="X-Rakshak-Primary-Frame-Batch"),
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    """Run paired primary and fixed-prompt PPE engines for two frames."""
     _require_model_server_token(authorization)
-    batch = _parse_specialist_frame_batch(batch_json)
+    return _infer_raw_primary_frame_batch(frame_bytes, batch_json, 2)
+
+
+@app.post("/api/infer/raw/primary-batch4")
+def infer_raw_primary_batch4(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-Primary-Frame-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_primary_frame_batch(frame_bytes, batch_json, 4)
+
+
+def _infer_raw_specialist_frame_batch(
+    frame_bytes: bytes,
+    batch_json: str,
+    expected_count: int,
+) -> Dict[str, Any]:
+    """Run primary and fixed-prompt PPE engines for one frame group."""
+    batch = _parse_specialist_frame_batch(batch_json, expected_count)
     if len(frame_bytes) != sum(item.byte_length for item in batch):
         raise HTTPException(
             status_code=400,
@@ -687,9 +743,9 @@ def infer_raw_specialist_batch2(
         if primary_records is None or ppe_records is None:
             raise HTTPException(
                 status_code=409,
-                detail="Batch-2 specialist runtimes are unavailable",
+                detail=(f"Batch-{expected_count} specialist runtimes are unavailable"),
             )
-        if len(primary_records) != 2 or len(ppe_records) != 2:
+        if len(primary_records) != expected_count or len(ppe_records) != expected_count:
             raise RuntimeError("Specialist frame batch returned the wrong result count")
     except HTTPException:
         raise
@@ -712,3 +768,23 @@ def infer_raw_specialist_batch2(
             )
         }
     }
+
+
+@app.post("/api/infer/raw/specialist-batch2")
+def infer_raw_specialist_batch2(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-Specialist-Frame-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_specialist_frame_batch(frame_bytes, batch_json, 2)
+
+
+@app.post("/api/infer/raw/specialist-batch4")
+def infer_raw_specialist_batch4(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-Specialist-Frame-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_specialist_frame_batch(frame_bytes, batch_json, 4)

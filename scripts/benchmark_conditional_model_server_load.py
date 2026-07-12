@@ -45,12 +45,21 @@ def _resize(frame: np.ndarray, maximum_dimension: int) -> np.ndarray:
     )
 
 
-def _phase_offset(camera_index: int, cameras: int, period: float, mode: str) -> float:
+def _phase_offset(
+    camera_index: int,
+    cameras: int,
+    period: float,
+    mode: str,
+    group_size: int,
+) -> float:
     if mode == "aligned":
         return 0.0
     if mode == "paired":
         groups = math.ceil(cameras / 2)
         return (camera_index // 2) * period / groups
+    if mode == "grouped":
+        groups = math.ceil(cameras / group_size)
+        return (camera_index // group_size) * period / groups
     return camera_index * period / cameras
 
 
@@ -105,8 +114,15 @@ def main() -> int:
     parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument(
         "--phase-mode",
-        choices=("aligned", "paired", "staggered"),
+        choices=("aligned", "paired", "grouped", "staggered"),
         default="staggered",
+    )
+    parser.add_argument(
+        "--phase-group-size",
+        type=int,
+        choices=(2, 4),
+        default=4,
+        help="Camera arrival group used by --phase-mode grouped",
     )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -128,10 +144,12 @@ def main() -> int:
         source = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if source is None:
             parser.error(f"could not decode frame: {path}")
-        frame_sets.append({
-            maximum_dimension: _resize(source, maximum_dimension)
-            for maximum_dimension in {640, args.phone_probe_width}
-        })
+        frame_sets.append(
+            {
+                maximum_dimension: _resize(source, maximum_dimension)
+                for maximum_dimension in {640, args.phone_probe_width}
+            }
+        )
 
     token = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
     edge_model_manager = None
@@ -162,7 +180,9 @@ def main() -> int:
     probe_every = max(1, round(args.phone_probe_interval * args.fps))
     reports: list[dict] = [{} for _ in range(args.cameras)]
 
-    def post(camera_index: int, sequence: int, phone_probe: bool, specialist: bool) -> None:
+    def post(
+        camera_index: int, sequence: int, phone_probe: bool, specialist: bool
+    ) -> None:
         maximum_dimension = args.phone_probe_width if phone_probe else 640
         frame = frame_sets[camera_index % len(frame_sets)][maximum_dimension]
         batch = [
@@ -253,6 +273,7 @@ def main() -> int:
             args.cameras,
             period,
             args.phase_mode,
+            args.phase_group_size,
         )
         deadline = benchmark_start + args.duration
         sequence = 0
@@ -299,12 +320,9 @@ def main() -> int:
                     specialist,
                 )
             except Exception as exc:
-                if (
-                    edge_model_manager is not None
-                    and isinstance(
-                        exc,
-                        edge_model_manager.RemoteInferenceOverloadedError,
-                    )
+                if edge_model_manager is not None and isinstance(
+                    exc,
+                    edge_model_manager.RemoteInferenceOverloadedError,
                 ):
                     overloads += 1
                 else:
@@ -347,9 +365,7 @@ def main() -> int:
         )
 
     all_latencies = [
-        latency
-        for report in reports
-        for latency in report.get("latencies_ms", [])
+        latency for report in reports for latency in report.get("latencies_ms", [])
     ]
     for report in reports:
         report.pop("latencies_ms", None)
@@ -381,8 +397,12 @@ def main() -> int:
         "failures": sum(report["failures"] for report in reports),
         "minimum_camera_fps": min(report["achieved_fps"] for report in reports),
         "latency_ms": {
-            "median": round(statistics.median(all_latencies), 3) if all_latencies else None,
-            "p95": round(_percentile(all_latencies, 0.95), 3) if all_latencies else None,
+            "median": round(statistics.median(all_latencies), 3)
+            if all_latencies
+            else None,
+            "p95": round(_percentile(all_latencies, 0.95), 3)
+            if all_latencies
+            else None,
             "maximum": round(max(all_latencies), 3) if all_latencies else None,
         },
         "per_camera": reports,

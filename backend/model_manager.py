@@ -104,8 +104,12 @@ _REMOTE_RAW_BATCH_SUPPORT_LOCK = threading.Lock()
 _REMOTE_RAW_BATCH_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
 _REMOTE_PRIMARY_BATCH2_SUPPORT_LOCK = threading.Lock()
 _REMOTE_PRIMARY_BATCH2_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
+_REMOTE_PRIMARY_BATCH4_SUPPORT_LOCK = threading.Lock()
+_REMOTE_PRIMARY_BATCH4_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
 _REMOTE_SPECIALIST_BATCH2_SUPPORT_LOCK = threading.Lock()
 _REMOTE_SPECIALIST_BATCH2_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
+_REMOTE_SPECIALIST_BATCH4_SUPPORT_LOCK = threading.Lock()
+_REMOTE_SPECIALIST_BATCH4_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
 _REMOTE_PRIMARY_BATCH_WAIT_SECONDS = _bounded_env_float(
     "SAFETYLENS_REMOTE_PRIMARY_BATCH_WAIT_SECONDS",
     0.0,
@@ -124,9 +128,14 @@ _REMOTE_SPECIALIST_BATCH_WAIT_SECONDS = _bounded_env_float(
     minimum=0.0,
     maximum=0.02,
 )
+_REMOTE_FRAME_BATCH_SIZE = (
+    4 if os.environ.get("SAFETYLENS_REMOTE_FRAME_BATCH_SIZE", "2").strip() == "4" else 2
+)
 _COCO_LOW_RES_ENGINE_ENV = "SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE"
 _COCO_BATCH2_ENGINE_ENV = "SAFETYLENS_COCO_BATCH2_TENSORRT_ENGINE"
+_COCO_BATCH4_ENGINE_ENV = "SAFETYLENS_COCO_BATCH4_TENSORRT_ENGINE"
 _PPE_BATCH2_ENGINE_ENV = "SAFETYLENS_PPE_BATCH2_TENSORRT_ENGINE"
+_PPE_BATCH4_ENGINE_ENV = "SAFETYLENS_PPE_BATCH4_TENSORRT_ENGINE"
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
 _REMOTE_MODEL_CACHE_LOCK = threading.RLock()
 _REMOTE_MODEL_CACHE: dict[str, Any] = {
@@ -153,6 +162,8 @@ _COCO_MODEL_OPTIONS: dict[str, dict[str, str]] = {
         "warmup_behavior": "Full-frame medium COCO detect warmup",
     },
 }
+
+
 def _resolve_coco_model_variant(configured_model: str | None) -> str:
     configured_model = str(configured_model or "").strip()
     selected_model = resolve_coco_model_variant(configured_model)
@@ -195,7 +206,9 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
         "model_key": "ppe_closed_set_candidate",
         "display_name": "Closed-Set Apron/Harness PPE",
         "filename": "apron-harness-ppe.onnx",
-        "local_path": MODELS_ROOT / "ppe_closed_set_candidate" / "apron-harness-ppe.onnx",
+        "local_path": MODELS_ROOT
+        / "ppe_closed_set_candidate"
+        / "apron-harness-ppe.onnx",
         "legacy_paths": [],
         "download_url": "",
         "warmup_behavior": "Closed-set apron/harness PPE detect warmup",
@@ -217,7 +230,10 @@ MODEL_DEFINITIONS: dict[ModelKey, dict[str, Any]] = {
         "filename": "wildfire-smoke-fire.pt",
         "local_path": MODELS_ROOT / "fire_smoke_specialist" / "wildfire-smoke-fire.pt",
         "legacy_paths": [
-            PROJECT_ROOT / "models" / "fire_smoke_specialist_benchmark" / "odiug77-wildfire-smoke-fire-yolo26.pt",
+            PROJECT_ROOT
+            / "models"
+            / "fire_smoke_specialist_benchmark"
+            / "odiug77-wildfire-smoke-fire-yolo26.pt",
         ],
         "download_url": "https://huggingface.co/odiug77/wildfire-smoke-fire/resolve/main/wildfire-smoke-fire.pt",
         "warmup_behavior": "YOLO26 fire/smoke specialist warmup",
@@ -286,7 +302,10 @@ def _build_model_runtimes() -> dict[ModelKey, dict[str, Any]]:
     runtimes_by_asset: dict[str, dict[str, Any]] = {}
     for model_key, definition in MODEL_DEFINITIONS.items():
         asset_key = str(definition["shared_asset_key"])
-        if model_key == "ppe_specialist" and os.environ.get("SAFETYLENS_PPE_TENSORRT_ENGINE", "").strip():
+        if (
+            model_key == "ppe_specialist"
+            and os.environ.get("SAFETYLENS_PPE_TENSORRT_ENGINE", "").strip()
+        ):
             asset_key = f"{asset_key}:ppe-tensorrt"
         runtime = runtimes_by_asset.get(asset_key)
         if runtime is None:
@@ -299,7 +318,9 @@ def _build_model_runtimes() -> dict[ModelKey, dict[str, Any]]:
 _MODEL_RUNTIMES = _build_model_runtimes()
 _COCO_LOW_RES_RUNTIME = _new_model_runtime()
 _COCO_BATCH2_RUNTIME = _new_model_runtime()
+_COCO_BATCH4_RUNTIME = _new_model_runtime()
 _PPE_BATCH2_RUNTIME = _new_model_runtime()
+_PPE_BATCH4_RUNTIME = _new_model_runtime()
 _MODEL_STATES: dict[ModelKey, dict[str, Any]] = {
     model_key: {
         "status": "not_downloaded",
@@ -386,7 +407,10 @@ def _runtime_device(requested: str | int) -> str:
         key = (device, fallback)
         if key not in _DEVICE_FALLBACK_WARNED:
             _DEVICE_FALLBACK_WARNED.add(key)
-            logger.warning("Configured inference device unavailable; falling back", extra={"requested_device": device, "runtime_device": fallback})
+            logger.warning(
+                "Configured inference device unavailable; falling back",
+                extra={"requested_device": device, "runtime_device": fallback},
+            )
         return fallback
     if device in {"cuda", "gpu"}:
         try:
@@ -400,7 +424,10 @@ def _runtime_device(requested: str | int) -> str:
         key = (device, fallback)
         if key not in _DEVICE_FALLBACK_WARNED:
             _DEVICE_FALLBACK_WARNED.add(key)
-            logger.warning("Configured inference device unavailable; falling back", extra={"requested_device": device, "runtime_device": fallback})
+            logger.warning(
+                "Configured inference device unavailable; falling back",
+                extra={"requested_device": device, "runtime_device": fallback},
+            )
         return fallback
     if device != "mps":
         return device or "cpu"
@@ -415,7 +442,10 @@ def _runtime_device(requested: str | int) -> str:
     key = (device, fallback)
     if key not in _DEVICE_FALLBACK_WARNED:
         _DEVICE_FALLBACK_WARNED.add(key)
-        logger.warning("Configured inference device unavailable; falling back", extra={"requested_device": device, "runtime_device": fallback})
+        logger.warning(
+            "Configured inference device unavailable; falling back",
+            extra={"requested_device": device, "runtime_device": fallback},
+        )
     return fallback
 
 
@@ -487,6 +517,7 @@ def _remote_session():
     session = getattr(_REMOTE_SESSION_LOCAL, "session", None)
     if session is None:
         import requests
+
         session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
         session.mount("http://", adapter)
@@ -511,7 +542,11 @@ def warm_remote_inference_session() -> bool:
 
 def _remote_get(path: str, *, timeout_seconds: float | None = None) -> dict[str, Any]:
     settings = _remote_settings()
-    timeout = settings["timeout_seconds"] if timeout_seconds is None else max(0.25, float(timeout_seconds))
+    timeout = (
+        settings["timeout_seconds"]
+        if timeout_seconds is None
+        else max(0.25, float(timeout_seconds))
+    )
     response = _remote_session().get(
         f"{settings['url']}{path}",
         headers=_remote_headers(settings["token"]),
@@ -595,9 +630,13 @@ def _sanitize_remote_model(item: dict[str, Any], model_key: ModelKey) -> dict[st
         result["status"] = "ready"
         result["error"] = None
     else:
-        result["status"] = status if status in allowed_statuses - {"ready"} else "not_downloaded"
+        result["status"] = (
+            status if status in allowed_statuses - {"ready"} else "not_downloaded"
+        )
         # Do not proxy arbitrary exception text from another process.
-        result["error"] = "Remote model reported an error" if item.get("error") is not None else None
+        result["error"] = (
+            "Remote model reported an error" if item.get("error") is not None else None
+        )
 
     active_path = _bounded_text(item.get("active_path"), maximum=1_024)
     if active_path is not None and "://" not in active_path:
@@ -633,7 +672,9 @@ def _sanitize_remote_model(item: dict[str, Any], model_key: ModelKey) -> dict[st
     if low_res_path is not None and "://" not in low_res_path:
         result["runtime_low_res_path"] = low_res_path
     if item.get("runtime_low_res_fallback_error") is not None:
-        result["runtime_low_res_fallback_error"] = "Remote low-resolution runtime fallback active"
+        result["runtime_low_res_fallback_error"] = (
+            "Remote low-resolution runtime fallback active"
+        )
     low_res_imgsz = item.get("runtime_low_res_fixed_imgsz")
     if type(low_res_imgsz) is int and 1 <= low_res_imgsz <= 16_384:
         result["runtime_low_res_fixed_imgsz"] = low_res_imgsz
@@ -718,7 +759,9 @@ def _fetch_remote_model_catalog_blocking() -> list[dict[str, Any]]:
                 raise _RemoteModelCatalogError("catalogue response too large")
 
         body = bytearray()
-        for chunk in response.iter_content(chunk_size=_REMOTE_MODEL_CATALOG_CHUNK_BYTES):
+        for chunk in response.iter_content(
+            chunk_size=_REMOTE_MODEL_CATALOG_CHUNK_BYTES
+        ):
             if time.monotonic() >= deadline:
                 raise _RemoteModelCatalogError("catalogue deadline exceeded")
             if not chunk:
@@ -795,7 +838,9 @@ def _catalog_log_fields(now: float) -> dict[str, Any]:
     outage_started = _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT
     return {
         "failure_count": _REMOTE_MODEL_CATALOG_FAILURE_COUNT,
-        "retry_after_seconds": round(max(0.0, _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT - now), 3),
+        "retry_after_seconds": round(
+            max(0.0, _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT - now), 3
+        ),
         "outage_duration_seconds": round(max(0.0, now - outage_started), 3)
         if outage_started is not None
         else 0.0,
@@ -804,9 +849,13 @@ def _catalog_log_fields(now: float) -> dict[str, Any]:
 
 def _log_catalog_unavailable(*, transition: bool, reminder: bool, now: float) -> None:
     if transition:
-        logger.warning("Remote model metadata became unavailable", extra=_catalog_log_fields(now))
+        logger.warning(
+            "Remote model metadata became unavailable", extra=_catalog_log_fields(now)
+        )
     elif reminder:
-        logger.warning("Remote model metadata remains unavailable", extra=_catalog_log_fields(now))
+        logger.warning(
+            "Remote model metadata remains unavailable", extra=_catalog_log_fields(now)
+        )
 
 
 def _get_remote_model_catalog() -> list[dict[str, Any]]:
@@ -836,18 +885,19 @@ def _get_remote_model_catalog() -> list[dict[str, Any]]:
                     return _unavailable_remote_catalog()
                 _REMOTE_MODEL_CATALOG_CONDITION.wait(timeout=remaining)
             now = _monotonic()
-            if _REMOTE_MODEL_CATALOG is not None and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT:
+            if (
+                _REMOTE_MODEL_CATALOG is not None
+                and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT
+            ):
                 return deepcopy(_REMOTE_MODEL_CATALOG)
             if now < _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT:
                 return _unavailable_remote_catalog()
 
         if now < _REMOTE_MODEL_CATALOG_NEXT_RETRY_AT:
-            if (
-                _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT is not None
-                and (
-                    _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT is None
-                    or now - _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT >= MODEL_METADATA_LOG_REMINDER_SECONDS
-                )
+            if _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT is not None and (
+                _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT is None
+                or now - _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT
+                >= MODEL_METADATA_LOG_REMINDER_SECONDS
             ):
                 _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT = now
                 reminder = True
@@ -884,7 +934,8 @@ def _get_remote_model_catalog() -> list[dict[str, Any]]:
                 _REMOTE_MODEL_CATALOG_OUTAGE_STARTED_AT = now
             reminder = not transition and (
                 _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT is None
-                or now - _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT >= MODEL_METADATA_LOG_REMINDER_SECONDS
+                or now - _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT
+                >= MODEL_METADATA_LOG_REMINDER_SECONDS
             )
             if transition or reminder:
                 _REMOTE_MODEL_CATALOG_LAST_LOGGED_AT = now
@@ -911,7 +962,9 @@ def _get_remote_model_catalog() -> list[dict[str, Any]]:
     if recovery_started is not None:
         logger.info(
             "Remote model metadata recovered",
-            extra={"outage_duration_seconds": round(max(0.0, now - recovery_started), 3)},
+            extra={
+                "outage_duration_seconds": round(max(0.0, now - recovery_started), 3)
+            },
         )
     return deepcopy(fetched)
 
@@ -1010,13 +1063,15 @@ def _remote_post_raw_batch(
     contiguous = np.ascontiguousarray(frame)
     height, width, channels = contiguous.shape
     headers = _remote_headers(settings["token"])
-    headers.update({
-        "Content-Type": "application/octet-stream",
-        "X-Rakshak-Inference-Batch": json.dumps(batch, separators=(",", ":")),
-        "X-Rakshak-Frame-Width": str(width),
-        "X-Rakshak-Frame-Height": str(height),
-        "X-Rakshak-Frame-Channels": str(channels),
-    })
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Inference-Batch": json.dumps(batch, separators=(",", ":")),
+            "X-Rakshak-Frame-Width": str(width),
+            "X-Rakshak-Frame-Height": str(height),
+            "X-Rakshak-Frame-Channels": str(channels),
+        }
+    )
     response = _remote_session().post(
         f"{settings['url']}{path}",
         # A byte-cast view gives Requests the correct Content-Length while
@@ -1076,18 +1131,20 @@ def _remote_post_raw_primary_batch2(
         contiguous_frames.append(contiguous)
         total_bytes += byte_length
         request = item["request"]
-        metadata.append({
-            # Logical request IDs are only unique inside one camera call. Give
-            # this cross-camera transport request its own stable pair of IDs.
-            "request_id": f"frame-{index}",
-            "conf": request["conf"],
-            "device": request["device"],
-            "imgsz": request["imgsz"],
-            "frame_width": width,
-            "frame_height": height,
-            "frame_channels": channels,
-            "byte_length": byte_length,
-        })
+        metadata.append(
+            {
+                # Logical request IDs are only unique inside one camera call. Give
+                # this cross-camera transport request its own stable pair of IDs.
+                "request_id": f"frame-{index}",
+                "conf": request["conf"],
+                "device": request["device"],
+                "imgsz": request["imgsz"],
+                "frame_width": width,
+                "frame_height": height,
+                "frame_channels": channels,
+                "byte_length": byte_length,
+            }
+        )
 
     body = bytearray(total_bytes)
     offset = 0
@@ -1096,13 +1153,15 @@ def _remote_post_raw_primary_batch2(
         body[offset : offset + len(view)] = view
         offset += len(view)
     headers = _remote_headers(settings["token"])
-    headers.update({
-        "Content-Type": "application/octet-stream",
-        "X-Rakshak-Primary-Frame-Batch": json.dumps(
-            metadata,
-            separators=(",", ":"),
-        ),
-    })
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Primary-Frame-Batch": json.dumps(
+                metadata,
+                separators=(",", ":"),
+            ),
+        }
+    )
     response = _remote_session().post(
         f"{settings['url']}/api/infer/raw/primary-batch2",
         data=body,
@@ -1123,6 +1182,91 @@ def _remote_post_raw_primary_batch2(
     with _REMOTE_PRIMARY_BATCH2_SUPPORT_LOCK:
         if _REMOTE_PRIMARY_BATCH2_SUPPORT["url"] == settings["url"]:
             _REMOTE_PRIMARY_BATCH2_SUPPORT["supported"] = True
+    return response.json()
+
+
+def _remote_primary_batch4_route_may_run() -> bool:
+    if not _remote_raw_transport_enabled():
+        return False
+    settings = _remote_settings()
+    with _REMOTE_PRIMARY_BATCH4_SUPPORT_LOCK:
+        if _REMOTE_PRIMARY_BATCH4_SUPPORT["url"] != settings["url"]:
+            _REMOTE_PRIMARY_BATCH4_SUPPORT.update(
+                url=settings["url"],
+                supported=None,
+            )
+        return _REMOTE_PRIMARY_BATCH4_SUPPORT["supported"] is not False
+
+
+def _remote_post_raw_primary_batch4(
+    items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Post four primary frames as one request, or return None on an old server."""
+    if len(items) != 4:
+        raise ValueError("Remote primary batch requires exactly four frames")
+    settings = _remote_settings()
+    metadata = []
+    total_bytes = 0
+    contiguous_frames = []
+    for index, item in enumerate(items):
+        frame = item["frame"]
+        if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+            return None
+        contiguous = np.ascontiguousarray(frame)
+        height, width, channels = contiguous.shape
+        byte_length = int(contiguous.nbytes)
+        contiguous_frames.append(contiguous)
+        total_bytes += byte_length
+        request = item["request"]
+        metadata.append(
+            {
+                "request_id": f"frame-{index}",
+                "conf": request["conf"],
+                "device": request["device"],
+                "imgsz": request["imgsz"],
+                "frame_width": width,
+                "frame_height": height,
+                "frame_channels": channels,
+                "byte_length": byte_length,
+            }
+        )
+
+    body = bytearray(total_bytes)
+    offset = 0
+    for frame in contiguous_frames:
+        view = memoryview(frame).cast("B")
+        body[offset : offset + len(view)] = view
+        offset += len(view)
+    headers = _remote_headers(settings["token"])
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Primary-Frame-Batch": json.dumps(
+                metadata,
+                separators=(",", ":"),
+            ),
+        }
+    )
+    response = _remote_session().post(
+        f"{settings['url']}/api/infer/raw/primary-batch4",
+        data=body,
+        headers=headers,
+        timeout=settings["timeout_seconds"],
+    )
+    if response.status_code == 404:
+        try:
+            route_missing = response.json().get("detail") == "Not Found"
+        except (AttributeError, TypeError, ValueError):
+            route_missing = False
+        if route_missing:
+            with _REMOTE_PRIMARY_BATCH4_SUPPORT_LOCK:
+                if _REMOTE_PRIMARY_BATCH4_SUPPORT["url"] == settings["url"]:
+                    _REMOTE_PRIMARY_BATCH4_SUPPORT["supported"] = False
+            return None
+    response.raise_for_status()
+    with _REMOTE_PRIMARY_BATCH4_SUPPORT_LOCK:
+        if _REMOTE_PRIMARY_BATCH4_SUPPORT["url"] == settings["url"]:
+            _REMOTE_PRIMARY_BATCH4_SUPPORT["supported"] = True
     return response.json()
 
 
@@ -1161,20 +1305,22 @@ def _remote_post_raw_specialist_batch2(
         requests = item["requests"]
         primary = requests["coco_primary"]
         ppe = requests["ppe_specialist"]
-        metadata.append({
-            "request_id": f"frame-{index}",
-            "primary_conf": primary["conf"],
-            "primary_device": primary["device"],
-            "primary_imgsz": primary["imgsz"],
-            "ppe_conf": ppe["conf"],
-            "ppe_device": ppe["device"],
-            "ppe_imgsz": ppe["imgsz"],
-            "ppe_classes": ppe["classes"],
-            "frame_width": width,
-            "frame_height": height,
-            "frame_channels": channels,
-            "byte_length": byte_length,
-        })
+        metadata.append(
+            {
+                "request_id": f"frame-{index}",
+                "primary_conf": primary["conf"],
+                "primary_device": primary["device"],
+                "primary_imgsz": primary["imgsz"],
+                "ppe_conf": ppe["conf"],
+                "ppe_device": ppe["device"],
+                "ppe_imgsz": ppe["imgsz"],
+                "ppe_classes": ppe["classes"],
+                "frame_width": width,
+                "frame_height": height,
+                "frame_channels": channels,
+                "byte_length": byte_length,
+            }
+        )
 
     body = bytearray(total_bytes)
     offset = 0
@@ -1183,13 +1329,15 @@ def _remote_post_raw_specialist_batch2(
         body[offset : offset + len(view)] = view
         offset += len(view)
     headers = _remote_headers(settings["token"])
-    headers.update({
-        "Content-Type": "application/octet-stream",
-        "X-Rakshak-Specialist-Frame-Batch": json.dumps(
-            metadata,
-            separators=(",", ":"),
-        ),
-    })
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Specialist-Frame-Batch": json.dumps(
+                metadata,
+                separators=(",", ":"),
+            ),
+        }
+    )
     response = _remote_session().post(
         f"{settings['url']}/api/infer/raw/specialist-batch2",
         data=body,
@@ -1212,6 +1360,99 @@ def _remote_post_raw_specialist_batch2(
     with _REMOTE_SPECIALIST_BATCH2_SUPPORT_LOCK:
         if _REMOTE_SPECIALIST_BATCH2_SUPPORT["url"] == settings["url"]:
             _REMOTE_SPECIALIST_BATCH2_SUPPORT["supported"] = True
+    return response.json()
+
+
+def _remote_specialist_batch4_route_may_run() -> bool:
+    if not _remote_raw_transport_enabled():
+        return False
+    settings = _remote_settings()
+    with _REMOTE_SPECIALIST_BATCH4_SUPPORT_LOCK:
+        if _REMOTE_SPECIALIST_BATCH4_SUPPORT["url"] != settings["url"]:
+            _REMOTE_SPECIALIST_BATCH4_SUPPORT.update(
+                url=settings["url"],
+                supported=None,
+            )
+        return _REMOTE_SPECIALIST_BATCH4_SUPPORT["supported"] is not False
+
+
+def _remote_post_raw_specialist_batch4(
+    items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Post four primary+PPE frames, or return None for a safe fallback."""
+    if len(items) != 4:
+        raise ValueError("Remote specialist batch requires exactly four frames")
+    settings = _remote_settings()
+    metadata = []
+    total_bytes = 0
+    contiguous_frames = []
+    for index, item in enumerate(items):
+        frame = item["frame"]
+        if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+            return None
+        contiguous = np.ascontiguousarray(frame)
+        height, width, channels = contiguous.shape
+        byte_length = int(contiguous.nbytes)
+        contiguous_frames.append(contiguous)
+        total_bytes += byte_length
+        requests = item["requests"]
+        primary = requests["coco_primary"]
+        ppe = requests["ppe_specialist"]
+        metadata.append(
+            {
+                "request_id": f"frame-{index}",
+                "primary_conf": primary["conf"],
+                "primary_device": primary["device"],
+                "primary_imgsz": primary["imgsz"],
+                "ppe_conf": ppe["conf"],
+                "ppe_device": ppe["device"],
+                "ppe_imgsz": ppe["imgsz"],
+                "ppe_classes": ppe["classes"],
+                "frame_width": width,
+                "frame_height": height,
+                "frame_channels": channels,
+                "byte_length": byte_length,
+            }
+        )
+
+    body = bytearray(total_bytes)
+    offset = 0
+    for frame in contiguous_frames:
+        view = memoryview(frame).cast("B")
+        body[offset : offset + len(view)] = view
+        offset += len(view)
+    headers = _remote_headers(settings["token"])
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Specialist-Frame-Batch": json.dumps(
+                metadata,
+                separators=(",", ":"),
+            ),
+        }
+    )
+    response = _remote_session().post(
+        f"{settings['url']}/api/infer/raw/specialist-batch4",
+        data=body,
+        headers=headers,
+        timeout=settings["timeout_seconds"],
+    )
+    if response.status_code == 404:
+        try:
+            route_missing = response.json().get("detail") == "Not Found"
+        except (AttributeError, TypeError, ValueError):
+            route_missing = False
+        if route_missing:
+            with _REMOTE_SPECIALIST_BATCH4_SUPPORT_LOCK:
+                if _REMOTE_SPECIALIST_BATCH4_SUPPORT["url"] == settings["url"]:
+                    _REMOTE_SPECIALIST_BATCH4_SUPPORT["supported"] = False
+            return None
+    if response.status_code == 409:
+        return None
+    response.raise_for_status()
+    with _REMOTE_SPECIALIST_BATCH4_SUPPORT_LOCK:
+        if _REMOTE_SPECIALIST_BATCH4_SUPPORT["url"] == settings["url"]:
+            _REMOTE_SPECIALIST_BATCH4_SUPPORT["supported"] = True
     return response.json()
 
 
@@ -1271,7 +1512,9 @@ def _serialize_model_state(model_key: ModelKey) -> dict[str, Any]:
             low_res_runtime = {
                 "runtime_low_res_backend": _COCO_LOW_RES_RUNTIME.get("runtime_backend"),
                 "runtime_low_res_path": _COCO_LOW_RES_RUNTIME.get("runtime_path"),
-                "runtime_low_res_fallback_error": _COCO_LOW_RES_RUNTIME.get("runtime_fallback_error"),
+                "runtime_low_res_fallback_error": _COCO_LOW_RES_RUNTIME.get(
+                    "runtime_fallback_error"
+                ),
                 "runtime_low_res_fixed_imgsz": _COCO_LOW_RES_RUNTIME.get("fixed_imgsz"),
                 "runtime_low_res_warmed": bool(_COCO_LOW_RES_RUNTIME.get("warmed")),
             }
@@ -1312,7 +1555,9 @@ def _remote_unavailable_models(error: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _fresh_remote_model_cache(now: float, cache_ttl_seconds: float) -> list[dict[str, Any]] | None:
+def _fresh_remote_model_cache(
+    now: float, cache_ttl_seconds: float
+) -> list[dict[str, Any]] | None:
     if cache_ttl_seconds <= 0:
         return None
     with _REMOTE_MODEL_CACHE_LOCK:
@@ -1329,19 +1574,24 @@ def _fresh_remote_failure_cache(now: float) -> list[dict[str, Any]] | None:
     with _REMOTE_MODEL_CACHE_LOCK:
         failure_at = float(_REMOTE_MODEL_CACHE.get("failure_at") or 0.0)
         failure_error = _REMOTE_MODEL_CACHE.get("failure_error")
-        if failure_error is not None and (now - failure_at) < REMOTE_MODEL_FAILURE_CACHE_TTL_SECONDS:
+        if (
+            failure_error is not None
+            and (now - failure_at) < REMOTE_MODEL_FAILURE_CACHE_TTL_SECONDS
+        ):
             return _remote_unavailable_models(failure_error)
     return None
 
 
 def clear_remote_model_status_cache() -> None:
     with _REMOTE_MODEL_CACHE_LOCK:
-        _REMOTE_MODEL_CACHE.update({
-            "models": None,
-            "updated_at": 0.0,
-            "failure_error": None,
-            "failure_at": 0.0,
-        })
+        _REMOTE_MODEL_CACHE.update(
+            {
+                "models": None,
+                "updated_at": 0.0,
+                "failure_error": None,
+                "failure_at": 0.0,
+            }
+        )
     invalidate_remote_model_catalog()
 
 
@@ -1390,19 +1640,24 @@ def model_readiness_snapshot(model_keys: list[str] | None = None) -> dict[str, b
             item["model_key"]: item["is_ready"] is True
             for item in _get_remote_model_catalog()
         }
-        readiness.update({
-            model_key: model_key in MODEL_DEFINITIONS and ready_by_key.get(model_key) is True
-            for model_key in known_requested
-        })
+        readiness.update(
+            {
+                model_key: model_key in MODEL_DEFINITIONS
+                and ready_by_key.get(model_key) is True
+                for model_key in known_requested
+            }
+        )
         return readiness
     with _MODEL_LOCK:
-        readiness.update({
-            model_key: (
-                model_key in MODEL_DEFINITIONS
-                and _MODEL_STATES[model_key]["status"] == "ready"
-            )
-            for model_key in known_requested
-        })
+        readiness.update(
+            {
+                model_key: (
+                    model_key in MODEL_DEFINITIONS
+                    and _MODEL_STATES[model_key]["status"] == "ready"
+                )
+                for model_key in known_requested
+            }
+        )
         return readiness
 
 
@@ -1413,7 +1668,9 @@ def missing_model_keys(
     timeout_seconds: float | None = None,
     allow_cached: bool = False,
 ) -> list[ModelKey]:
-    snapshot = readiness if readiness is not None else model_readiness_snapshot(model_keys)
+    snapshot = (
+        readiness if readiness is not None else model_readiness_snapshot(model_keys)
+    )
     return [
         model_key  # type: ignore[misc]
         for model_key in model_keys
@@ -1437,8 +1694,7 @@ def remote_model_metadata_health() -> dict[str, Any]:
     now = _monotonic()
     with _REMOTE_MODEL_CATALOG_CONDITION:
         cache_fresh = (
-            _REMOTE_MODEL_CATALOG is not None
-            and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT
+            _REMOTE_MODEL_CATALOG is not None and now < _REMOTE_MODEL_CATALOG_EXPIRES_AT
         )
         if cache_fresh:
             status = "healthy"
@@ -1501,6 +1757,7 @@ def invalidate_remote_model_catalog() -> None:
 def get_install_job(job_id: str) -> Optional[dict[str, Any]]:
     if is_remote_inference_enabled():
         import requests
+
         try:
             return _remote_get(f"/api/models/install/{job_id}")
         except requests.HTTPError as exc:
@@ -1578,7 +1835,9 @@ def _set_open_vocab_classes(handle: Any, classes: list[str]):
     tmp_models_dir.mkdir(parents=True, exist_ok=True)
     copied_text_encoders = _copy_open_vocab_text_encoder_assets(tmp_models_dir)
     if not copied_text_encoders:
-        raise RuntimeError("MobileCLIP text encoder artifact not found for open-vocabulary model setup")
+        raise RuntimeError(
+            "MobileCLIP text encoder artifact not found for open-vocabulary model setup"
+        )
 
     original_cwd = os.getcwd()
     try:
@@ -1645,7 +1904,11 @@ def _configured_runtime_path(
     if error:
         logger.warning(
             "TensorRT engine rejected; using PyTorch",
-            extra={"model_key": model_key, "engine_path": str(engine_path), "reason": error},
+            extra={
+                "model_key": model_key,
+                "engine_path": str(engine_path),
+                "reason": error,
+            },
         )
         return source_path, "pytorch", None, [], [], error
     fixed_classes = list(manifest.get("classes") or [])
@@ -1656,10 +1919,21 @@ def _configured_runtime_path(
         error = "PPE TensorRT manifest must declare fixed prompt classes and semantic groups"
         logger.warning(
             "TensorRT engine rejected; using PyTorch",
-            extra={"model_key": model_key, "engine_path": str(engine_path), "reason": error},
+            extra={
+                "model_key": model_key,
+                "engine_path": str(engine_path),
+                "reason": error,
+            },
         )
         return source_path, "pytorch", None, [], [], error
-    return engine_path, "tensorrt", int(manifest["imgsz"]), fixed_classes, fixed_class_groups, None
+    return (
+        engine_path,
+        "tensorrt",
+        int(manifest["imgsz"]),
+        fixed_classes,
+        fixed_class_groups,
+        None,
+    )
 
 
 def _set_runtime_metadata(
@@ -1843,30 +2117,59 @@ def initialize() -> None:
     MODELS_ROOT.mkdir(parents=True, exist_ok=True)
     with _MODEL_LOCK:
         for model_key in MODEL_DEFINITIONS:
-            _set_model_state(model_key, status="not_downloaded", error=None, active_path=None, job_id=None)
+            _set_model_state(
+                model_key,
+                status="not_downloaded",
+                error=None,
+                active_path=None,
+                job_id=None,
+            )
 
     for model_key in MODEL_DEFINITIONS:
         existing_path = _resolve_existing_path(model_key)
         if existing_path is None:
             continue
         with _MODEL_LOCK:
-            _set_model_state(model_key, status="loading", error=None, active_path=existing_path, job_id=None)
+            _set_model_state(
+                model_key,
+                status="loading",
+                error=None,
+                active_path=existing_path,
+                job_id=None,
+            )
         try:
             if model_key in _LAZY_START_MODEL_KEYS:
                 _mark_runtime_lazy(model_key, existing_path)
             else:
                 _load_runtime(model_key, existing_path)
             with _MODEL_LOCK:
-                _set_model_state(model_key, status="ready", error=None, active_path=existing_path, job_id=None)
+                _set_model_state(
+                    model_key,
+                    status="ready",
+                    error=None,
+                    active_path=existing_path,
+                    job_id=None,
+                )
         except Exception as exc:
-            logger.exception("Model load failed during initialization", extra={"model_key": model_key})
+            logger.exception(
+                "Model load failed during initialization",
+                extra={"model_key": model_key},
+            )
             with _MODEL_LOCK:
-                _set_model_state(model_key, status="failed", error=str(exc), active_path=existing_path, job_id=None)
+                _set_model_state(
+                    model_key,
+                    status="failed",
+                    error=str(exc),
+                    active_path=existing_path,
+                    job_id=None,
+                )
     for model_key in MODEL_DEFINITIONS:
         _warm_configured_fixed_runtime(model_key)
     _warm_configured_low_res_coco_runtime()
     _warm_configured_batch2_coco_runtime()
+    _warm_configured_batch4_coco_runtime()
     _warm_configured_batch2_ppe_runtime()
+    _warm_configured_batch4_ppe_runtime()
     _sync_state_compat()
 
 
@@ -1940,10 +2243,20 @@ def retry_install_job(job_id: str) -> dict[str, Any]:
     return install_models(job.get("model_keys", []))
 
 
-def _download_asset(job_id: str, model_key: ModelKey, destination: Path, url: str, asset_index: int, asset_count: int) -> Path:
+def _download_asset(
+    job_id: str,
+    model_key: ModelKey,
+    destination: Path,
+    url: str,
+    asset_index: int,
+    asset_count: int,
+) -> Path:
     import requests
+
     if not url:
-        raise RuntimeError(f"Model {model_key} must be installed manually at {destination}")
+        raise RuntimeError(
+            f"Model {model_key} must be installed manually at {destination}"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = destination.with_suffix(destination.suffix + ".part")
     _update_job(
@@ -1966,8 +2279,12 @@ def _download_asset(job_id: str, model_key: ModelKey, destination: Path, url: st
                     continue
                 handle.write(chunk)
                 bytes_downloaded += len(chunk)
-                asset_progress = (bytes_downloaded / total_bytes) if total_bytes else 0.0
-                progress_percent = ((asset_index + asset_progress) / max(asset_count, 1)) * 100.0
+                asset_progress = (
+                    (bytes_downloaded / total_bytes) if total_bytes else 0.0
+                )
+                progress_percent = (
+                    (asset_index + asset_progress) / max(asset_count, 1)
+                ) * 100.0
                 _update_job(
                     job_id,
                     bytes_downloaded=bytes_downloaded,
@@ -2004,7 +2321,12 @@ def _run_install_job(job_id: str):
             primary_model_key = asset_model_keys[0]
             definition = MODEL_DEFINITIONS[primary_model_key]
 
-            _update_job(job_id, status="running", stage="checking_disk", current_model_key=primary_model_key)
+            _update_job(
+                job_id,
+                status="running",
+                stage="checking_disk",
+                current_model_key=primary_model_key,
+            )
             existing_path = _resolve_existing_path(primary_model_key)
             active_path = existing_path
             if active_path is None:
@@ -2018,9 +2340,16 @@ def _run_install_job(job_id: str):
                 )
 
             _update_job(job_id, stage="verifying", current_model_key=primary_model_key)
-            _verify_asset(active_path, get_install_job(job_id).get("total_bytes") if get_install_job(job_id) else None)
+            _verify_asset(
+                active_path,
+                get_install_job(job_id).get("total_bytes")
+                if get_install_job(job_id)
+                else None,
+            )
 
-            _update_job(job_id, stage="preparing_assets", current_model_key=primary_model_key)
+            _update_job(
+                job_id, stage="preparing_assets", current_model_key=primary_model_key
+            )
             MODELS_ROOT.mkdir(parents=True, exist_ok=True)
             TMP_MODELS_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -2032,12 +2361,22 @@ def _run_install_job(job_id: str):
                 if model_key == "coco_primary":
                     _warm_configured_low_res_coco_runtime(active_path)
                     _warm_configured_batch2_coco_runtime(active_path)
+                    _warm_configured_batch4_coco_runtime(active_path)
                 elif model_key == "ppe_specialist":
                     _warm_configured_batch2_ppe_runtime(active_path)
+                    _warm_configured_batch4_ppe_runtime(active_path)
                 with _MODEL_LOCK:
-                    _set_model_state(model_key, status="ready", error=None, active_path=active_path, job_id=None)
+                    _set_model_state(
+                        model_key,
+                        status="ready",
+                        error=None,
+                        active_path=active_path,
+                        job_id=None,
+                    )
 
-        _update_job(job_id, status="ready", stage="ready", progress_percent=100.0, error=None)
+        _update_job(
+            job_id, status="ready", stage="ready", progress_percent=100.0, error=None
+        )
         _sync_state_compat()
         try:
             from video_processing import restart_all_cameras
@@ -2050,7 +2389,9 @@ def _run_install_job(job_id: str):
         _update_job(job_id, status="failed", stage="failed", error=str(exc))
         with _MODEL_LOCK:
             for model_key in job["model_keys"]:
-                _set_model_state(model_key, status="failed", error=str(exc), job_id=None)
+                _set_model_state(
+                    model_key, status="failed", error=str(exc), job_id=None
+                )
     finally:
         with _MODEL_LOCK:
             global _ACTIVE_JOB_ID
@@ -2075,11 +2416,17 @@ def _predict_with_runtime(
 
     requested_classes = None
     if model_key in _OPEN_VOCAB_MODEL_KEYS:
-        requested = classes if classes is not None else _default_open_vocab_classes(model_key)
-        requested_classes = [value for value in requested if isinstance(value, str) and value]
+        requested = (
+            classes if classes is not None else _default_open_vocab_classes(model_key)
+        )
+        requested_classes = [
+            value for value in requested if isinstance(value, str) and value
+        ]
         fixed_classes = list(runtime.get("fixed_classes") or [])
         if fixed_classes and requested_classes != fixed_classes:
-            raise RuntimeError("Configured prompts do not match the fixed TensorRT engine classes")
+            raise RuntimeError(
+                "Configured prompts do not match the fixed TensorRT engine classes"
+            )
 
     if not runtime.get("warmed"):
         dummy = np.zeros((320, 320, 3), dtype=np.uint8)
@@ -2088,7 +2435,9 @@ def _predict_with_runtime(
     if model_key in _OPEN_VOCAB_MODEL_KEYS:
         if runtime["current_classes"] != requested_classes:
             _apply_open_vocab_classes(runtime, handle, requested_classes, device=device)
-    return handle.predict(frame, conf=conf, verbose=False, device=device, imgsz=effective_imgsz)
+    return handle.predict(
+        frame, conf=conf, verbose=False, device=device, imgsz=effective_imgsz
+    )
 
 
 def _configured_optional_engine_path(source_path: Path, configured: str) -> Path:
@@ -2114,10 +2463,9 @@ def _predict_with_low_res_coco_runtime(
     runtime = _COCO_LOW_RES_RUNTIME
     engine_path = _configured_optional_engine_path(source_path, configured)
     with runtime["lock"]:
-        same_artifacts = (
-            runtime.get("loaded_path") == str(source_path)
-            and runtime.get("runtime_path") == str(engine_path)
-        )
+        same_artifacts = runtime.get("loaded_path") == str(source_path) and runtime.get(
+            "runtime_path"
+        ) == str(engine_path)
         if not same_artifacts:
             old_handle = runtime.get("handle")
             runtime_lock = runtime["lock"]
@@ -2159,8 +2507,7 @@ def _predict_with_low_res_coco_runtime(
 
         fixed_imgsz = runtime.get("fixed_imgsz")
         source_fits_runtime = (
-            type(fixed_imgsz) is int
-            and max(frame.shape[:2]) <= fixed_imgsz
+            type(fixed_imgsz) is int and max(frame.shape[:2]) <= fixed_imgsz
         )
         request_targets_runtime = fixed_imgsz == imgsz
         if (
@@ -2219,7 +2566,9 @@ def _warm_configured_low_res_coco_runtime(source_path: Optional[Path] = None) ->
     if source_path is None:
         with _MODEL_LOCK:
             state = _MODEL_STATES["coco_primary"]
-            active_path = state.get("active_path") if state.get("status") == "ready" else None
+            active_path = (
+                state.get("active_path") if state.get("status") == "ready" else None
+            )
         if not active_path:
             return False
         source_path = Path(active_path)
@@ -2234,28 +2583,31 @@ def _warm_configured_low_res_coco_runtime(source_path: Optional[Path] = None) ->
     return used_low_res
 
 
-def _predict_with_batch2_coco_runtime(
+def _predict_with_fixed_coco_batch_runtime(
     frames: list[Any],
     *,
     source_path: Path,
     conf: float,
     device: str,
     imgsz: int,
+    batch_size: int,
+    engine_env: str,
+    runtime: dict[str, Any],
 ) -> tuple[bool, Any]:
-    """Run exactly two frames through an optional fixed batch-2 COCO engine."""
-    if len(frames) != 2:
-        raise ValueError("COCO batch-2 inference requires exactly two frames")
-    configured = os.environ.get(_COCO_BATCH2_ENGINE_ENV, "").strip()
+    """Run one fixed-size frame group through its optional COCO engine."""
+    if len(frames) != batch_size:
+        raise ValueError(
+            f"COCO batch-{batch_size} inference requires exactly {batch_size} frames"
+        )
+    configured = os.environ.get(engine_env, "").strip()
     if not configured:
         return False, None
 
-    runtime = _COCO_BATCH2_RUNTIME
     engine_path = _configured_optional_engine_path(source_path, configured)
     with runtime["lock"]:
-        same_artifacts = (
-            runtime.get("loaded_path") == str(source_path)
-            and runtime.get("runtime_path") == str(engine_path)
-        )
+        same_artifacts = runtime.get("loaded_path") == str(source_path) and runtime.get(
+            "runtime_path"
+        ) == str(engine_path)
         if not same_artifacts:
             old_handle = runtime.get("handle")
             runtime_lock = runtime["lock"]
@@ -2267,7 +2619,7 @@ def _predict_with_batch2_coco_runtime(
                 source_path=source_path,
                 engine_path=engine_path,
                 expected_task="detect",
-                expected_batch=2,
+                expected_batch=batch_size,
             )
             if error:
                 _set_runtime_metadata(
@@ -2281,7 +2633,7 @@ def _predict_with_batch2_coco_runtime(
                     fallback_error=error,
                 )
                 logger.warning(
-                    "Batch-2 COCO TensorRT engine rejected",
+                    f"Batch-{batch_size} COCO TensorRT engine rejected",
                     extra={"engine_path": str(engine_path), "reason": error},
                 )
                 return False, None
@@ -2298,8 +2650,7 @@ def _predict_with_batch2_coco_runtime(
 
         fixed_imgsz = runtime.get("fixed_imgsz")
         if (
-            runtime.get("runtime_backend")
-            in {"tensorrt_rejected", "tensorrt_failed"}
+            runtime.get("runtime_backend") in {"tensorrt_rejected", "tensorrt_failed"}
             or fixed_imgsz != imgsz
         ):
             return False, None
@@ -2311,7 +2662,7 @@ def _predict_with_batch2_coco_runtime(
                 runtime["runtime_backend"] = "tensorrt"
                 runtime["warmed"] = False
                 logger.info(
-                    "Loaded batch-2 COCO TensorRT runtime",
+                    f"Loaded batch-{batch_size} COCO TensorRT runtime",
                     extra={"engine_path": str(engine_path), "fixed_imgsz": fixed_imgsz},
                 )
             except Exception as exc:
@@ -2319,7 +2670,7 @@ def _predict_with_batch2_coco_runtime(
                 runtime["runtime_backend"] = "tensorrt_failed"
                 runtime["runtime_fallback_error"] = f"TensorRT load failed: {exc}"
                 logger.exception(
-                    "Batch-2 COCO TensorRT model load failed",
+                    f"Batch-{batch_size} COCO TensorRT model load failed",
                     extra={"engine_path": str(engine_path)},
                 )
                 return False, None
@@ -2328,7 +2679,7 @@ def _predict_with_batch2_coco_runtime(
             if not runtime.get("warmed"):
                 dummy = np.zeros((32, 32, 3), dtype=np.uint8)
                 runtime["handle"].predict(
-                    [dummy, dummy],
+                    [dummy] * batch_size,
                     conf=0.25,
                     verbose=False,
                     device=device,
@@ -2342,8 +2693,10 @@ def _predict_with_batch2_coco_runtime(
                 device=device,
                 imgsz=fixed_imgsz,
             )
-            if len(results) != 2:
-                raise RuntimeError("Batch-2 COCO engine returned the wrong result count")
+            if len(results) != batch_size:
+                raise RuntimeError(
+                    f"Batch-{batch_size} COCO engine returned the wrong result count"
+                )
             return True, results
         except Exception as exc:
             old_handle = runtime.get("handle")
@@ -2353,10 +2706,50 @@ def _predict_with_batch2_coco_runtime(
             runtime["warmed"] = False
             del old_handle
             logger.exception(
-                "Batch-2 COCO TensorRT inference failed",
+                f"Batch-{batch_size} COCO TensorRT inference failed",
                 extra={"engine_path": str(engine_path)},
             )
             return False, None
+
+
+def _predict_with_batch2_coco_runtime(
+    frames: list[Any],
+    *,
+    source_path: Path,
+    conf: float,
+    device: str,
+    imgsz: int,
+) -> tuple[bool, Any]:
+    return _predict_with_fixed_coco_batch_runtime(
+        frames,
+        source_path=source_path,
+        conf=conf,
+        device=device,
+        imgsz=imgsz,
+        batch_size=2,
+        engine_env=_COCO_BATCH2_ENGINE_ENV,
+        runtime=_COCO_BATCH2_RUNTIME,
+    )
+
+
+def _predict_with_batch4_coco_runtime(
+    frames: list[Any],
+    *,
+    source_path: Path,
+    conf: float,
+    device: str,
+    imgsz: int,
+) -> tuple[bool, Any]:
+    return _predict_with_fixed_coco_batch_runtime(
+        frames,
+        source_path=source_path,
+        conf=conf,
+        device=device,
+        imgsz=imgsz,
+        batch_size=4,
+        engine_env=_COCO_BATCH4_ENGINE_ENV,
+        runtime=_COCO_BATCH4_RUNTIME,
+    )
 
 
 def predict_coco_record_batch(
@@ -2366,13 +2759,21 @@ def predict_coco_record_batch(
     device: str,
     imgsz: int,
 ) -> list[list[dict[str, Any]]] | None:
-    """Return paired primary records, or None for sequential fallback."""
+    """Return fixed-batch primary records, or None for sequential fallback."""
     with _MODEL_LOCK:
         state = _MODEL_STATES["coco_primary"]
-        active_path = state.get("active_path") if state.get("status") == "ready" else None
+        active_path = (
+            state.get("active_path") if state.get("status") == "ready" else None
+        )
     if not active_path:
         return None
-    used, results = _predict_with_batch2_coco_runtime(
+    predictor = {
+        2: _predict_with_batch2_coco_runtime,
+        4: _predict_with_batch4_coco_runtime,
+    }.get(len(frames))
+    if predictor is None:
+        return None
+    used, results = predictor(
         frames,
         source_path=Path(active_path),
         conf=conf,
@@ -2389,7 +2790,9 @@ def _warm_configured_batch2_coco_runtime(source_path: Optional[Path] = None) -> 
     if source_path is None:
         with _MODEL_LOCK:
             state = _MODEL_STATES["coco_primary"]
-            active_path = state.get("active_path") if state.get("status") == "ready" else None
+            active_path = (
+                state.get("active_path") if state.get("status") == "ready" else None
+            )
         if not active_path:
             return False
         source_path = Path(active_path)
@@ -2421,7 +2824,39 @@ def _warm_configured_batch2_coco_runtime(source_path: Optional[Path] = None) -> 
     return used
 
 
-def _predict_with_batch2_ppe_runtime(
+def _warm_configured_batch4_coco_runtime(source_path: Optional[Path] = None) -> bool:
+    """Deserialize the optional batch-4 engine before serving requests."""
+    if source_path is None:
+        with _MODEL_LOCK:
+            state = _MODEL_STATES["coco_primary"]
+            active_path = (
+                state.get("active_path") if state.get("status") == "ready" else None
+            )
+        if not active_path:
+            return False
+        source_path = Path(active_path)
+    configured = os.environ.get(_COCO_BATCH4_ENGINE_ENV, "").strip()
+    if not configured:
+        return False
+    engine_path = _configured_optional_engine_path(source_path, configured)
+    manifest, error = validate_engine(
+        source_path=source_path,
+        engine_path=engine_path,
+        expected_task="detect",
+        expected_batch=4,
+    )
+    target_imgsz = 1 if error else int(manifest["imgsz"])
+    used, _results = _predict_with_batch4_coco_runtime(
+        [np.zeros((32, 32, 3), dtype=np.uint8) for _ in range(4)],
+        source_path=source_path,
+        conf=0.25,
+        device=_runtime_device(_configured_local_device()),
+        imgsz=target_imgsz,
+    )
+    return used
+
+
+def _predict_with_fixed_ppe_batch_runtime(
     frames: list[Any],
     *,
     source_path: Path,
@@ -2429,21 +2864,24 @@ def _predict_with_batch2_ppe_runtime(
     device: str,
     imgsz: int,
     classes: list[str],
+    batch_size: int,
+    engine_env: str,
+    runtime: dict[str, Any],
 ) -> tuple[bool, Any]:
-    """Run two fixed-prompt PPE frames through an optional batch-2 engine."""
-    if len(frames) != 2:
-        raise ValueError("PPE batch-2 inference requires exactly two frames")
-    configured = os.environ.get(_PPE_BATCH2_ENGINE_ENV, "").strip()
+    """Run one fixed-size PPE frame group through its optional engine."""
+    if len(frames) != batch_size:
+        raise ValueError(
+            f"PPE batch-{batch_size} inference requires exactly {batch_size} frames"
+        )
+    configured = os.environ.get(engine_env, "").strip()
     if not configured:
         return False, None
 
-    runtime = _PPE_BATCH2_RUNTIME
     engine_path = _configured_optional_engine_path(source_path, configured)
     with runtime["lock"]:
-        same_artifacts = (
-            runtime.get("loaded_path") == str(source_path)
-            and runtime.get("runtime_path") == str(engine_path)
-        )
+        same_artifacts = runtime.get("loaded_path") == str(source_path) and runtime.get(
+            "runtime_path"
+        ) == str(engine_path)
         if not same_artifacts:
             old_handle = runtime.get("handle")
             runtime_lock = runtime["lock"]
@@ -2455,7 +2893,7 @@ def _predict_with_batch2_ppe_runtime(
                 source_path=source_path,
                 engine_path=engine_path,
                 expected_task="segment",
-                expected_batch=2,
+                expected_batch=batch_size,
             )
             fixed_classes = list(manifest.get("classes") or []) if manifest else []
             fixed_groups = list(manifest.get("classGroups") or []) if manifest else []
@@ -2463,7 +2901,7 @@ def _predict_with_batch2_ppe_runtime(
                 not fixed_classes or len(fixed_groups) != len(fixed_classes)
             ):
                 error = (
-                    "PPE batch-2 manifest must declare fixed prompt classes "
+                    f"PPE batch-{batch_size} manifest must declare fixed prompt classes "
                     "and semantic groups"
                 )
             if error:
@@ -2478,7 +2916,7 @@ def _predict_with_batch2_ppe_runtime(
                     fallback_error=error,
                 )
                 logger.warning(
-                    "Batch-2 PPE TensorRT engine rejected",
+                    f"Batch-{batch_size} PPE TensorRT engine rejected",
                     extra={"engine_path": str(engine_path), "reason": error},
                 )
                 return False, None
@@ -2497,8 +2935,7 @@ def _predict_with_batch2_ppe_runtime(
         fixed_imgsz = runtime.get("fixed_imgsz")
         fixed_classes = list(runtime.get("fixed_classes") or [])
         if (
-            runtime.get("runtime_backend")
-            in {"tensorrt_rejected", "tensorrt_failed"}
+            runtime.get("runtime_backend") in {"tensorrt_rejected", "tensorrt_failed"}
             or fixed_imgsz != imgsz
             or fixed_classes != classes
         ):
@@ -2515,10 +2952,10 @@ def _predict_with_batch2_ppe_runtime(
                 ]
                 if engine_classes != fixed_classes:
                     raise RuntimeError(
-                        "Batch-2 PPE engine classes do not match its manifest"
+                        f"Batch-{batch_size} PPE engine classes do not match its manifest"
                     )
                 logger.info(
-                    "Loaded batch-2 PPE TensorRT runtime",
+                    f"Loaded batch-{batch_size} PPE TensorRT runtime",
                     extra={"engine_path": str(engine_path), "fixed_imgsz": fixed_imgsz},
                 )
             except Exception as exc:
@@ -2526,7 +2963,7 @@ def _predict_with_batch2_ppe_runtime(
                 runtime["runtime_backend"] = "tensorrt_failed"
                 runtime["runtime_fallback_error"] = f"TensorRT load failed: {exc}"
                 logger.exception(
-                    "Batch-2 PPE TensorRT model load failed",
+                    f"Batch-{batch_size} PPE TensorRT model load failed",
                     extra={"engine_path": str(engine_path)},
                 )
                 return False, None
@@ -2535,7 +2972,7 @@ def _predict_with_batch2_ppe_runtime(
             if not runtime.get("warmed"):
                 dummy = np.zeros((32, 32, 3), dtype=np.uint8)
                 runtime["handle"].predict(
-                    [dummy, dummy],
+                    [dummy] * batch_size,
                     conf=0.25,
                     verbose=False,
                     device=device,
@@ -2549,8 +2986,10 @@ def _predict_with_batch2_ppe_runtime(
                 device=device,
                 imgsz=fixed_imgsz,
             )
-            if len(results) != 2:
-                raise RuntimeError("Batch-2 PPE engine returned the wrong result count")
+            if len(results) != batch_size:
+                raise RuntimeError(
+                    f"Batch-{batch_size} PPE engine returned the wrong result count"
+                )
             return True, results
         except Exception as exc:
             old_handle = runtime.get("handle")
@@ -2560,10 +2999,54 @@ def _predict_with_batch2_ppe_runtime(
             runtime["warmed"] = False
             del old_handle
             logger.exception(
-                "Batch-2 PPE TensorRT inference failed",
+                f"Batch-{batch_size} PPE TensorRT inference failed",
                 extra={"engine_path": str(engine_path)},
             )
             return False, None
+
+
+def _predict_with_batch2_ppe_runtime(
+    frames: list[Any],
+    *,
+    source_path: Path,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str],
+) -> tuple[bool, Any]:
+    return _predict_with_fixed_ppe_batch_runtime(
+        frames,
+        source_path=source_path,
+        conf=conf,
+        device=device,
+        imgsz=imgsz,
+        classes=classes,
+        batch_size=2,
+        engine_env=_PPE_BATCH2_ENGINE_ENV,
+        runtime=_PPE_BATCH2_RUNTIME,
+    )
+
+
+def _predict_with_batch4_ppe_runtime(
+    frames: list[Any],
+    *,
+    source_path: Path,
+    conf: float,
+    device: str,
+    imgsz: int,
+    classes: list[str],
+) -> tuple[bool, Any]:
+    return _predict_with_fixed_ppe_batch_runtime(
+        frames,
+        source_path=source_path,
+        conf=conf,
+        device=device,
+        imgsz=imgsz,
+        classes=classes,
+        batch_size=4,
+        engine_env=_PPE_BATCH4_ENGINE_ENV,
+        runtime=_PPE_BATCH4_RUNTIME,
+    )
 
 
 def predict_ppe_record_batch(
@@ -2574,13 +3057,23 @@ def predict_ppe_record_batch(
     imgsz: int,
     classes: list[str],
 ) -> list[list[dict[str, Any]]] | None:
-    """Return paired fixed-prompt PPE records, or None for route fallback."""
+    """Return fixed-batch PPE records, or None for route fallback."""
     with _MODEL_LOCK:
         state = _MODEL_STATES["ppe_specialist"]
-        active_path = state.get("active_path") if state.get("status") == "ready" else None
+        active_path = (
+            state.get("active_path") if state.get("status") == "ready" else None
+        )
     if not active_path:
         return None
-    used, results = _predict_with_batch2_ppe_runtime(
+    runtime_by_batch = {
+        2: (_predict_with_batch2_ppe_runtime, _PPE_BATCH2_RUNTIME),
+        4: (_predict_with_batch4_ppe_runtime, _PPE_BATCH4_RUNTIME),
+    }
+    selected = runtime_by_batch.get(len(frames))
+    if selected is None:
+        return None
+    predictor, runtime = selected
+    used, results = predictor(
         frames,
         source_path=Path(active_path),
         conf=conf,
@@ -2590,7 +3083,7 @@ def predict_ppe_record_batch(
     )
     if not used:
         return None
-    class_groups = list(_PPE_BATCH2_RUNTIME.get("fixed_class_groups") or [])
+    class_groups = list(runtime.get("fixed_class_groups") or [])
     return [
         _deduplicate_prompt_synonyms(
             _records_from_results([result]),
@@ -2606,7 +3099,9 @@ def _warm_configured_batch2_ppe_runtime(source_path: Optional[Path] = None) -> b
     if source_path is None:
         with _MODEL_LOCK:
             state = _MODEL_STATES["ppe_specialist"]
-            active_path = state.get("active_path") if state.get("status") == "ready" else None
+            active_path = (
+                state.get("active_path") if state.get("status") == "ready" else None
+            )
         if not active_path:
             return False
         source_path = Path(active_path)
@@ -2639,6 +3134,43 @@ def _warm_configured_batch2_ppe_runtime(source_path: Optional[Path] = None) -> b
     return used
 
 
+def _warm_configured_batch4_ppe_runtime(source_path: Optional[Path] = None) -> bool:
+    """Deserialize the optional batch-4 PPE engine before serving requests."""
+    if source_path is None:
+        with _MODEL_LOCK:
+            state = _MODEL_STATES["ppe_specialist"]
+            active_path = (
+                state.get("active_path") if state.get("status") == "ready" else None
+            )
+        if not active_path:
+            return False
+        source_path = Path(active_path)
+    configured = os.environ.get(_PPE_BATCH4_ENGINE_ENV, "").strip()
+    if not configured:
+        return False
+    manifest, error = validate_engine(
+        source_path=source_path,
+        engine_path=_configured_optional_engine_path(source_path, configured),
+        expected_task="segment",
+        expected_batch=4,
+    )
+    if error or manifest is None:
+        target_imgsz = 1
+        classes: list[str] = []
+    else:
+        target_imgsz = int(manifest["imgsz"])
+        classes = list(manifest.get("classes") or [])
+    used, _results = _predict_with_batch4_ppe_runtime(
+        [np.zeros((32, 32, 3), dtype=np.uint8) for _ in range(4)],
+        source_path=source_path,
+        conf=0.25,
+        device=_runtime_device(_configured_local_device()),
+        imgsz=target_imgsz,
+        classes=classes,
+    )
+    return used
+
+
 def _warm_configured_fixed_runtime(model_key: ModelKey) -> bool:
     """Deserialize and execute fixed TensorRT runtimes before reporting ready."""
     runtime = _MODEL_RUNTIMES[model_key]
@@ -2656,13 +3188,20 @@ def _warm_configured_fixed_runtime(model_key: ModelKey) -> bool:
                 classes=list(runtime.get("fixed_classes") or []) or None,
             )
             if model_key == "ppe_specialist":
-                engine_classes = [str(value) for value in runtime["handle"].names.values()]
+                engine_classes = [
+                    str(value) for value in runtime["handle"].names.values()
+                ]
                 if engine_classes != list(runtime.get("fixed_classes") or []):
-                    raise RuntimeError("TensorRT engine classes do not match its manifest")
+                    raise RuntimeError(
+                        "TensorRT engine classes do not match its manifest"
+                    )
         except Exception as exc:
             logger.exception(
                 "TensorRT warm-up failed; activating PyTorch fallback",
-                extra={"model_key": model_key, "runtime_path": runtime.get("runtime_path")},
+                extra={
+                    "model_key": model_key,
+                    "runtime_path": runtime.get("runtime_path"),
+                },
             )
             try:
                 _activate_pytorch_fallback(runtime, exc)
@@ -2689,7 +3228,9 @@ def _activate_pytorch_fallback(runtime: dict[str, Any], error: Exception) -> Non
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
-        logger.debug("CUDA cache cleanup skipped during TensorRT fallback", exc_info=True)
+        logger.debug(
+            "CUDA cache cleanup skipped during TensorRT fallback", exc_info=True
+        )
     from ultralytics import YOLO
 
     runtime["handle"] = YOLO(str(fallback_path))
@@ -2754,7 +3295,10 @@ def predict(
                 raise
             logger.exception(
                 "TensorRT inference failed; activating PyTorch fallback",
-                extra={"model_key": model_key, "runtime_path": runtime.get("runtime_path")},
+                extra={
+                    "model_key": model_key,
+                    "runtime_path": runtime.get("runtime_path"),
+                },
             )
             _activate_pytorch_fallback(runtime, exc)
             return _predict_with_runtime(
@@ -2782,9 +3326,7 @@ def _records_from_results(results) -> list[dict[str, Any]]:
     rows = boxes.data.tolist()
     result_keypoints = getattr(results[0], "keypoints", None)
     keypoint_rows = (
-        result_keypoints.data.tolist()
-        if result_keypoints is not None
-        else []
+        result_keypoints.data.tolist() if result_keypoints is not None else []
     )
     records = []
     for index, row in enumerate(rows):
@@ -2826,11 +3368,15 @@ def _deduplicate_prompt_synonyms(
     def semantic_group(class_id: int) -> str | None:
         if len(class_groups) == len(classes):
             return class_groups[class_id]
-        class_name = classes[class_id].lower().replace("_", " ").replace("-", " ").strip()
+        class_name = (
+            classes[class_id].lower().replace("_", " ").replace("-", " ").strip()
+        )
         return CLASS_TERM_TO_CAPABILITY.get(class_name)
 
     kept: list[dict[str, Any]] = []
-    for record in sorted(records, key=lambda value: float(value["confidence"]), reverse=True):
+    for record in sorted(
+        records, key=lambda value: float(value["confidence"]), reverse=True
+    ):
         class_id = int(record["class_id"])
         if class_id < 0 or class_id >= len(classes):
             kept.append(record)
@@ -2840,7 +3386,11 @@ def _deduplicate_prompt_synonyms(
         if capability:
             for existing in kept:
                 existing_class_id = int(existing["class_id"])
-                if existing_class_id < 0 or existing_class_id >= len(classes) or existing_class_id == class_id:
+                if (
+                    existing_class_id < 0
+                    or existing_class_id >= len(classes)
+                    or existing_class_id == class_id
+                ):
                     continue
                 if (
                     semantic_group(existing_class_id) == capability
@@ -2969,12 +3519,15 @@ def _scale_remote_records_to_source(
 
 
 class _RemotePrimaryFrameBatcher:
-    """Pair primary frames before they consume one remote admission slot."""
+    """Group compatible primary frames before remote admission."""
 
-    def __init__(self, wait_seconds: float):
+    def __init__(self, wait_seconds: float, batch_size: int = 2):
+        if batch_size not in {2, 4}:
+            raise ValueError("Remote frame batch size must be 2 or 4")
         self.wait_seconds = wait_seconds
+        self.batch_size = batch_size
         self._lock = threading.Lock()
-        self._pending: dict[tuple[float, str, int], dict[str, Any]] = {}
+        self._pending: dict[tuple[float, str, int], list[dict[str, Any]]] = {}
         self._counters = {
             "eligible_requests": 0,
             "paired_requests": 0,
@@ -2985,12 +3538,17 @@ class _RemotePrimaryFrameBatcher:
         }
 
     def _eligible(self, request: dict[str, Any]) -> bool:
+        route_available = (
+            _remote_primary_batch4_route_may_run()
+            if self.batch_size == 4
+            else _remote_primary_batch2_route_may_run()
+        )
         return (
             self.wait_seconds > 0
             and request["model_key"] == "coco_primary"
             and request["imgsz"] == _REMOTE_PRIMARY_BATCH_IMGSZ
             and not request["classes"]
-            and _remote_primary_batch2_route_may_run()
+            and route_available
         )
 
     def submit(
@@ -3015,16 +3573,16 @@ class _RemotePrimaryFrameBatcher:
             "error": None,
         }
         key = (request["conf"], request["device"], request["imgsz"])
-        first = None
+        items = None
         with self._lock:
             self._counters["eligible_requests"] += 1
-            first = self._pending.pop(key, None)
-            if first is None:
-                self._pending[key] = current
-            else:
-                self._counters["paired_requests"] += 2
+            pending = self._pending.setdefault(key, [])
+            pending.append(current)
+            if len(pending) == self.batch_size:
+                items = self._pending.pop(key)
+                self._counters["paired_requests"] += self.batch_size
 
-        if first is not None:
+        if items is not None:
             admitted = False
             try:
                 admitted = _REMOTE_JOB_ADMISSION.acquire(
@@ -3032,20 +3590,23 @@ class _RemotePrimaryFrameBatcher:
                 )
                 if not admitted:
                     with self._lock:
-                        self._counters["admission_overloads"] += 2
+                        self._counters["admission_overloads"] += self.batch_size
                     raise RemoteInferenceOverloadedError(
                         "Remote inference is at its bounded concurrency limit"
                     )
                 with self._lock:
                     self._counters["pairs_executed"] += 1
-                items = [first, current]
-                response = _remote_post_raw_primary_batch2(items)
+                response = (
+                    _remote_post_raw_primary_batch4(items)
+                    if self.batch_size == 4
+                    else _remote_post_raw_primary_batch2(items)
+                )
                 if response is None:
                     with self._lock:
-                        self._counters["route_fallbacks"] += 2
+                        self._counters["route_fallbacks"] += self.batch_size
                 else:
                     results = response.get("results")
-                    expected = {"frame-0", "frame-1"}
+                    expected = {f"frame-{index}" for index in range(self.batch_size)}
                     if not isinstance(results, dict) or set(results) != expected:
                         raise RuntimeError(
                             "Model server returned an incomplete primary frame batch"
@@ -3059,13 +3620,13 @@ class _RemotePrimaryFrameBatcher:
                         )
                         item["handled"] = True
             except Exception as exc:
-                first["error"] = exc
-                current["error"] = exc
+                for item in items:
+                    item["error"] = exc
             finally:
                 if admitted:
                     _REMOTE_JOB_ADMISSION.release()
-                first["event"].set()
-                current["event"].set()
+                for item in items:
+                    item["event"].set()
             if current["error"] is not None:
                 raise current["error"]
             return current["handled"], current["records"]
@@ -3075,10 +3636,15 @@ class _RemotePrimaryFrameBatcher:
                 raise current["error"]
             return current["handled"], current["records"]
         with self._lock:
-            if self._pending.get(key) is current:
-                self._pending.pop(key, None)
-                self._counters["timeout_fallbacks"] += 1
-                return False, []
+            pending = self._pending.get(key)
+            if pending is not None:
+                for index, item in enumerate(pending):
+                    if item is current:
+                        pending.pop(index)
+                        if not pending:
+                            self._pending.pop(key, None)
+                        self._counters["timeout_fallbacks"] += 1
+                        return False, []
         # A partner claimed the frame as the wait expired. Avoid sending it a
         # second time through the single-frame fallback.
         current["event"].wait()
@@ -3090,15 +3656,17 @@ class _RemotePrimaryFrameBatcher:
         with self._lock:
             return {
                 "enabled": self.wait_seconds > 0,
+                "batch_size": self.batch_size,
                 "wait_ms": round(self.wait_seconds * 1000, 3),
                 "target_imgsz": _REMOTE_PRIMARY_BATCH_IMGSZ,
-                "pending": len(self._pending),
+                "pending": sum(len(items) for items in self._pending.values()),
                 **self._counters,
             }
 
 
 _REMOTE_PRIMARY_FRAME_BATCHER = _RemotePrimaryFrameBatcher(
-    _REMOTE_PRIMARY_BATCH_WAIT_SECONDS
+    _REMOTE_PRIMARY_BATCH_WAIT_SECONDS,
+    _REMOTE_FRAME_BATCH_SIZE,
 )
 
 
@@ -3107,12 +3675,15 @@ def remote_primary_batch_stats() -> dict[str, Any]:
 
 
 class _RemoteSpecialistFrameBatcher:
-    """Pair matching primary+PPE frames before remote admission."""
+    """Group matching primary+PPE frames before remote admission."""
 
-    def __init__(self, wait_seconds: float):
+    def __init__(self, wait_seconds: float, batch_size: int = 2):
+        if batch_size not in {2, 4}:
+            raise ValueError("Remote frame batch size must be 2 or 4")
         self.wait_seconds = wait_seconds
+        self.batch_size = batch_size
         self._lock = threading.Lock()
-        self._pending: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._pending: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         self._counters = {
             "eligible_requests": 0,
             "paired_requests": 0,
@@ -3133,13 +3704,18 @@ class _RemoteSpecialistFrameBatcher:
             return None
         primary = mapped["coco_primary"]
         ppe = mapped["ppe_specialist"]
+        route_available = (
+            _remote_specialist_batch4_route_may_run()
+            if self.batch_size == 4
+            else _remote_specialist_batch2_route_may_run()
+        )
         if (
             self.wait_seconds <= 0
             or primary["imgsz"] != _REMOTE_PRIMARY_BATCH_IMGSZ
             or ppe["imgsz"] != _REMOTE_PRIMARY_BATCH_IMGSZ
             or primary["classes"]
             or not ppe["classes"]
-            or not _remote_specialist_batch2_route_may_run()
+            or not route_available
         ):
             return None
         return mapped
@@ -3177,16 +3753,16 @@ class _RemoteSpecialistFrameBatcher:
             ppe["imgsz"],
             tuple(ppe["classes"]),
         )
-        first = None
+        items = None
         with self._lock:
             self._counters["eligible_requests"] += 1
-            first = self._pending.pop(key, None)
-            if first is None:
-                self._pending[key] = current
-            else:
-                self._counters["paired_requests"] += 2
+            pending = self._pending.setdefault(key, [])
+            pending.append(current)
+            if len(pending) == self.batch_size:
+                items = self._pending.pop(key)
+                self._counters["paired_requests"] += self.batch_size
 
-        if first is not None:
+        if items is not None:
             admitted = False
             try:
                 admitted = _REMOTE_JOB_ADMISSION.acquire(
@@ -3194,29 +3770,32 @@ class _RemoteSpecialistFrameBatcher:
                 )
                 if not admitted:
                     with self._lock:
-                        self._counters["admission_overloads"] += 2
+                        self._counters["admission_overloads"] += self.batch_size
                     raise RemoteInferenceOverloadedError(
                         "Remote inference is at its bounded concurrency limit"
                     )
                 with self._lock:
                     self._counters["pairs_executed"] += 1
-                items = [first, current]
-                response = _remote_post_raw_specialist_batch2(items)
+                response = (
+                    _remote_post_raw_specialist_batch4(items)
+                    if self.batch_size == 4
+                    else _remote_post_raw_specialist_batch2(items)
+                )
                 if response is None:
                     with self._lock:
-                        self._counters["route_fallbacks"] += 2
+                        self._counters["route_fallbacks"] += self.batch_size
                 else:
                     results = response.get("results")
-                    if not isinstance(results, dict) or set(results) != {
-                        "frame-0",
-                        "frame-1",
-                    }:
+                    expected = {f"frame-{index}" for index in range(self.batch_size)}
+                    if not isinstance(results, dict) or set(results) != expected:
                         raise RuntimeError(
                             "Model server returned an incomplete specialist frame batch"
                         )
                     for index, item in enumerate(items):
                         frame_results = results[f"frame-{index}"]
-                        if not isinstance(frame_results, dict) or set(frame_results) != {
+                        if not isinstance(frame_results, dict) or set(
+                            frame_results
+                        ) != {
                             "coco_primary",
                             "ppe_specialist",
                         }:
@@ -3235,13 +3814,13 @@ class _RemoteSpecialistFrameBatcher:
                         }
                         item["handled"] = True
             except Exception as exc:
-                first["error"] = exc
-                current["error"] = exc
+                for item in items:
+                    item["error"] = exc
             finally:
                 if admitted:
                     _REMOTE_JOB_ADMISSION.release()
-                first["event"].set()
-                current["event"].set()
+                for item in items:
+                    item["event"].set()
             if current["error"] is not None:
                 raise current["error"]
             return current["handled"], current["records"]
@@ -3251,10 +3830,15 @@ class _RemoteSpecialistFrameBatcher:
                 raise current["error"]
             return current["handled"], current["records"]
         with self._lock:
-            if self._pending.get(key) is current:
-                self._pending.pop(key, None)
-                self._counters["timeout_fallbacks"] += 1
-                return False, {}
+            pending = self._pending.get(key)
+            if pending is not None:
+                for index, item in enumerate(pending):
+                    if item is current:
+                        pending.pop(index)
+                        if not pending:
+                            self._pending.pop(key, None)
+                        self._counters["timeout_fallbacks"] += 1
+                        return False, {}
         current["event"].wait()
         if current["error"] is not None:
             raise current["error"]
@@ -3264,20 +3848,45 @@ class _RemoteSpecialistFrameBatcher:
         with self._lock:
             return {
                 "enabled": self.wait_seconds > 0,
+                "batch_size": self.batch_size,
                 "wait_ms": round(self.wait_seconds * 1000, 3),
                 "target_imgsz": _REMOTE_PRIMARY_BATCH_IMGSZ,
-                "pending": len(self._pending),
+                "pending": sum(len(items) for items in self._pending.values()),
                 **self._counters,
             }
 
 
 _REMOTE_SPECIALIST_FRAME_BATCHER = _RemoteSpecialistFrameBatcher(
-    _REMOTE_SPECIALIST_BATCH_WAIT_SECONDS
+    _REMOTE_SPECIALIST_BATCH_WAIT_SECONDS,
+    _REMOTE_FRAME_BATCH_SIZE,
 )
 
 
 def remote_specialist_batch_stats() -> dict[str, Any]:
     return _REMOTE_SPECIALIST_FRAME_BATCHER.stats()
+
+
+def fixed_batch_runtime_status() -> dict[str, dict[str, dict[str, Any]]]:
+    """Return non-sensitive readiness metadata for optional fixed-batch engines."""
+    status: dict[str, dict[str, dict[str, Any]]] = {
+        "coco_primary": {},
+        "ppe_specialist": {},
+    }
+    specs = (
+        ("coco_primary", 2, _COCO_BATCH2_ENGINE_ENV, _COCO_BATCH2_RUNTIME),
+        ("coco_primary", 4, _COCO_BATCH4_ENGINE_ENV, _COCO_BATCH4_RUNTIME),
+        ("ppe_specialist", 2, _PPE_BATCH2_ENGINE_ENV, _PPE_BATCH2_RUNTIME),
+        ("ppe_specialist", 4, _PPE_BATCH4_ENGINE_ENV, _PPE_BATCH4_RUNTIME),
+    )
+    for model_key, batch_size, engine_env, runtime in specs:
+        with runtime["lock"]:
+            status[model_key][str(batch_size)] = {
+                "configured": bool(os.environ.get(engine_env, "").strip()),
+                "backend": runtime.get("runtime_backend"),
+                "warmed": bool(runtime.get("warmed")),
+                "fixed_imgsz": runtime.get("fixed_imgsz"),
+            }
+    return status
 
 
 def predict_records(
@@ -3315,16 +3924,24 @@ def predict_records(
             _REMOTE_JOB_ADMISSION.release()
 
     records = _records_from_results(
-        predict(model_key, frame, conf=conf, device=device, imgsz=imgsz, classes=classes)
+        predict(
+            model_key, frame, conf=conf, device=device, imgsz=imgsz, classes=classes
+        )
     )
     if model_key in _OPEN_VOCAB_MODEL_KEYS:
-        active_classes = classes if classes is not None else _default_open_vocab_classes(model_key)
+        active_classes = (
+            classes if classes is not None else _default_open_vocab_classes(model_key)
+        )
         class_groups = list(_MODEL_RUNTIMES[model_key].get("fixed_class_groups") or [])
-        return _deduplicate_prompt_synonyms(records, active_classes, class_groups=class_groups)
+        return _deduplicate_prompt_synonyms(
+            records, active_classes, class_groups=class_groups
+        )
     return records
 
 
-def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def predict_record_batches(
+    frame, requests: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
     """Run multiple record-producing models against one immutable frame."""
     if not requests:
         return {}
@@ -3341,14 +3958,16 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
         if request_id in request_ids:
             raise ValueError(f"Duplicate inference request ID: {request_id}")
         request_ids.add(request_id)
-        normalized.append({
-            "request_id": request_id,
-            "model_key": model_key,
-            "conf": float(request.get("conf", 0.35)),
-            "device": str(request.get("device", "cuda")),
-            "imgsz": int(request.get("imgsz", 960)),
-            "classes": list(request.get("classes") or []),
-        })
+        normalized.append(
+            {
+                "request_id": request_id,
+                "model_key": model_key,
+                "conf": float(request.get("conf", 0.35)),
+                "device": str(request.get("device", "cuda")),
+                "imgsz": int(request.get("imgsz", 960)),
+                "classes": list(request.get("classes") or []),
+            }
+        )
 
     remote_inference = is_remote_inference_enabled()
     if len(normalized) == 1 and not remote_inference:
@@ -3394,9 +4013,7 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
     maximum_imgsz = max(item["imgsz"] for item in normalized)
     resize_required = max(frame.shape[:2]) > maximum_imgsz
     paired_request = len(normalized) == 2
-    if not _REMOTE_JOB_ADMISSION.acquire(
-        timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
-    ):
+    if not _REMOTE_JOB_ADMISSION.acquire(timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS):
         raise RemoteInferenceOverloadedError(
             "Remote inference is at its bounded concurrency limit"
         )
@@ -3416,7 +4033,9 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
         if response is not None:
             results = response.get("results")
             if not isinstance(results, dict) or set(results) != request_ids:
-                raise RuntimeError("Model server returned an incomplete inference batch")
+                raise RuntimeError(
+                    "Model server returned an incomplete inference batch"
+                )
             return {
                 request_id: _scale_remote_records_to_source(
                     records,
@@ -3446,7 +4065,9 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
         if response is not None:
             results = response.get("results")
             if not isinstance(results, dict) or set(results) != request_ids:
-                raise RuntimeError("Model server returned an incomplete inference batch")
+                raise RuntimeError(
+                    "Model server returned an incomplete inference batch"
+                )
             return {
                 request_id: _scale_remote_records_to_source(
                     records,
@@ -3507,9 +4128,7 @@ def predict_plate_records(
     if not is_remote_inference_enabled():
         raise RuntimeError("ANPR inference must run through the model server")
 
-    if not _REMOTE_JOB_ADMISSION.acquire(
-        timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
-    ):
+    if not _REMOTE_JOB_ADMISSION.acquire(timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS):
         raise RemoteInferenceOverloadedError(
             "Remote inference is at its bounded concurrency limit"
         )

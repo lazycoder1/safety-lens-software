@@ -48,7 +48,8 @@ def test_remote_inference_session_prewarm_uses_thread_local_health_get(monkeypat
         lambda path, *, timeout_seconds: captured.update(
             path=path,
             timeout_seconds=timeout_seconds,
-        ) or {"status": "ok"},
+        )
+        or {"status": "ok"},
     )
 
     assert model_manager.warm_remote_inference_session() is True
@@ -91,7 +92,9 @@ def test_edge_uses_raw_jpeg_transport(monkeypatch):
         classes=["person"],
     )
 
-    decoded = cv2.imdecode(np.frombuffer(captured["frame_jpeg"], np.uint8), cv2.IMREAD_COLOR)
+    decoded = cv2.imdecode(
+        np.frombuffer(captured["frame_jpeg"], np.uint8), cv2.IMREAD_COLOR
+    )
     assert captured["path"] == "/api/infer/jpeg"
     assert captured["params"] == {
         "model_key": "coco_primary",
@@ -104,12 +107,12 @@ def test_edge_uses_raw_jpeg_transport(monkeypatch):
     assert detections is expected
 
 
-def test_edge_resizes_oversized_remote_frame_and_restores_source_coordinates(monkeypatch):
+def test_edge_resizes_oversized_remote_frame_and_restores_source_coordinates(
+    monkeypatch,
+):
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
     captured = {}
-    remote_records = [
-        {"class_id": 0, "confidence": 0.9, "bbox": [100, 50, 900, 500]}
-    ]
+    remote_records = [{"class_id": 0, "confidence": 0.9, "bbox": [100, 50, 900, 500]}]
 
     def fake_remote_post_jpeg(path, frame_jpeg, *, params):
         captured.update(path=path, frame_jpeg=frame_jpeg, params=params)
@@ -185,7 +188,9 @@ def test_edge_falls_back_to_legacy_json_transport(monkeypatch):
         return {"detections": []}
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_post_jpeg", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        model_manager, "_remote_post_jpeg", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(model_manager, "_remote_post", fake_remote_post)
 
     model_manager.predict_records(
@@ -220,8 +225,7 @@ def test_edge_sends_model_pairs_as_one_jpeg_batch(monkeypatch):
         captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
         return {
             "results": {
-                item["request_id"]: [{"model_key": item["model_key"]}]
-                for item in batch
+                item["request_id"]: [{"model_key": item["model_key"]}] for item in batch
             }
         }
 
@@ -231,13 +235,31 @@ def test_edge_sends_model_pairs_as_one_jpeg_batch(monkeypatch):
     monkeypatch.setattr(
         model_manager,
         "_remote_predict_records_jpeg",
-        lambda *_args, **_kwargs: pytest.fail("batch-capable pair used fallback transport"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "batch-capable pair used fallback transport"
+        ),
     )
 
-    results = model_manager.predict_record_batches(frame, [
-        {"request_id": "coco", "model_key": "coco_primary", "conf": 0.3, "device": "cuda", "imgsz": 960},
-        {"request_id": "ppe", "model_key": "ppe_specialist", "conf": 0.25, "device": "cuda", "imgsz": 960, "classes": ["helmet"]},
-    ])
+    results = model_manager.predict_record_batches(
+        frame,
+        [
+            {
+                "request_id": "coco",
+                "model_key": "coco_primary",
+                "conf": 0.3,
+                "device": "cuda",
+                "imgsz": 960,
+            },
+            {
+                "request_id": "ppe",
+                "model_key": "ppe_specialist",
+                "conf": 0.25,
+                "device": "cuda",
+                "imgsz": 960,
+                "classes": ["helmet"],
+            },
+        ],
+    )
 
     assert encode_calls == 1
     assert encode_parameters == [[cv2.IMWRITE_JPEG_QUALITY, 85]]
@@ -322,7 +344,9 @@ def test_edge_pair_uses_parallel_fallback_for_older_model_server(monkeypatch):
         return [{"model_key": model_key}]
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        model_manager, "_remote_post_jpeg_batch", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(model_manager, "_remote_predict_records_jpeg", fake_single)
 
     results = model_manager.predict_record_batches(
@@ -419,10 +443,13 @@ def test_edge_bounds_grouped_transport_and_restores_source_coordinates(monkeypat
     monkeypatch.setattr(cv2, "imencode", capture_imencode)
     monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_batch)
 
-    results = model_manager.predict_record_batches(frame, [
-        {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
-        {"request_id": "ppe", "model_key": "ppe_specialist", "imgsz": 960},
-    ])
+    results = model_manager.predict_record_batches(
+        frame,
+        [
+            {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
+            {"request_id": "ppe", "model_key": "ppe_specialist", "imgsz": 960},
+        ],
+    )
 
     assert encode_parameters == [[cv2.IMWRITE_JPEG_QUALITY, 90]]
     assert decoded_shapes == [(540, 960, 3)]
@@ -459,10 +486,13 @@ def test_edge_uses_opt_in_raw_batch_and_restores_source_coordinates(monkeypatch)
         lambda *_args, **_kwargs: pytest.fail("raw-capable edge encoded JPEG"),
     )
 
-    results = model_manager.predict_record_batches(frame, [
-        {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
-        {"request_id": "ppe", "model_key": "ppe_specialist", "imgsz": 960},
-    ])
+    results = model_manager.predict_record_batches(
+        frame,
+        [
+            {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
+            {"request_id": "ppe", "model_key": "ppe_specialist", "imgsz": 960},
+        ],
+    )
 
     assert captured["path"] == "/api/infer/raw/batch"
     assert captured["shape"] == (540, 960, 3)
@@ -560,9 +590,7 @@ def test_primary_frame_batch_uses_unique_transport_ids(monkeypatch):
         "_REMOTE_PRIMARY_BATCH2_SUPPORT",
         {"url": "http://model", "supported": None},
     )
-    frames = [
-        np.full((4, 5, 3), value, dtype=np.uint8) for value in (10, 20)
-    ]
+    frames = [np.full((4, 5, 3), value, dtype=np.uint8) for value in (10, 20)]
     items = [
         {
             "frame": frame,
@@ -578,14 +606,65 @@ def test_primary_frame_batch_uses_unique_transport_ids(monkeypatch):
 
     result = model_manager._remote_post_raw_primary_batch2(items)
 
-    metadata = json.loads(
-        captured["headers"]["X-Rakshak-Primary-Frame-Batch"]
-    )
+    metadata = json.loads(captured["headers"]["X-Rakshak-Primary-Frame-Batch"])
     assert result == {"results": {"frame-0": [], "frame-1": []}}
     assert [item["request_id"] for item in metadata] == ["frame-0", "frame-1"]
-    assert bytes(captured["data"]) == b"".join(
-        frame.tobytes() for frame in frames
+    assert bytes(captured["data"]) == b"".join(frame.tobytes() for frame in frames)
+
+
+def test_primary_frame_batch4_uses_four_unique_transport_ids(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"results": {f"frame-{index}": [] for index in range(4)}}
+
+    class Session:
+        @staticmethod
+        def post(url, *, data, headers, timeout):
+            captured.update(url=url, data=data, headers=headers, timeout=timeout)
+            return Response()
+
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_settings",
+        lambda: {"url": "http://model", "token": "", "timeout_seconds": 2.0},
     )
+    monkeypatch.setattr(model_manager, "_remote_session", Session)
+    monkeypatch.setattr(
+        model_manager,
+        "_REMOTE_PRIMARY_BATCH4_SUPPORT",
+        {"url": "http://model", "supported": None},
+    )
+    frames = [np.full((4, 5, 3), value, dtype=np.uint8) for value in (10, 20, 30, 40)]
+    items = [
+        {
+            "frame": frame,
+            "request": {
+                "request_id": "coco_primary",
+                "conf": 0.3,
+                "device": "cuda",
+                "imgsz": 640,
+            },
+        }
+        for frame in frames
+    ]
+
+    result = model_manager._remote_post_raw_primary_batch4(items)
+
+    metadata = json.loads(captured["headers"]["X-Rakshak-Primary-Frame-Batch"])
+    assert captured["url"].endswith("/api/infer/raw/primary-batch4")
+    assert result == {"results": {f"frame-{index}": [] for index in range(4)}}
+    assert [item["request_id"] for item in metadata] == [
+        f"frame-{index}" for index in range(4)
+    ]
 
 
 def test_edge_raw_batch_falls_back_to_jpeg_for_older_server(monkeypatch):
@@ -596,19 +675,23 @@ def test_edge_raw_batch_falls_back_to_jpeg_for_older_server(monkeypatch):
         captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
         return {
             "results": {
-                item["request_id"]: [{"model_key": item["model_key"]}]
-                for item in batch
+                item["request_id"]: [{"model_key": item["model_key"]}] for item in batch
             }
         }
 
     monkeypatch.setenv("SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT", "true")
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_post_raw_batch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        model_manager, "_remote_post_raw_batch", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_jpeg)
 
-    results = model_manager.predict_record_batches(frame, [
-        {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
-    ])
+    results = model_manager.predict_record_batches(
+        frame,
+        [
+            {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
+        ],
+    )
 
     decoded = cv2.imdecode(
         np.frombuffer(captured["frame_jpeg"], np.uint8),
@@ -639,9 +722,7 @@ def test_edge_pairs_two_primary_frames_before_remote_admission(monkeypatch):
 
     def fake_primary_batch(items):
         captured["shapes"] = [item["frame"].shape for item in items]
-        captured["request_ids"] = [
-            item["request"]["request_id"] for item in items
-        ]
+        captured["request_ids"] = [item["request"]["request_id"] for item in items]
         return {
             "results": {
                 "frame-0": [{"bbox": [10, 20, 100, 200]}],
@@ -683,6 +764,111 @@ def test_edge_pairs_two_primary_frames_before_remote_admission(monkeypatch):
     assert results[1]["coco_primary:0"][0]["bbox"] == [20, 40, 200, 400]
     assert batcher.stats()["paired_requests"] == 2
     assert batcher.stats()["pairs_executed"] == 1
+
+
+def test_edge_groups_four_primary_frames_before_remote_admission(monkeypatch):
+    class CountingAdmission:
+        def __init__(self):
+            self.acquires = 0
+            self.releases = 0
+
+        def acquire(self, *, timeout):
+            self.acquires += 1
+            return True
+
+        def release(self):
+            self.releases += 1
+
+    admission = CountingAdmission()
+    batcher = model_manager._RemotePrimaryFrameBatcher(0.1, batch_size=4)
+
+    def fake_primary_batch(items):
+        return {
+            "results": {f"frame-{index}": [{"class_id": index}] for index in range(4)}
+        }
+
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", admission)
+    monkeypatch.setattr(
+        model_manager, "_remote_post_raw_primary_batch4", fake_primary_batch
+    )
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    requests = [
+        {
+            "request_id": f"camera-{index}",
+            "model_key": "coco_primary",
+            "conf": 0.35,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": [],
+        }
+        for index in range(4)
+    ]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = list(pool.map(batcher.submit, [frame] * 4, requests))
+
+    assert admission.acquires == 1
+    assert admission.releases == 1
+    assert [records[0]["class_id"] for handled, records in outcomes] == [0, 1, 2, 3]
+    assert all(handled for handled, _records in outcomes)
+    assert batcher.stats()["batch_size"] == 4
+    assert batcher.stats()["paired_requests"] == 4
+    assert batcher.stats()["pairs_executed"] == 1
+
+
+def test_edge_batch4_partial_primary_group_times_out_without_leaking(monkeypatch):
+    batcher = model_manager._RemotePrimaryFrameBatcher(0.001, batch_size=4)
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+    requests = [
+        {
+            "request_id": f"camera-{index}",
+            "model_key": "coco_primary",
+            "conf": 0.35,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": [],
+        }
+        for index in range(3)
+    ]
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        outcomes = list(pool.map(batcher.submit, [frame] * 3, requests))
+
+    assert outcomes == [(False, []), (False, []), (False, [])]
+    assert batcher.stats()["timeout_fallbacks"] == 3
+    assert batcher.stats()["pending"] == 0
+
+
+def test_edge_batch4_primary_route_fallback_releases_all_callers(monkeypatch):
+    batcher = model_manager._RemotePrimaryFrameBatcher(0.1, batch_size=4)
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_post_raw_primary_batch4", lambda _items: None
+    )
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+    request = {
+        "request_id": "primary",
+        "model_key": "coco_primary",
+        "conf": 0.35,
+        "device": "cuda",
+        "imgsz": 640,
+        "classes": [],
+    }
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = list(pool.map(batcher.submit, [frame] * 4, [request] * 4))
+
+    assert outcomes == [(False, [])] * 4
+    assert batcher.stats()["route_fallbacks"] == 4
+    assert batcher.stats()["pending"] == 0
 
 
 def test_edge_unmatched_primary_frame_times_out_to_existing_transport(monkeypatch):
@@ -751,9 +937,7 @@ def test_edge_primary_batch_route_fallback_reuses_single_frame_path(monkeypatch)
     monkeypatch.setattr(
         model_manager,
         "_remote_post_raw_batch",
-        lambda _path, _frame, *, batch: {
-            "results": {batch[0]["request_id"]: []}
-        },
+        lambda _path, _frame, *, batch: {"results": {batch[0]["request_id"]: []}},
     )
     frame = np.zeros((20, 30, 3), dtype=np.uint8)
 
@@ -762,7 +946,13 @@ def test_edge_primary_batch_route_fallback_reuses_single_frame_path(monkeypatch)
             pool.submit(
                 model_manager.predict_record_batches,
                 frame,
-                [{"request_id": f"camera-{index}", "model_key": "coco_primary", "imgsz": 640}],
+                [
+                    {
+                        "request_id": f"camera-{index}",
+                        "model_key": "coco_primary",
+                        "imgsz": 640,
+                    }
+                ],
             )
             for index in range(2)
         ]
@@ -804,9 +994,7 @@ def test_edge_primary_batch_propagates_admission_overload_to_both_callers(
     ]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [
-            pool.submit(batcher.submit, frame, request) for request in requests
-        ]
+        futures = [pool.submit(batcher.submit, frame, request) for request in requests]
         for future in futures:
             with pytest.raises(model_manager.RemoteInferenceOverloadedError):
                 future.result()
@@ -893,6 +1081,75 @@ def test_edge_pairs_matching_primary_ppe_frames_before_admission(monkeypatch):
     assert results[1]["coco"][0]["bbox"] == [20, 40, 200, 400]
     assert results[1]["ppe"][0]["bbox"] == [40, 20, 160, 200]
     assert batcher.stats()["paired_requests"] == 2
+    assert batcher.stats()["pairs_executed"] == 1
+
+
+def test_edge_groups_four_matching_primary_ppe_frames(monkeypatch):
+    class Admission:
+        @staticmethod
+        def acquire(*, timeout):
+            return True
+
+        @staticmethod
+        def release():
+            return None
+
+    batcher = model_manager._RemoteSpecialistFrameBatcher(0.1, batch_size=4)
+
+    def fake_specialist_batch(items):
+        return {
+            "results": {
+                f"frame-{index}": {
+                    "coco_primary": [{"class_id": index}],
+                    "ppe_specialist": [{"class_id": index + 10}],
+                }
+                for index in range(4)
+            }
+        }
+
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", Admission())
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_specialist_batch4",
+        fake_specialist_batch,
+    )
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    def requests(index):
+        return [
+            {
+                "request_id": f"coco-{index}",
+                "model_key": "coco_primary",
+                "conf": 0.15,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": [],
+            },
+            {
+                "request_id": f"ppe-{index}",
+                "model_key": "ppe_specialist",
+                "conf": 0.2,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": ["helmet"],
+            },
+        ]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(batcher.submit, frame, requests(index)) for index in range(4)
+        ]
+        outcomes = [future.result() for future in futures]
+
+    assert all(handled for handled, _records in outcomes)
+    assert [
+        records[f"coco-{index}"][0]["class_id"]
+        for index, (_handled, records) in enumerate(outcomes)
+    ] == [0, 1, 2, 3]
+    assert batcher.stats()["paired_requests"] == 4
     assert batcher.stats()["pairs_executed"] == 1
 
 
@@ -995,19 +1252,21 @@ def test_edge_uses_batch_route_for_more_than_two_models(monkeypatch):
         captured.update(path=path, frame_jpeg=frame_jpeg, batch=batch)
         return {
             "results": {
-                item["request_id"]: [{"model_key": item["model_key"]}]
-                for item in batch
+                item["request_id"]: [{"model_key": item["model_key"]}] for item in batch
             }
         }
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
     monkeypatch.setattr(model_manager, "_remote_post_jpeg_batch", fake_remote_batch)
 
-    results = model_manager.predict_record_batches(frame, [
-        {"request_id": "coco", "model_key": "coco_primary"},
-        {"request_id": "ppe", "model_key": "ppe_specialist"},
-        {"request_id": "fire", "model_key": "fire_smoke_specialist"},
-    ])
+    results = model_manager.predict_record_batches(
+        frame,
+        [
+            {"request_id": "coco", "model_key": "coco_primary"},
+            {"request_id": "ppe", "model_key": "ppe_specialist"},
+            {"request_id": "fire", "model_key": "fire_smoke_specialist"},
+        ],
+    )
 
     assert captured["path"] == "/api/infer/jpeg/batch"
     assert [item["request_id"] for item in captured["batch"]] == [
@@ -1114,7 +1373,9 @@ def test_model_server_decodes_different_jpegs_concurrently(monkeypatch):
     ]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(model_server._decode_frame, jpeg) for jpeg in jpeg_frames]
+        futures = [
+            pool.submit(model_server._decode_frame, jpeg) for jpeg in jpeg_frames
+        ]
         assert both_decoders_entered.wait(0.5)
         release_decoders.set()
         decoded = [future.result() for future in futures]
@@ -1184,7 +1445,13 @@ def test_model_server_batches_models_after_one_decode(monkeypatch):
     client = TestClient(model_server.app, raise_server_exceptions=False)
     batch = [
         {"request_id": "coco", "model_key": "coco_primary", "conf": 0.3, "imgsz": 960},
-        {"request_id": "ppe", "model_key": "ppe_specialist", "conf": 0.25, "imgsz": 960, "classes": ["helmet"]},
+        {
+            "request_id": "ppe",
+            "model_key": "ppe_specialist",
+            "conf": 0.25,
+            "imgsz": 960,
+            "classes": ["helmet"],
+        },
     ]
     response = client.post(
         "/api/infer/jpeg/batch",
@@ -1217,7 +1484,12 @@ def test_model_server_accepts_raw_bgr_batch(monkeypatch):
     frame = np.zeros((120, 200, 3), dtype=np.uint8)
     batch = [
         {"request_id": "coco", "model_key": "coco_primary", "imgsz": 640},
-        {"request_id": "ppe", "model_key": "ppe_specialist", "imgsz": 640, "classes": ["helmet"]},
+        {
+            "request_id": "ppe",
+            "model_key": "ppe_specialist",
+            "imgsz": 640,
+            "classes": ["helmet"],
+        },
     ]
     response = client.post(
         "/api/infer/raw/batch",
@@ -1305,6 +1577,50 @@ def test_model_server_accepts_two_primary_raw_frames(monkeypatch):
     }
 
 
+def test_model_server_accepts_four_primary_raw_frames(monkeypatch):
+    captured = {}
+
+    def fake_batch(frames, *, conf, device, imgsz):
+        captured["count"] = len(frames)
+        return [[{"value": int(frame[0, 0, 0])}] for frame in frames]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_coco_record_batch", fake_batch
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frames = [np.full((4, 5, 3), value, dtype=np.uint8) for value in (10, 20, 30, 40)]
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "conf": 0.3,
+            "device": "cuda",
+            "imgsz": 640,
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index, frame in enumerate(frames)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/primary-batch4",
+        content=b"".join(frame.tobytes() for frame in frames),
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Primary-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["count"] == 4
+    assert response.json()["results"] == {
+        f"frame-{index}": [{"value": value}]
+        for index, value in enumerate((10, 20, 30, 40))
+    }
+
+
 def test_model_server_accepts_two_primary_ppe_raw_frames(monkeypatch):
     captured = {}
     classes = ["motorcycle helmet", "rider helmet", "helmet"]
@@ -1368,6 +1684,62 @@ def test_model_server_accepts_two_primary_ppe_raw_frames(monkeypatch):
     assert captured == {
         "primary": (2, 0.15, "cuda", 640),
         "ppe": (2, 0.2, "cuda", 640, classes),
+    }
+
+
+def test_model_server_accepts_four_primary_ppe_raw_frames(monkeypatch):
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+
+    def fake_primary(frames, *, conf, device, imgsz):
+        return [[{"primary": index}] for index in range(len(frames))]
+
+    def fake_ppe(frames, *, conf, device, imgsz, classes):
+        return [[{"ppe": index}] for index in range(len(frames))]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(model_server, "_SPECIALIST_BATCH_CONCURRENT", False)
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_coco_record_batch", fake_primary
+    )
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_ppe_record_batch", fake_ppe
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((4, 5, 3), dtype=np.uint8)
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "primary_conf": 0.15,
+            "primary_device": "cuda",
+            "primary_imgsz": 640,
+            "ppe_conf": 0.2,
+            "ppe_device": "cuda",
+            "ppe_imgsz": 640,
+            "ppe_classes": classes,
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index in range(4)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/specialist-batch4",
+        content=frame.tobytes() * 4,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Specialist-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"] == {
+        f"frame-{index}": {
+            "coco_primary": [{"primary": index}],
+            "ppe_specialist": [{"ppe": index}],
+        }
+        for index in range(4)
     }
 
 
@@ -1513,9 +1885,7 @@ def test_model_server_primary_batch_falls_back_when_engine_is_unavailable(
     monkeypatch.setattr(
         model_server,
         "_run_inference_frame",
-        lambda **kwargs: {
-            "detections": [{"value": int(kwargs["frame"][0, 0, 0])}]
-        },
+        lambda **kwargs: {"detections": [{"value": int(kwargs["frame"][0, 0, 0])}]},
     )
     client = TestClient(model_server.app, raise_server_exceptions=False)
     frames = [np.full((4, 5, 3), value, dtype=np.uint8) for value in (30, 40)]
@@ -1586,9 +1956,9 @@ def test_model_server_rejects_raw_frame_length_mismatch(monkeypatch):
         content=b"too-short",
         headers={
             "Content-Type": "application/octet-stream",
-            "X-Rakshak-Inference-Batch": json.dumps([
-                {"request_id": "coco", "model_key": "coco_primary"}
-            ]),
+            "X-Rakshak-Inference-Batch": json.dumps(
+                [{"request_id": "coco", "model_key": "coco_primary"}]
+            ),
             "X-Rakshak-Frame-Width": "20",
             "X-Rakshak-Frame-Height": "20",
             "X-Rakshak-Frame-Channels": "3",
@@ -1607,9 +1977,9 @@ def test_model_server_rejects_invalid_raw_frame_shape(monkeypatch):
         content=np.zeros((20, 20, 4), dtype=np.uint8).tobytes(),
         headers={
             "Content-Type": "application/octet-stream",
-            "X-Rakshak-Inference-Batch": json.dumps([
-                {"request_id": "coco", "model_key": "coco_primary"}
-            ]),
+            "X-Rakshak-Inference-Batch": json.dumps(
+                [{"request_id": "coco", "model_key": "coco_primary"}]
+            ),
             "X-Rakshak-Frame-Width": "20",
             "X-Rakshak-Frame-Height": "20",
             "X-Rakshak-Frame-Channels": "4",
@@ -1683,7 +2053,9 @@ def test_edge_anpr_falls_back_to_legacy_json(monkeypatch):
         return {"plates": []}
 
     monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
-    monkeypatch.setattr(model_manager, "_remote_post_jpeg", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        model_manager, "_remote_post_jpeg", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(model_manager, "_remote_post", fake_legacy)
 
     model_manager.predict_plate_records(
@@ -1694,7 +2066,9 @@ def test_edge_anpr_falls_back_to_legacy_json(monkeypatch):
     )
 
     decoded = cv2.imdecode(
-        np.frombuffer(base64.b64decode(captured["payload"]["frame_jpeg_b64"]), np.uint8),
+        np.frombuffer(
+            base64.b64decode(captured["payload"]["frame_jpeg_b64"]), np.uint8
+        ),
         cv2.IMREAD_COLOR,
     )
     assert decoded.shape == frame.shape
@@ -1809,12 +2183,15 @@ def test_remote_inference_concurrency_is_safely_bounded(
     else:
         monkeypatch.setenv(name, configured)
 
-    assert model_manager._bounded_env_int(
-        name,
-        2,
-        minimum=1,
-        maximum=8,
-    ) == expected
+    assert (
+        model_manager._bounded_env_int(
+            name,
+            2,
+            minimum=1,
+            maximum=8,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1839,12 +2216,15 @@ def test_remote_inference_admission_wait_is_safely_bounded(
     else:
         monkeypatch.setenv(name, configured)
 
-    assert model_manager._bounded_env_float(
-        name,
-        0.075,
-        minimum=0.0,
-        maximum=0.2,
-    ) == expected
+    assert (
+        model_manager._bounded_env_float(
+            name,
+            0.075,
+            minimum=0.0,
+            maximum=0.2,
+        )
+        == expected
+    )
 
 
 def test_model_server_runs_singleton_batch_without_executor_hop(monkeypatch):

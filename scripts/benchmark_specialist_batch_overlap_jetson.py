@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare sequential and concurrent primary/PPE batch-2 execution on Jetson."""
+"""Compare sequential and concurrent primary/PPE fixed-batch execution."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def _run_primary(frames: list[Any], conf: float) -> list[list[dict[str, Any]]]:
         imgsz=640,
     )
     if records is None:
-        raise RuntimeError("Batch-2 primary runtime is unavailable")
+        raise RuntimeError("Fixed-batch primary runtime is unavailable")
     return records
 
 
@@ -59,7 +59,7 @@ def _run_ppe(frames: list[Any], conf: float) -> list[list[dict[str, Any]]]:
         classes=PPE_CLASSES,
     )
     if records is None:
-        raise RuntimeError("Batch-2 PPE runtime is unavailable")
+        raise RuntimeError("Fixed-batch PPE runtime is unavailable")
     return records
 
 
@@ -95,8 +95,8 @@ def _load_frames(frames_dir: Path) -> list[Any]:
         if path.suffix.lower() in {".jpg", ".jpeg", ".png"}
     )
     frames = [cv2.imread(str(path)) for path in paths]
-    if len(frames) < 2 or any(frame is None for frame in frames):
-        raise RuntimeError("At least two readable validation frames are required")
+    if not frames or any(frame is None for frame in frames):
+        raise RuntimeError("At least one readable validation frame is required")
     return frames
 
 
@@ -106,14 +106,15 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--warmups", type=int, default=10)
     parser.add_argument("--repetitions", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, choices=(2, 4), default=2)
     parser.add_argument("--primary-conf", type=float, default=0.35)
     parser.add_argument("--ppe-conf", type=float, default=0.20)
     args = parser.parse_args()
 
     frames = _load_frames(args.frames_dir)
-    pairs = [
-        [frames[index % len(frames)], frames[(index + 1) % len(frames)]]
-        for index in range(0, len(frames), 2)
+    groups = [
+        [frames[(index + offset) % len(frames)] for offset in range(args.batch_size)]
+        for index in range(0, len(frames), args.batch_size)
     ]
     model_manager.initialize()
 
@@ -122,33 +123,33 @@ def main() -> int:
     mismatches = 0
     with ThreadPoolExecutor(max_workers=2) as executor:
         for index in range(args.warmups):
-            pair = pairs[index % len(pairs)]
-            _sequential(pair, args.primary_conf, args.ppe_conf)
-            _concurrent(executor, pair, args.primary_conf, args.ppe_conf)
+            group = groups[index % len(groups)]
+            _sequential(group, args.primary_conf, args.ppe_conf)
+            _concurrent(executor, group, args.primary_conf, args.ppe_conf)
 
         for index in range(args.repetitions):
-            pair = pairs[index % len(pairs)]
+            group = groups[index % len(groups)]
             # Alternate order to keep thermal and cache effects balanced.
             if index % 2:
                 concurrent_ms, concurrent_result = _time_call(
                     lambda: _concurrent(
                         executor,
-                        pair,
+                        group,
                         args.primary_conf,
                         args.ppe_conf,
                     )
                 )
                 sequential_ms, sequential_result = _time_call(
-                    lambda: _sequential(pair, args.primary_conf, args.ppe_conf)
+                    lambda: _sequential(group, args.primary_conf, args.ppe_conf)
                 )
             else:
                 sequential_ms, sequential_result = _time_call(
-                    lambda: _sequential(pair, args.primary_conf, args.ppe_conf)
+                    lambda: _sequential(group, args.primary_conf, args.ppe_conf)
                 )
                 concurrent_ms, concurrent_result = _time_call(
                     lambda: _concurrent(
                         executor,
-                        pair,
+                        group,
                         args.primary_conf,
                         args.ppe_conf,
                     )
@@ -162,7 +163,8 @@ def main() -> int:
     concurrent_summary = _summary(concurrent_latencies)
     report = {
         "frames": len(frames),
-        "frame_pairs": len(pairs),
+        "batch_size": args.batch_size,
+        "frame_groups": len(groups),
         "warmups_per_mode": args.warmups,
         "repetitions_per_mode": args.repetitions,
         "primary_conf": args.primary_conf,
@@ -171,11 +173,7 @@ def main() -> int:
         "sequential": sequential_summary,
         "concurrent": concurrent_summary,
         "median_speedup_percent": round(
-            (
-                sequential_summary["median_ms"]
-                / concurrent_summary["median_ms"]
-                - 1.0
-            )
+            (sequential_summary["median_ms"] / concurrent_summary["median_ms"] - 1.0)
             * 100.0,
             3,
         ),
