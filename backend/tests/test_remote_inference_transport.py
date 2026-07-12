@@ -444,6 +444,59 @@ def test_edge_uses_opt_in_raw_batch_and_restores_source_coordinates(monkeypatch)
     assert results["ppe"][0]["bbox"] == [200, 100, 1800, 1000]
 
 
+def test_raw_batch_posts_a_full_byte_view_without_frame_copy(monkeypatch):
+    source = np.arange(40 * 60 * 3, dtype=np.uint8).reshape((40, 60, 3))
+    frame = source[:, ::2]
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"results": {"primary": []}}
+
+    class Session:
+        @staticmethod
+        def post(url, *, data, headers, timeout):
+            captured.update(
+                url=url,
+                data=data,
+                headers=headers,
+                timeout=timeout,
+            )
+            return Response()
+
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_settings",
+        lambda: {"url": "http://model", "token": "", "timeout_seconds": 2.0},
+    )
+    monkeypatch.setattr(model_manager, "_remote_session", Session)
+    monkeypatch.setattr(
+        model_manager,
+        "_REMOTE_RAW_BATCH_SUPPORT",
+        {"url": None, "supported": None},
+    )
+
+    result = model_manager._remote_post_raw_batch(
+        "/api/infer/raw/batch",
+        frame,
+        batch=[{"request_id": "primary", "model_key": "coco_primary"}],
+    )
+
+    assert result == {"results": {"primary": []}}
+    assert isinstance(captured["data"], memoryview)
+    assert captured["data"].nbytes == frame.size
+    assert bytes(captured["data"]) == np.ascontiguousarray(frame).tobytes()
+    assert captured["headers"]["X-Rakshak-Frame-Width"] == "30"
+    assert captured["headers"]["X-Rakshak-Frame-Height"] == "40"
+
+
 def test_edge_raw_batch_falls_back_to_jpeg_for_older_server(monkeypatch):
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
     captured = {}

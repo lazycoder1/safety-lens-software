@@ -956,7 +956,10 @@ def _remote_post_raw_batch(
     })
     response = _remote_session().post(
         f"{settings['url']}{path}",
-        data=contiguous.tobytes(),
+        # A byte-cast view gives Requests the correct Content-Length while
+        # keeping the synchronous HTTP body backed by the contiguous frame.
+        # Avoid materializing a second full-frame bytes allocation per job.
+        data=memoryview(contiguous).cast("B"),
         headers=headers,
         timeout=settings["timeout_seconds"],
     )
