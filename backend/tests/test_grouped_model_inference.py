@@ -27,18 +27,47 @@ def test_rider_only_ppe_waits_for_coco_vehicle_context():
     assert plan["run_ppe_specialist"] is True
 
 
-def test_rider_only_ppe_runs_after_coco_motorcycle_detection():
+def test_rider_only_ppe_waits_for_evaluable_person_vehicle_association():
     plan = _rider_plan()
 
-    result = video_processing._context_gated_execution_plan(
+    gated = video_processing._context_gated_execution_plan(
         plan,
         [
             {
                 "class": "motorcycle",
                 "model_family": "coco_primary",
                 "confidence": 0.9,
+                "bbox": [30, 100, 130, 190],
             }
         ],
+        frame_w=200,
+        frame_h=200,
+    )
+
+    assert gated["run_ppe_specialist"] is False
+
+
+def test_rider_only_ppe_runs_after_evaluable_coco_rider_association():
+    plan = _rider_plan()
+
+    result = video_processing._context_gated_execution_plan(
+        plan,
+        [
+            {
+                "class": "person",
+                "model_family": "coco_primary",
+                "confidence": 0.9,
+                "bbox": [40, 10, 100, 155],
+            },
+            {
+                "class": "motorcycle",
+                "model_family": "coco_primary",
+                "confidence": 0.9,
+                "bbox": [30, 100, 130, 190],
+            },
+        ],
+        frame_w=200,
+        frame_h=200,
     )
 
     assert result is plan
@@ -49,7 +78,16 @@ def test_rider_gate_ignores_vehicle_label_from_non_coco_model():
 
     gated = video_processing._context_gated_execution_plan(
         plan,
-        [{"class": "motorcycle", "model_family": "ppe_specialist"}],
+        [
+            {
+                "class": "motorcycle",
+                "model_family": "ppe_specialist",
+                "confidence": 0.9,
+                "bbox": [30, 100, 130, 190],
+            }
+        ],
+        frame_w=200,
+        frame_h=200,
     )
 
     assert gated["run_ppe_specialist"] is False
@@ -71,7 +109,16 @@ def test_other_ppe_capabilities_run_after_coco_person_detection():
 
     result = video_processing._context_gated_execution_plan(
         plan,
-        [{"class": "person", "model_family": "coco_primary"}],
+        [
+            {
+                "class": "person",
+                "model_family": "coco_primary",
+                "confidence": 0.9,
+                "bbox": [40, 10, 100, 155],
+            }
+        ],
+        frame_w=200,
+        frame_h=200,
     )
 
     assert result is plan
@@ -83,10 +130,57 @@ def test_other_ppe_gate_ignores_person_from_non_coco_model():
 
     gated = video_processing._context_gated_execution_plan(
         plan,
-        [{"class": "person", "model_family": "ppe_specialist"}],
+        [
+            {
+                "class": "person",
+                "model_family": "ppe_specialist",
+                "confidence": 0.9,
+                "bbox": [40, 10, 100, 155],
+            }
+        ],
+        frame_w=200,
+        frame_h=200,
     )
 
     assert gated["run_ppe_specialist"] is False
+
+
+def test_other_ppe_gate_requires_person_inside_ppe_evaluation_zone():
+    plan = _rider_plan()
+    plan["capabilities"].append("helmet_required")
+    camera = {
+        "zones": [
+            {
+                "id": "ppe_gate",
+                "type": "ppe_evaluation",
+                "points": [[0.0, 0.0], [0.45, 0.0], [0.45, 1.0], [0.0, 1.0]],
+            }
+        ]
+    }
+    detection = {
+        "class": "person",
+        "model_family": "coco_primary",
+        "confidence": 0.9,
+        "bbox": [120, 10, 190, 155],
+    }
+
+    gated = video_processing._context_gated_execution_plan(
+        plan,
+        [detection],
+        camera=camera,
+        frame_w=200,
+        frame_h=200,
+    )
+    active = video_processing._context_gated_execution_plan(
+        plan,
+        [{**detection, "bbox": [10, 10, 80, 155]}],
+        camera=camera,
+        frame_w=200,
+        frame_h=200,
+    )
+
+    assert gated["run_ppe_specialist"] is False
+    assert active is plan
 
 
 def test_mobile_phone_probe_periodically_overrides_only_coco_width():

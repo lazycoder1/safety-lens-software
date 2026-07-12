@@ -63,6 +63,7 @@ from detection import (
     draw_detection_records,
     draw_pose_detections,
     extract_violation_bboxes,
+    has_ppe_specialist_context,
 )
 from mjpeg_fanout import stream_fanout
 
@@ -1265,8 +1266,12 @@ def _scheduled_execution_plan(execution_plan: dict, schedule_state: dict) -> dic
 def _context_gated_execution_plan(
     execution_plan: dict,
     previous_detections: list[dict],
+    *,
+    camera: dict | None = None,
+    frame_w: int | None = None,
+    frame_h: int | None = None,
 ) -> dict:
-    """Skip rider-only PPE until COCO has fresh rider-vehicle context."""
+    """Skip PPE work until COCO context can produce an actionable result."""
     if not (
         execution_plan.get("run_coco_primary")
         and execution_plan.get("run_ppe_specialist")
@@ -1277,16 +1282,12 @@ def _context_gated_execution_plan(
     )
     if not ppe_capabilities:
         return execution_plan
-    required_context_classes = (
-        {"motorcycle", "motorbike", "scooter"}
-        if ppe_capabilities == {"rider_helmet_required"}
-        else {"person"}
-    )
-    has_required_context = any(
-        detection.get("model_family") == "coco_primary"
-        and str(detection.get("class") or "").lower()
-        in required_context_classes
-        for detection in previous_detections
+    has_required_context = has_ppe_specialist_context(
+        previous_detections,
+        ppe_capabilities,
+        camera or {},
+        frame_w,
+        frame_h,
     )
     if has_required_context:
         return execution_plan
@@ -2915,6 +2916,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         runtime_plan = _context_gated_execution_plan(
                             scheduled_plan,
                             state.camera_detections.get(camera_id, []),
+                            camera=current_cam,
+                            frame_w=frame.shape[1],
+                            frame_h=frame.shape[0],
                         )
                         runtime_plan, mobile_phone_probe_due = (
                             _mobile_phone_probe_execution_plan(

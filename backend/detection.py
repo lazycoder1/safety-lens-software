@@ -813,6 +813,59 @@ def _rider_vehicle_associations(persons: list, vehicles: list) -> list[dict]:
     return associations
 
 
+def has_ppe_specialist_context(
+    detections: list[dict],
+    ppe_capabilities: set[str],
+    camera: dict,
+    frame_w: int | None = None,
+    frame_h: int | None = None,
+) -> bool:
+    """Return whether a PPE specialist can produce an actionable result.
+
+    Keep this gate aligned with the geometry, confidence, and zone filters used
+    by ``check_yoloe_violations``. Running the specialist for context that the
+    policy layer will immediately discard wastes GPU time and inflates model
+    duty without improving alert recall.
+    """
+    coco_detections = [
+        detection
+        for detection in detections
+        if detection.get("model_family") == "coco_primary"
+        and detection.get("bbox")
+    ]
+    scope_zones = _ppe_scope_zones(camera)
+    persons = [
+        detection
+        for detection in coco_detections
+        if _detection_class(detection.get("class")) == "person"
+        and _person_evaluable_for_ppe(detection["bbox"], frame_w, frame_h)
+        and _person_in_ppe_scope(
+            detection["bbox"],
+            scope_zones,
+            frame_w,
+            frame_h,
+        )
+    ]
+    if not persons:
+        return False
+
+    if ppe_capabilities != {"rider_helmet_required"}:
+        return True
+
+    rider_persons = [
+        person
+        for person in persons
+        if _rider_person_evaluable(person, frame_h)
+    ]
+    vehicles = [
+        detection
+        for detection in coco_detections
+        if _detection_class(detection.get("class")) in RIDER_VEHICLE_CLASSES
+        and _rider_vehicle_evaluable(detection, frame_h)
+    ]
+    return bool(_rider_vehicle_associations(rider_persons, vehicles))
+
+
 def _bbox_height_ratio(bbox: list, frame_h: int | None) -> float | None:
     if not frame_h:
         return None
