@@ -51,6 +51,7 @@ def _phase_offset(
     period: float,
     mode: str,
     group_size: int,
+    remainder_weight: float = 1.0,
 ) -> float:
     if mode == "aligned":
         return 0.0
@@ -59,7 +60,13 @@ def _phase_offset(
         return (camera_index // 2) * period / groups
     if mode == "grouped":
         groups = math.ceil(cameras / group_size)
-        return (camera_index // group_size) * period / groups
+        group_index = camera_index // group_size
+        remainder = cameras % group_size
+        if not remainder or remainder_weight == 1.0:
+            return group_index * period / groups
+        weights = [1.0] * groups
+        weights[-1] = remainder_weight
+        return period * sum(weights[:group_index]) / sum(weights)
     return camera_index * period / cameras
 
 
@@ -170,6 +177,15 @@ def main() -> int:
         action="store_true",
         help="Pass the known phase-group cardinality to edge microbatch routing",
     )
+    parser.add_argument(
+        "--phase-remainder-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Relative interval reserved after a partial final camera group. "
+            "Values below one move capacity to preceding full groups."
+        ),
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if args.cameras < 1 or args.fps <= 0 or args.duration <= 0:
@@ -198,6 +214,8 @@ def main() -> int:
         parser.error("RT-DETR substitution requires --transport edge")
     if not 20 <= args.jpeg_quality <= 100:
         parser.error("jpeg-quality must be between 20 and 100")
+    if not 0.1 <= args.phase_remainder_weight <= 1.0:
+        parser.error("phase-remainder-weight must be between 0.1 and 1.0")
 
     frame_sets: list[dict[int, np.ndarray]] = []
     for path in args.frames:
@@ -355,6 +373,7 @@ def main() -> int:
             period,
             args.phase_mode,
             args.phase_group_size,
+            args.phase_remainder_weight,
         )
         deadline = benchmark_start + args.duration
         sequence = 0
@@ -534,6 +553,7 @@ def main() -> int:
         "transport": args.transport,
         "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,
         "phase_mode": args.phase_mode,
+        "phase_remainder_weight": args.phase_remainder_weight,
         "phase_remainder_hint": args.phase_remainder_hint,
         "edge_primary_batch": (
             edge_model_manager.remote_primary_batch_stats()

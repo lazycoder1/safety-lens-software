@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_PATH = ROOT / "scripts" / "benchmark_conditional_model_server_load.py"
@@ -24,6 +26,26 @@ def test_grouped_phase_places_eighteen_camera_remainder_at_200ms():
     assert benchmark._phase_offset(16, 18, 0.25, "grouped", 4) == 0.2
     assert benchmark._phase_group_cardinality(16, 18, "grouped", 4) == 2
     assert benchmark._phase_group_cardinality(17, 18, "grouped", 4) == 2
+
+
+def test_grouped_phase_can_reserve_less_time_for_a_cheaper_remainder():
+    benchmark = _load_benchmark()
+
+    offsets = [
+        benchmark._phase_offset(camera, 22, 0.25, "grouped", 4, 0.8)
+        for camera in range(22)
+    ]
+
+    assert offsets[:4] == [0.0] * 4
+    assert offsets[4:8] == [0.25 / 5.8] * 4
+    assert offsets[20:] == [1.25 / 5.8] * 2
+    assert 0.25 - offsets[-1] == pytest.approx(0.25 * 0.8 / 5.8)
+
+
+def test_full_group_layout_ignores_remainder_weight():
+    benchmark = _load_benchmark()
+
+    assert benchmark._phase_offset(16, 20, 0.25, "grouped", 4, 0.5) == 0.2
 
 
 def test_one_eighth_duty_replaces_exactly_one_batch2_frame_per_second():
