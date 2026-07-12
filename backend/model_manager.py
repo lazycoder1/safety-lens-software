@@ -41,6 +41,20 @@ class RemoteInferenceOverloadedError(RuntimeError):
     """The bounded remote inference pool is busy with fresher admitted work."""
 
 
+def _bounded_env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        parsed = default
+    return min(maximum, max(minimum, parsed))
+
+
 MODELS_ROOT = PROJECT_ROOT / "models"
 TMP_MODELS_ROOT = Path(tempfile.gettempdir()) / "rakshak-lens-models"
 _JOB_POLL_FINAL_STATES = {"ready", "failed"}
@@ -49,10 +63,16 @@ _REMOTE_PAIR_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="remote-model-pair",
 )
-_REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(2)
+_REMOTE_JOB_MAX_INFLIGHT = _bounded_env_int(
+    "SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT",
+    2,
+    minimum=1,
+    maximum=8,
+)
+_REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(_REMOTE_JOB_MAX_INFLIGHT)
 # The phase scheduler keeps normal camera arrivals staggered. A 65 ms bounded
-# wait absorbed the remaining Jetson service-time jitter at ten 4 FPS camera
-# equivalents (960/960 requests) while eleven cameras still shed overload.
+# wait absorbs short service-time jitter without allowing stale camera work to
+# build an unbounded model-server queue.
 _REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.065
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90

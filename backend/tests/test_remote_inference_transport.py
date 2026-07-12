@@ -933,3 +933,32 @@ def test_model_server_keeps_legacy_json_anpr(monkeypatch):
         "device": "cpu",
         "imgsz": 640,
     }
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, 2),
+        ("invalid", 2),
+        ("0", 1),
+        ("3", 3),
+        ("99", 8),
+    ],
+)
+def test_remote_inference_concurrency_is_safely_bounded(
+    monkeypatch,
+    configured,
+    expected,
+):
+    name = "TEST_REMOTE_INFERENCE_MAX_INFLIGHT"
+    if configured is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, configured)
+
+    assert model_manager._bounded_env_int(
+        name,
+        2,
+        minimum=1,
+        maximum=8,
+    ) == expected
