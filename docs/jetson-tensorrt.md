@@ -108,6 +108,29 @@ export SAFETYLENS_COCO_TENSORRT_ENGINE=/app/models/coco_primary/yolo26s.engine
 docker compose -f docker-compose.split.yml up -d --force-recreate model-server
 ```
 
+## Lock clocks for sustained multi-camera inference
+
+Jetson `MAXN` power mode still allows GPU, CPU, and memory clocks to scale down.
+For an edge and model-server stack that must sustain its validated camera
+capacity, install the opt-in performance service on the Jetson host:
+
+```bash
+sudo ./scripts/install_jetson_performance_service.sh
+```
+
+The service stores the current dynamic clock policy before running
+`jetson_clocks`. Stopping it restores that policy:
+
+```bash
+sudo systemctl disable --now rakshak-lens-jetson-performance.service
+```
+
+Re-run the full site load test after enabling it and monitor `tegrastats` during
+a thermal soak. Do not enable this service on a passively cooled or
+power-constrained installation without validating temperature, power supply,
+and enclosure airflow. The service leaves fan control dynamic; it does not
+force maximum fan speed.
+
 At startup, SafetyLens verifies the sidecar, model hash, engine hash, task, and fixed image size before loading the engine. A missing, changed, mislabeled, or unloadable artifact is rejected and PyTorch is loaded. If TensorRT fails during inference, the same request is retried once after loading the source PyTorch model; runtime status exposes the active backend and fallback error.
 
 Configured fixed-shape COCO and PPE TensorRT runtimes are also executed during

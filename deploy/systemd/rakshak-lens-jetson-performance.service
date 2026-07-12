@@ -1,0 +1,18 @@
+[Unit]
+Description=Rakshak Lens Jetson maximum performance clocks
+After=nvpmodel.service
+ConditionPathExists=/usr/bin/jetson_clocks
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StateDirectory=rakshak-lens-performance
+ExecStartPre=/usr/bin/rm -f /var/lib/rakshak-lens-performance/l4t_dfs.conf
+ExecStartPre=/usr/bin/jetson_clocks --store /var/lib/rakshak-lens-performance/l4t_dfs.conf
+ExecStart=/usr/bin/jetson_clocks
+ExecStop=/usr/bin/jetson_clocks --restore /var/lib/rakshak-lens-performance/l4t_dfs.conf
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
