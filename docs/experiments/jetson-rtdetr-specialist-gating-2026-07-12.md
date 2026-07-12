@@ -52,6 +52,36 @@ The stricter evidence preserved all nine bursts. It shifted the first helmet fra
 
 The implemented gate goes further and exactly reuses the downstream size, confidence, person/vehicle geometry, and PPE-zone criteria. On the 24 extra office frames it suppressed the one old-gate specialist call; always-on specialist replay produced zero PPE detections on those frames.
 
+After deployment, a two-minute cam2 soak produced:
+
+- 429 primary observations;
+- 46 motorcycle-class frames and 45 person frames;
+- 2 PPE specialist calls (0.47% duty, down from the 16.7% baseline sample);
+- 1 allowed specialist frame with a helmet detection;
+- zero inference overloads or failures on both production cameras.
+
+The live scene was quieter than the baseline window, so capacity testing used the conservative 11.1% replay duty rather than 0.47%.
+
+## Conditional-load capacity
+
+The load test kept the two production RTSP cameras running and replayed four additional office-camera frames through the raw model-server path. Every virtual camera requested YOLO26 Small COCO at 4 FPS, a 960-pixel phone probe once per second, and YOLOE-26S PPE at 11.1% duty.
+
+| Total camera-equivalents | Requests | Minimum FPS | Overloads | Failures | Median | p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 6 | 960 | 4.00 | 0 | 0 | 21.63 ms | 41.92 ms |
+| 7 | 1,200 | 4.00 | 0 | 0 | 21.31 ms | 44.21 ms |
+| 8 | 1,440 | 4.00 | 0 | 0 | 21.51 ms | 43.32 ms |
+| 9 | 1,680 | 4.00 | 0 | 0 | 21.45 ms | 44.78 ms |
+| 10 | 1,915 / 1,920 | 3.95 | 5 | 0 | 22.14 ms | 52.71 ms |
+
+The conservative zero-drop inference limit is therefore nine camera-equivalents at 4 detection FPS. Ten is a borderline operating point with 0.26% admission loss and is not promoted as clean capacity.
+
+## Live decode check
+
+Two additional NVR channels were temporarily added to the application, producing four simultaneous real RTSP workers. All four used `gstreamer_nvdec`, stayed frame-fresh, and recorded zero inference drops or failures over 60 seconds. Motion-adaptive achieved rates were 1.02 and 1.27 FPS on static scenes and 3.10 and 3.26 FPS on active scenes. A fifth named NVR channel did not provide a stream.
+
+The site therefore validates four real simultaneous RTSP/decode pipelines. The nine-camera figure validates inference compute, not nine live decoders; a nine-channel NVR or RTSP simulator is still required for an end-to-end nine-stream soak. The temporary cameras were removed after the test.
+
 Raw evidence remains on the Jetson under:
 
 `/opt/rakshak-lens/model-server-models/experiments/rtdetr/`
