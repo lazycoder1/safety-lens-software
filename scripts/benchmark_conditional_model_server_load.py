@@ -120,7 +120,7 @@ def main() -> int:
     parser.add_argument(
         "--phase-group-size",
         type=int,
-        choices=(2, 4),
+        choices=(2, 4, 8),
         default=4,
         help="Camera arrival group used by --phase-mode grouped",
     )

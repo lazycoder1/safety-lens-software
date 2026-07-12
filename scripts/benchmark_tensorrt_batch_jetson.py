@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark a fixed-batch TensorRT detector on paired camera frames."""
+"""Benchmark a fixed-batch TensorRT detector on grouped camera frames."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--frames", nargs="+", type=Path, required=True)
-    parser.add_argument("--engine-batch", type=int, choices=(1, 2, 4), required=True)
+    parser.add_argument("--engine-batch", type=int, choices=(1, 2, 4, 8), required=True)
     parser.add_argument(
         "--group-size",
         type=int,
