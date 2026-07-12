@@ -2368,6 +2368,12 @@ def _is_live_frame_fresh(camera_id: str) -> bool:
     return frame_bytes is not None and age is not None and age <= state.CAMERA_FRAME_STALE_SECONDS
 
 
+def _freeze_inference_frame(frame: np.ndarray) -> np.ndarray:
+    """Retain one immutable captured buffer across streaming and inference."""
+    frame.setflags(write=False)
+    return frame
+
+
 def _run_detection_job(
     camera_id: str,
     frame: np.ndarray,
@@ -2982,7 +2988,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             pending_inference = inference_executor.submit(
                                 _run_detection_job,
                                 camera_id,
-                                frame.copy(),
+                                _freeze_inference_frame(frame),
                                 runtime_plan,
                                 schedule_state,
                                 current_cam,

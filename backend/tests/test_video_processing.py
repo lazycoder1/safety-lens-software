@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import pytest
 
 import camera_planner
 import state
@@ -945,3 +946,14 @@ def test_empty_violation_observation_clears_after_fresh_absence():
 
     assert "Missing gloves" not in windows
     assert active == set()
+
+
+def test_inference_frame_is_frozen_without_copying_pixels():
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+
+    frozen = video_processing._freeze_inference_frame(frame)
+
+    assert frozen is frame
+    assert frozen.flags.writeable is False
+    with pytest.raises(ValueError):
+        frozen[0, 0, 0] = 1
