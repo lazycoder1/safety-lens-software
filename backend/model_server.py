@@ -80,6 +80,17 @@ class InferenceBatchItem(BaseModel):
     classes: List[str] = Field(default_factory=list)
 
 
+class PrimaryFrameBatchItem(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    conf: float = Field(default=0.35, ge=0.0, le=1.0)
+    device: str = "cuda"
+    imgsz: int = Field(default=640, gt=0)
+    frame_width: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
+    frame_height: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
+    frame_channels: int = Field(default=3)
+    byte_length: int = Field(gt=0)
+
+
 class ModelInstallRequest(BaseModel):
     model_keys: List[str] = Field(default_factory=list)
 
@@ -100,6 +111,31 @@ def _parse_inference_batch(batch_json: str) -> List[InferenceBatchItem]:
     request_ids = [item.request_id for item in batch]
     if len(set(request_ids)) != len(request_ids):
         raise HTTPException(status_code=400, detail="Inference batch request IDs must be unique")
+    return batch
+
+
+def _parse_primary_frame_batch(batch_json: str) -> List[PrimaryFrameBatchItem]:
+    if len(batch_json) > 4_096:
+        raise HTTPException(status_code=413, detail="Primary frame batch metadata is too large")
+    try:
+        payload = json.loads(batch_json)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid primary frame batch metadata") from exc
+    if not isinstance(payload, list) or len(payload) != 2:
+        raise HTTPException(status_code=400, detail="Primary frame batch must contain exactly two frames")
+    try:
+        batch = [PrimaryFrameBatchItem(**item) for item in payload]
+    except (TypeError, ValidationError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid primary frame batch request") from exc
+    if len({item.request_id for item in batch}) != 2:
+        raise HTTPException(status_code=400, detail="Primary frame request IDs must be unique")
+    compatibility = {(item.conf, item.device, item.imgsz) for item in batch}
+    if len(compatibility) != 1:
+        raise HTTPException(status_code=400, detail="Primary frame batch settings must match")
+    for item in batch:
+        expected = item.frame_width * item.frame_height * item.frame_channels
+        if item.frame_channels != 3 or item.byte_length != expected:
+            raise HTTPException(status_code=400, detail="Invalid primary frame shape")
     return batch
 
 
@@ -442,3 +478,64 @@ def infer_raw_batch(
         (frame_height, frame_width, frame_channels)
     )
     return _run_inference_batch(frame, batch)
+
+
+@app.post("/api/infer/raw/primary-batch2")
+def infer_raw_primary_batch2(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-Primary-Frame-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Run two compatible primary frames, falling back sequentially if needed."""
+    _require_model_server_token(authorization)
+    batch = _parse_primary_frame_batch(batch_json)
+    if len(frame_bytes) != sum(item.byte_length for item in batch):
+        raise HTTPException(
+            status_code=400,
+            detail="Primary frame batch byte length does not match metadata",
+        )
+    frames = []
+    offset = 0
+    for item in batch:
+        end = offset + item.byte_length
+        frames.append(
+            np.frombuffer(memoryview(frame_bytes)[offset:end], dtype=np.uint8).reshape(
+                (item.frame_height, item.frame_width, item.frame_channels)
+            )
+        )
+        offset = end
+
+    first = batch[0]
+    try:
+        records = model_manager.predict_coco_record_batch(
+            frames,
+            conf=first.conf,
+            device=first.device,
+            imgsz=first.imgsz,
+        )
+        if records is None:
+            records = [
+                _run_inference_frame(
+                    model_key="coco_primary",
+                    frame=frame,
+                    conf=item.conf,
+                    device=item.device,
+                    imgsz=item.imgsz,
+                    classes=[],
+                )["detections"]
+                for frame, item in zip(frames, batch)
+            ]
+        if len(records) != 2:
+            raise RuntimeError("Primary frame batch returned the wrong result count")
+    except Exception as exc:
+        logger.exception("Primary frame batch inference failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Primary frame batch inference failed",
+        ) from exc
+    return {
+        "results": {
+            item.request_id: result
+            for item, result in zip(batch, records)
+        }
+    }

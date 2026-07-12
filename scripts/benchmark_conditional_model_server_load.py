@@ -366,6 +366,11 @@ def main() -> int:
         "transport": args.transport,
         "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,
         "phase_mode": args.phase_mode,
+        "edge_primary_batch": (
+            edge_model_manager.remote_primary_batch_stats()
+            if edge_model_manager is not None
+            else None
+        ),
         "requests": len(all_latencies),
         "overloads": sum(report["overloads"] for report in reports),
         "failures": sum(report["failures"] for report in reports),

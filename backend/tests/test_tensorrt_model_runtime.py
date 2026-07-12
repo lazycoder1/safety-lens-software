@@ -8,7 +8,15 @@ import model_manager
 from tensorrt_engine import build_manifest, manifest_path, write_manifest
 
 
-def _write_valid_artifacts(tmp_path, *, task="detect", classes=None, class_groups=None, imgsz=960):
+def _write_valid_artifacts(
+    tmp_path,
+    *,
+    task="detect",
+    classes=None,
+    class_groups=None,
+    imgsz=960,
+    batch=1,
+):
     source = tmp_path / "model.pt"
     engine = tmp_path / "model.engine"
     source.write_bytes(b"pytorch-model")
@@ -21,6 +29,7 @@ def _write_valid_artifacts(tmp_path, *, task="detect", classes=None, class_group
             imgsz=imgsz,
             precision="fp16",
             task=task,
+            batch=batch,
             classes=classes,
             class_groups=class_groups,
         ),
@@ -236,6 +245,86 @@ def test_low_resolution_coco_engine_is_warmed_before_camera_inference(tmp_path, 
     assert used is True
     assert result == ["result"]
     assert [call[1]["imgsz"] for call in calls] == [512, 512, 512]
+
+
+def test_batch2_coco_engine_returns_one_record_list_per_frame(tmp_path, monkeypatch):
+    source, engine = _write_valid_artifacts(tmp_path, imgsz=640, batch=2)
+    calls = []
+
+    class FakeHandle:
+        def predict(self, frames, **kwargs):
+            calls.append((len(frames), kwargs))
+            return ["left-result", "right-result"]
+
+    monkeypatch.setenv("SAFETYLENS_COCO_BATCH2_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(
+        model_manager,
+        "_COCO_BATCH2_RUNTIME",
+        model_manager._new_model_runtime(),
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["coco_primary"], "active_path", str(source)
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["coco_primary"], "status", "ready"
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ultralytics",
+        SimpleNamespace(YOLO=lambda path, task=None: FakeHandle()),
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_records_from_results",
+        lambda results: [{"result": results[0]}],
+    )
+    monkeypatch.setattr(model_manager, "_runtime_device", lambda device: device)
+
+    records = model_manager.predict_coco_record_batch(
+        [
+            np.zeros((320, 640, 3), dtype=np.uint8),
+            np.zeros((480, 640, 3), dtype=np.uint8),
+        ],
+        conf=0.35,
+        device="cuda",
+        imgsz=640,
+    )
+
+    assert records == [
+        [{"result": "left-result"}],
+        [{"result": "right-result"}],
+    ]
+    assert calls == [
+        (2, {"conf": 0.25, "verbose": False, "device": "cuda", "imgsz": 640}),
+        (2, {"conf": 0.35, "verbose": False, "device": "cuda", "imgsz": 640}),
+    ]
+
+
+def test_batch2_coco_runtime_rejects_batch1_manifest(tmp_path, monkeypatch):
+    source, engine = _write_valid_artifacts(tmp_path, imgsz=640, batch=1)
+    runtime = model_manager._new_model_runtime()
+    monkeypatch.setenv("SAFETYLENS_COCO_BATCH2_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(model_manager, "_COCO_BATCH2_RUNTIME", runtime)
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["coco_primary"], "active_path", str(source)
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["coco_primary"], "status", "ready"
+    )
+
+    records = model_manager.predict_coco_record_batch(
+        [
+            np.zeros((320, 640, 3), dtype=np.uint8),
+            np.zeros((320, 640, 3), dtype=np.uint8),
+        ],
+        conf=0.35,
+        device="cuda",
+        imgsz=640,
+    )
+
+    assert records is None
+    assert runtime["runtime_backend"] == "tensorrt_rejected"
+    assert "batch size mismatch" in runtime["runtime_fallback_error"]
 
 
 def test_fixed_tensorrt_runtime_is_warmed_before_reporting_ready(monkeypatch):

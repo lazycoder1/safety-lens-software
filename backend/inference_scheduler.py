@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 
 
 INFERENCE_PHASE_EPOCH = time.monotonic()
+
+
+def _phase_group_size() -> int:
+    try:
+        value = int(os.environ.get("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "1"))
+    except (TypeError, ValueError):
+        value = 1
+    return min(4, max(1, value))
 
 
 def camera_phase_offset(camera_id: str, cfg: dict, interval_seconds: float) -> float:
@@ -21,7 +30,10 @@ def camera_phase_offset(camera_id: str, cfg: dict, interval_seconds: float) -> f
     if camera_id not in camera_ids:
         camera_ids.append(camera_id)
         camera_ids.sort()
-    return camera_ids.index(camera_id) * interval_seconds / len(camera_ids)
+    group_size = _phase_group_size()
+    group_count = math.ceil(len(camera_ids) / group_size)
+    group_index = camera_ids.index(camera_id) // group_size
+    return group_index * interval_seconds / group_count
 
 
 def next_inference_slot(

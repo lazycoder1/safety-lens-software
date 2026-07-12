@@ -12,12 +12,28 @@ def _config(camera_count=5):
     }
 
 
-def test_camera_phases_are_evenly_spaced_across_interval():
+def test_camera_phases_are_evenly_spaced_across_interval(monkeypatch):
+    monkeypatch.delenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", raising=False)
     cfg = _config(5)
 
     offsets = [camera_phase_offset(f"cam{index + 1}", cfg, 1.0 / 3.0) for index in range(5)]
 
     assert offsets == pytest.approx([0.0, 1 / 15, 2 / 15, 3 / 15, 4 / 15])
+
+
+def test_camera_phases_can_be_grouped_for_pre_admission_batching(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "2")
+    cfg = _config(5)
+
+    offsets = [camera_phase_offset(f"cam{index + 1}", cfg, 0.3) for index in range(5)]
+
+    assert offsets == pytest.approx([0.0, 0.0, 0.1, 0.1, 0.2])
+
+
+def test_invalid_phase_group_size_falls_back_to_one(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "invalid")
+
+    assert camera_phase_offset("cam2", _config(2), 0.4) == pytest.approx(0.2)
 
 
 def test_next_slot_preserves_shared_grid_after_missed_cycle():
