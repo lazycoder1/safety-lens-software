@@ -124,6 +124,7 @@ def _build_health():
     snapshot["alertPipeline"] = pipeline_stats
     snapshot["inferenceTransport"] = {
         "primaryFrameBatch": model_manager.remote_primary_batch_stats(),
+        "specialistFrameBatch": model_manager.remote_specialist_batch_stats(),
     }
     _apply_persistence_health(snapshot, pipeline_stats)
     _apply_outbox_health(snapshot, pipeline_stats)

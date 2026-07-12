@@ -6,7 +6,9 @@ Promote the opt-in profile on the tested Orin NX while retaining the previous
 containers for rollback. Pairing two compatible primary-only frames on the
 edge *before* remote admission moves the measured conditional Small-model
 inference boundary from fourteen to fifteen camera-equivalents at 4 FPS.
-Sixteen remains beyond the zero-drop boundary.
+The follow-up conditional-specialist batch-2 experiment supersedes this
+boundary and promotes sixteen camera-equivalents; see
+`jetson-specialist-microbatch-2026-07-12.md`.
 
 This is an inference-capacity result, not a claim that fifteen simultaneous
 RTSP decoders have been validated. The two office cameras are running the

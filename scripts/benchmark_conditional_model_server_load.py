@@ -371,6 +371,11 @@ def main() -> int:
             if edge_model_manager is not None
             else None
         ),
+        "edge_specialist_batch": (
+            edge_model_manager.remote_specialist_batch_stats()
+            if edge_model_manager is not None
+            else None
+        ),
         "requests": len(all_latencies),
         "overloads": sum(report["overloads"] for report in reports),
         "failures": sum(report["failures"] for report in reports),

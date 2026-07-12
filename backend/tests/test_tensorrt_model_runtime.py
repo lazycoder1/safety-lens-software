@@ -327,6 +327,121 @@ def test_batch2_coco_runtime_rejects_batch1_manifest(tmp_path, monkeypatch):
     assert "batch size mismatch" in runtime["runtime_fallback_error"]
 
 
+def test_batch2_ppe_engine_returns_deduplicated_records_per_frame(
+    tmp_path,
+    monkeypatch,
+):
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+    groups = ["rider_helmet_required"] * 3
+    source, engine = _write_valid_artifacts(
+        tmp_path,
+        task="segment",
+        classes=classes,
+        class_groups=groups,
+        imgsz=640,
+        batch=2,
+    )
+    calls = []
+    deduplications = []
+
+    class FakeHandle:
+        names = dict(enumerate(classes))
+
+        def predict(self, frames, **kwargs):
+            calls.append((len(frames), kwargs))
+            return ["left-result", "right-result"]
+
+    monkeypatch.setenv("SAFETYLENS_PPE_BATCH2_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(
+        model_manager,
+        "_PPE_BATCH2_RUNTIME",
+        model_manager._new_model_runtime(),
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["ppe_specialist"], "active_path", str(source)
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["ppe_specialist"], "status", "ready"
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ultralytics",
+        SimpleNamespace(YOLO=lambda path, task=None: FakeHandle()),
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_records_from_results",
+        lambda results: [{"result": results[0]}],
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_deduplicate_prompt_synonyms",
+        lambda records, active_classes, *, class_groups: (
+            deduplications.append((active_classes, class_groups)) or records
+        ),
+    )
+    monkeypatch.setattr(model_manager, "_runtime_device", lambda device: device)
+
+    records = model_manager.predict_ppe_record_batch(
+        [
+            np.zeros((320, 640, 3), dtype=np.uint8),
+            np.zeros((480, 640, 3), dtype=np.uint8),
+        ],
+        conf=0.2,
+        device="cuda",
+        imgsz=640,
+        classes=classes,
+    )
+
+    assert records == [
+        [{"result": "left-result"}],
+        [{"result": "right-result"}],
+    ]
+    assert calls == [
+        (2, {"conf": 0.25, "verbose": False, "device": "cuda", "imgsz": 640}),
+        (2, {"conf": 0.2, "verbose": False, "device": "cuda", "imgsz": 640}),
+    ]
+    assert deduplications == [(classes, groups), (classes, groups)]
+
+
+def test_batch2_ppe_runtime_rejects_prompt_mismatch(tmp_path, monkeypatch):
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+    source, engine = _write_valid_artifacts(
+        tmp_path,
+        task="segment",
+        classes=classes,
+        class_groups=["rider_helmet_required"] * 3,
+        imgsz=640,
+        batch=2,
+    )
+    monkeypatch.setenv("SAFETYLENS_PPE_BATCH2_TENSORRT_ENGINE", str(engine))
+    monkeypatch.setattr(
+        model_manager,
+        "_PPE_BATCH2_RUNTIME",
+        model_manager._new_model_runtime(),
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["ppe_specialist"], "active_path", str(source)
+    )
+    monkeypatch.setitem(
+        model_manager._MODEL_STATES["ppe_specialist"], "status", "ready"
+    )
+
+    records = model_manager.predict_ppe_record_batch(
+        [
+            np.zeros((320, 640, 3), dtype=np.uint8),
+            np.zeros((320, 640, 3), dtype=np.uint8),
+        ],
+        conf=0.2,
+        device="cuda",
+        imgsz=640,
+        classes=["hard hat"],
+    )
+
+    assert records is None
+    assert model_manager._PPE_BATCH2_RUNTIME["runtime_backend"] == "tensorrt_lazy"
+
+
 def test_fixed_tensorrt_runtime_is_warmed_before_reporting_ready(monkeypatch):
     calls = []
 

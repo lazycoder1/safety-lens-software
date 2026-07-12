@@ -71,6 +71,12 @@ def main() -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--frames", nargs="+", type=Path, required=True)
     parser.add_argument("--engine-batch", type=int, choices=(1, 2), required=True)
+    parser.add_argument(
+        "--task",
+        choices=("detect", "segment"),
+        default="detect",
+        help="Ultralytics task embedded in the fixed TensorRT engine",
+    )
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--conf", type=float, default=0.10)
     parser.add_argument("--warmups", type=int, default=5)
@@ -91,7 +97,7 @@ def main() -> int:
 
     from ultralytics import YOLO
 
-    model = YOLO(str(args.model), task="detect")
+    model = YOLO(str(args.model), task=args.task)
     for index in range(args.warmups):
         pair = [frames[(index * 2) % len(frames)], frames[(index * 2 + 1) % len(frames)]]
         _predict_group(
@@ -138,6 +144,7 @@ def main() -> int:
     report = {
         "model": args.model.name,
         "engine_batch": args.engine_batch,
+        "task": args.task,
         "imgsz": args.imgsz,
         "conf": args.conf,
         "warmups": args.warmups,

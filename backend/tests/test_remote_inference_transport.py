@@ -815,6 +815,178 @@ def test_edge_primary_batch_propagates_admission_overload_to_both_callers(
     assert batcher.stats()["pairs_executed"] == 0
 
 
+def test_edge_pairs_matching_primary_ppe_frames_before_admission(monkeypatch):
+    class CountingAdmission:
+        def __init__(self):
+            self.acquires = 0
+            self.releases = 0
+
+        def acquire(self, *, timeout):
+            assert timeout == model_manager._REMOTE_JOB_ADMISSION_WAIT_SECONDS
+            self.acquires += 1
+            return True
+
+        def release(self):
+            self.releases += 1
+
+    admission = CountingAdmission()
+    batcher = model_manager._RemoteSpecialistFrameBatcher(0.1)
+    captured = {}
+
+    def fake_specialist_batch(items):
+        captured["shapes"] = [item["frame"].shape for item in items]
+        return {
+            "results": {
+                f"frame-{index}": {
+                    "coco_primary": [{"bbox": [10, 20, 100, 200]}],
+                    "ppe_specialist": [{"bbox": [20, 10, 80, 100]}],
+                }
+                for index in range(2)
+            }
+        }
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch2_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", admission)
+    monkeypatch.setattr(model_manager, "_REMOTE_SPECIALIST_FRAME_BATCHER", batcher)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_specialist_batch2",
+        fake_specialist_batch,
+    )
+    frames = [
+        np.zeros((1080, 1920, 3), dtype=np.uint8),
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+    ]
+
+    def requests():
+        return [
+            {
+                "request_id": "coco",
+                "model_key": "coco_primary",
+                "conf": 0.15,
+                "imgsz": 640,
+            },
+            {
+                "request_id": "ppe",
+                "model_key": "ppe_specialist",
+                "conf": 0.2,
+                "imgsz": 640,
+                "classes": ["motorcycle helmet", "rider helmet", "helmet"],
+            },
+        ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(model_manager.predict_record_batches, frame, requests())
+            for frame in frames
+        ]
+        results = [future.result() for future in futures]
+
+    assert admission.acquires == 1
+    assert admission.releases == 1
+    assert captured["shapes"] == [(360, 640, 3), (360, 640, 3)]
+    assert results[0]["coco"][0]["bbox"] == [30, 60, 300, 600]
+    assert results[0]["ppe"][0]["bbox"] == [60, 30, 240, 300]
+    assert results[1]["coco"][0]["bbox"] == [20, 40, 200, 400]
+    assert results[1]["ppe"][0]["bbox"] == [40, 20, 160, 200]
+    assert batcher.stats()["paired_requests"] == 2
+    assert batcher.stats()["pairs_executed"] == 1
+
+
+def test_edge_specialist_batch_requires_matching_prompt_sets(monkeypatch):
+    batcher = model_manager._RemoteSpecialistFrameBatcher(0.001)
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch2_route_may_run", lambda: True
+    )
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+
+    def requests(classes):
+        return [
+            {
+                "request_id": "coco",
+                "model_key": "coco_primary",
+                "conf": 0.15,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": [],
+            },
+            {
+                "request_id": "ppe",
+                "model_key": "ppe_specialist",
+                "conf": 0.2,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": classes,
+            },
+        ]
+
+    request_sets = [requests(["helmet"]), requests(["hard hat"])]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(batcher.submit, [frame, frame], request_sets))
+
+    assert outcomes == [(False, {}), (False, {})]
+    assert batcher.stats()["pairs_executed"] == 0
+    assert batcher.stats()["timeout_fallbacks"] == 2
+
+
+def test_edge_specialist_batch_route_fallback_reuses_grouped_path(monkeypatch):
+    batcher = model_manager._RemoteSpecialistFrameBatcher(0.1)
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch2_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(model_manager, "_REMOTE_SPECIALIST_FRAME_BATCHER", batcher)
+    monkeypatch.setattr(
+        model_manager, "_remote_post_raw_specialist_batch2", lambda _items: None
+    )
+    monkeypatch.setenv("SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT", "true")
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_batch",
+        lambda _path, _frame, *, batch: {
+            "results": {item["request_id"]: [] for item in batch}
+        },
+    )
+    frame = np.zeros((20, 30, 3), dtype=np.uint8)
+
+    def requests(index):
+        return [
+            {
+                "request_id": f"coco-{index}",
+                "model_key": "coco_primary",
+                "conf": 0.15,
+                "imgsz": 640,
+            },
+            {
+                "request_id": f"ppe-{index}",
+                "model_key": "ppe_specialist",
+                "conf": 0.2,
+                "imgsz": 640,
+                "classes": ["motorcycle helmet", "rider helmet", "helmet"],
+            },
+        ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                model_manager.predict_record_batches,
+                frame,
+                requests(index),
+            )
+            for index in range(2)
+        ]
+        results = [future.result() for future in futures]
+
+    assert results == [
+        {"coco-0": [], "ppe-0": []},
+        {"coco-1": [], "ppe-1": []},
+    ]
+    assert batcher.stats()["route_fallbacks"] == 2
+
+
 def test_edge_uses_batch_route_for_more_than_two_models(monkeypatch):
     frame = np.zeros((90, 160, 3), dtype=np.uint8)
     captured = {}
@@ -1131,6 +1303,117 @@ def test_model_server_accepts_two_primary_raw_frames(monkeypatch):
         "device": "cuda",
         "imgsz": 640,
     }
+
+
+def test_model_server_accepts_two_primary_ppe_raw_frames(monkeypatch):
+    captured = {}
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+
+    def fake_primary(frames, *, conf, device, imgsz):
+        captured["primary"] = (len(frames), conf, device, imgsz)
+        return [[{"primary": "left"}], [{"primary": "right"}]]
+
+    def fake_ppe(frames, *, conf, device, imgsz, classes):
+        captured["ppe"] = (len(frames), conf, device, imgsz, classes)
+        return [[{"ppe": "left"}], [{"ppe": "right"}]]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_coco_record_batch", fake_primary
+    )
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_ppe_record_batch", fake_ppe
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frames = [np.full((4, 5, 3), value, dtype=np.uint8) for value in (10, 20)]
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "primary_conf": 0.15,
+            "primary_device": "cuda",
+            "primary_imgsz": 640,
+            "ppe_conf": 0.2,
+            "ppe_device": "cuda",
+            "ppe_imgsz": 640,
+            "ppe_classes": classes,
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index, frame in enumerate(frames)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/specialist-batch2",
+        content=b"".join(frame.tobytes() for frame in frames),
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Specialist-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"] == {
+        "frame-0": {
+            "coco_primary": [{"primary": "left"}],
+            "ppe_specialist": [{"ppe": "left"}],
+        },
+        "frame-1": {
+            "coco_primary": [{"primary": "right"}],
+            "ppe_specialist": [{"ppe": "right"}],
+        },
+    }
+    assert captured == {
+        "primary": (2, 0.15, "cuda", 640),
+        "ppe": (2, 0.2, "cuda", 640, classes),
+    }
+
+
+def test_model_server_specialist_batch_falls_back_when_runtime_unavailable(
+    monkeypatch,
+):
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(
+        model_server.model_manager,
+        "predict_coco_record_batch",
+        lambda *_args, **_kwargs: [[], []],
+    )
+    monkeypatch.setattr(
+        model_server.model_manager,
+        "predict_ppe_record_batch",
+        lambda *_args, **_kwargs: None,
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((4, 5, 3), dtype=np.uint8)
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "primary_conf": 0.15,
+            "primary_imgsz": 640,
+            "ppe_conf": 0.2,
+            "ppe_imgsz": 640,
+            "ppe_classes": classes,
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index in range(2)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/specialist-batch2",
+        content=frame.tobytes() * 2,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Specialist-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Batch-2 specialist runtimes are unavailable"
 
 
 def test_model_server_primary_frame_batch_requires_auth(monkeypatch):
