@@ -361,10 +361,11 @@ failed CUDA context. Only COCO person (`0`) and cell phone (`67`) records leave
 the route; all other unvalidated classes are discarded before the normal record
 contract.
 
-The route remains default-off and is not called by the camera worker. That is
-intentional: replacing a normal COCO frame with person/phone-only output could
-otherwise falsely clear unrelated vehicle or animal rules. Worker activation
-still requires rule-state carry-forward and phone-qualified track gating.
+At this stage the route remained default-off and was not called by the camera
+worker. Replacing a normal COCO frame with person/phone-only output could
+otherwise falsely clear unrelated vehicle or animal rules. The later worker
+integration below supplies capability-scoped rule state and phone-qualified
+track gating before activation.
 
 ### Isolated route results
 
@@ -427,3 +428,92 @@ Raw build logs, engines, timing cache, and JSON benchmark evidence remain on
 the Jetson under:
 
 `/opt/rakshak-lens/model-server-models/experiments/rtdetrv4-s/`
+
+## Production camera-worker integration — 2026-07-13
+
+The camera worker now treats RT-DETR output as an explicitly partial
+observation of only the `mobile_phone` capability. A partial frame can add or
+clear a mobile-phone vote, but it cannot advance, clear, or deactivate animal,
+vehicle, zone, crowd, object-lifecycle, fall, or PPE rule state. If the optional
+route is absent or unhealthy, the same job falls back to the normal YOLO Small
+primary and restores full-observation semantics.
+
+A lightweight person tracker gates admission. It stores only bounding boxes,
+hit counts, and monotonic timestamps; no frames are copied. A person must match
+the primary YOLO track for two observations, and the context expires after one
+second. RT-DETR therefore does no work in an empty scene and cannot bootstrap
+itself from its own person detections.
+
+For larger deployments, a process-wide scheduler chooses two stable-person
+cameras from the same four-camera inference phase. It rotates pairs fairly and
+admits one pair every two seconds, which is exactly one aggregate RT frame per
+second. The edge transport waits at most 14 ms for the phase partner and uses
+the authenticated batch-2 endpoint. Deployments with at most two configured
+cameras may use batch-1 at one FPS when only one camera has a stable person;
+larger deployments fail closed rather than breaking a four-frame primary group
+for a singleton.
+
+### Integrated edge-to-server load
+
+The 20-camera split topology was repeated twice with the edge itself making RT
+requests. This replaces the earlier benchmark's separate RT process and covers
+the worker transport, shared admission semaphore, batch rendezvous, raw-frame
+serialization, server route, TensorRT runtime, record scaling, and PPE
+deferral.
+
+| Run | Effective decisions | RT substitutions | PPE passes | Overloads / failures | Primary p95 | Primary maximum | RT median | RT p95 | RT maximum |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 4,800 / 4,800 | 60 / 60 | 520 | 0 / 0 | 146.235 ms | 211.517 ms | 65.222 ms | 160.044 ms | 171.459 ms |
+| 2 | 4,800 / 4,800 | 60 / 60 | 520 | 0 / 0 | 147.604 ms | 210.018 ms | 66.063 ms | 157.155 ms | 165.543 ms |
+
+The second run recorded all 60 RT frames as exactly 30 batch-2 calls, with zero
+batch-1 spill, admission overloads, or route failures. The integrated verifier
+passed the 250 ms primary and RT freshness bounds.
+
+### Worker alert semantics
+
+All ten labelled phone frames were replayed through the actual
+`video_processing._run_grouped_inference` path and then the production
+`check_violations` phone-to-person association:
+
+- actionable positives remained `5 / 6`;
+- actionable negatives remained `0 / 4`;
+- every record retained `rtdetr_phone` attribution;
+- a phone-only negative observation advanced the phone window;
+- a simultaneous active animal window and alert remained unchanged.
+
+Local integration tests also proved that two RT phone candidates satisfy the
+configured threshold and submit a normal mobile-phone alert while an unrelated
+animal incident remains active.
+
+### Live promotion
+
+The RT-capable model server and worker candidate were promoted on the Jetson,
+and `rtdetr_phone_substitution_enabled` was enabled for its two configured
+mobile-phone cameras. During the overnight observation cam2 remained fresh on
+`gstreamer_nvdec` with zero inference failures or overloads; cam1 remained in
+its pre-existing source outage. The mostly empty scene admitted no RT work. A
+brief stable primary person track later triggered exactly one batch-1 RT frame,
+which completed with zero route failures or admission overloads; the context
+then expired and GPU work stopped again.
+
+The rollout also exposed a pre-existing watchdog defect. The systemd service
+probed host port 8100 even though the model server is only attached to the
+Docker network, so it falsely restarted a healthy warmed container. The
+watchdog now performs its health request inside the named container. Two
+subsequent timer intervals completed successfully without changing the model
+container start time or restart count.
+
+Finally, the checked-in Jetson Compose defaults now match the measured live
+settings: four admitted jobs, 125 ms admission bound, 14 ms primary/PPE batch
+wait, batch-4 routing, 6 ms batch-2 early flush, and four-camera phases.
+
+The supported production choices are now:
+
+- 21 cameras at 4 AI FPS without RT-DETR;
+- 20 cameras at 4 effective AI FPS plus one device-wide RT-DETRv4-S phone
+  recall FPS, with PPE duty preserved.
+
+Integrated worker evidence is stored on the Jetson under:
+
+`/opt/rakshak-lens/model-server-models/experiments/rtdetrv4-s/worker/`
