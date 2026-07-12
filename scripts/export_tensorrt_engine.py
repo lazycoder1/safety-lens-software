@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import json
 import multiprocessing
 import os
@@ -27,6 +28,35 @@ from tensorrt_engine import (  # noqa: E402
 
 
 DEFAULT_TRTEXEC_PATH = Path("/usr/src/tensorrt/bin/trtexec")
+
+
+def _require_manifest_helper_compatibility() -> None:
+    parameters = inspect.signature(build_manifest).parameters.values()
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_kwargs:
+        return
+    supported = {parameter.name for parameter in parameters}
+    required = {
+        "source_path",
+        "engine_path",
+        "imgsz",
+        "precision",
+        "task",
+        "batch",
+        "classes",
+        "class_groups",
+        "metadata",
+    }
+    missing = sorted(required - supported)
+    if missing:
+        raise RuntimeError(
+            "TensorRT export and manifest helper are from different revisions; "
+            f"missing helper arguments: {', '.join(missing)}. "
+            "Rebuild the model-server image."
+        )
 
 
 def _require_fixed_prompt_dependencies() -> None:
@@ -240,6 +270,7 @@ def export_engine(
         raise FileNotFoundError("INT8 export requires a calibration dataset YAML")
     if precision == "int8" and low_memory:
         raise ValueError("INT8 calibration is not supported by the low-memory trtexec path")
+    _require_manifest_helper_compatibility()
     if low_memory and not trtexec_path.is_file():
         raise FileNotFoundError(f"TensorRT builder does not exist: {trtexec_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)

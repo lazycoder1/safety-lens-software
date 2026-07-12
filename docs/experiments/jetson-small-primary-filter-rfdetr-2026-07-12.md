@@ -117,3 +117,49 @@ period at p95. Production therefore remains at three slots and 75 ms. The
 benchmark gained `--edge-url-override` so an isolated container can exercise
 `model_manager.predict_record_batches()` without mounting production camera
 configuration or copying its secrets.
+
+## Grouped specialist serialization follow-up
+
+Running the primary and PPE models sequentially inside a grouped model-server
+request was tested as a way to lower simultaneous GPU pressure. It made the
+queue worse because the primary result could no longer overlap the conditional
+specialist execution.
+
+| Shape | Completed | Drops | p95 | Specialist calls |
+| --- | ---: | ---: | ---: | ---: |
+| 15 cameras, 3 slots, 75 ms | 1773 / 1800 | 27 | 106.075 ms | 178 |
+| 15 cameras, 4 slots, 100 ms | 1794 / 1800 | 6 | 135.982 ms | not reduced |
+
+The parallel grouped-model implementation was restored. The result also shows
+that lowering instantaneous GPU concurrency is not automatically an
+optimization when it lengthens admission occupancy and drops scheduled work.
+
+## INT8 fixed-prompt PPE follow-up
+
+A YOLOE-26S 640px INT8 fixed-prompt candidate was calibrated with 256 live
+office frames plus all 18 PPE validation images. The build completed in 500.2
+seconds with a 1 GiB TensorRT workspace and produced an 11.9 MiB engine. It was
+compared with the deployed YOLOE-26S FP16 engine across the 18-image PPE corpus
+at the production 0.20 confidence threshold, with five warmups and five timed
+repetitions per image. `scripts/benchmark_fixed_ppe_engine.py` records the
+per-image prompt, confidence, box, and latency evidence for repeatable paired
+promotion checks.
+
+| Engine | Mean | Median | p95 | PPE detections |
+| --- | ---: | ---: | ---: | ---: |
+| YOLOE-26S FP16 640 | 18.649 ms | 18.164 ms | 20.636 ms | 13 |
+| YOLOE-26S INT8 640 | 14.062 ms | 13.766 ms | 16.049 ms | 4 |
+
+The 24% mean latency improvement does not justify the detection collapse. The
+INT8 engine lost all above-threshold detections in three helmet-positive
+frames, reduced the seven detections in `factory-ppe-gate.jpg` to two, and
+lowered its strongest helmet confidence from 0.8525 to 0.2723. The candidate
+is rejected and production remains on FP16 PPE.
+
+The export also exposed build-image drift: the current export script accepted
+the `batch` manifest field, while the deployed model-server image contained an
+older `tensorrt_engine.build_manifest()` signature. TensorRT completed and the
+engine was preserved, but sidecar creation failed until the matching current
+helper generated and validated it. Model build tools and their manifest helper
+must ship from the same revision; otherwise an eight-minute Jetson build can be
+reported as failed after producing a valid artifact.

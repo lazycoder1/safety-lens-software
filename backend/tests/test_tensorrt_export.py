@@ -109,6 +109,49 @@ def test_fixed_prompt_export_fails_before_model_load_when_clip_is_missing(
     assert output.exists() is False
 
 
+def test_export_fails_before_model_load_when_manifest_helper_is_stale(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "ppe.pt"
+    output = tmp_path / "ppe.engine"
+    source.write_bytes(b"pytorch-model")
+    model_loaded = False
+
+    def fake_yolo(_path):
+        nonlocal model_loaded
+        model_loaded = True
+        raise AssertionError("model loading must not start with a stale helper")
+
+    def stale_build_manifest(
+        *,
+        source_path,
+        engine_path,
+        imgsz,
+        precision,
+        task,
+        classes,
+        class_groups,
+        metadata,
+    ):
+        raise AssertionError("stale helper must be rejected before use")
+
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=fake_yolo))
+    monkeypatch.setattr(export_module, "build_manifest", stale_build_manifest)
+
+    with pytest.raises(RuntimeError, match="different revisions.*batch"):
+        export_engine(
+            source_path=source,
+            output_path=output,
+            imgsz=640,
+            workspace=1.0,
+            device=0,
+            force=False,
+        )
+
+    assert model_loaded is False
+    assert output.exists() is False
+
+
 def test_low_memory_export_wraps_trtexec_engine_and_records_builder(
     tmp_path, monkeypatch
 ):
