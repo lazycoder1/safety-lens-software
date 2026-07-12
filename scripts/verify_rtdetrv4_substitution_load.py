@@ -23,9 +23,19 @@ def verify(
     substitutions = int(edge.get("substituted_requests") or 0)
     effective_requests = int(edge.get("effective_requests") or 0)
     expected_effective = round(cameras * target_fps * duration)
-    frames_completed = int(specialist.get("frames_completed") or 0)
-    specialist_duration = float(specialist.get("duration_seconds") or 0.0)
+    frames_completed = int(
+        specialist.get("frames_completed")
+        or int(specialist.get("repeats") or 0) * int(specialist.get("batch_size") or 0)
+    )
+    specialist_duration = float(
+        specialist.get("duration_seconds")
+        or specialist.get("duration_target_seconds")
+        or 0.0
+    )
     specialist_target = float(specialist.get("target_fps") or 0.0)
+    specialist_achieved = float(
+        specialist.get("achieved_fps") or specialist.get("frame_fps") or 0.0
+    )
     per_camera = edge.get("per_camera") or []
 
     if cameras < 1 or target_fps <= 0 or duration <= 0:
@@ -73,7 +83,7 @@ def verify(
         int(item.get("specialist_requests") or 0) for item in per_camera
     ):
         errors.append("per-camera PPE requests do not equal the reported total")
-    if float(specialist.get("achieved_fps") or 0.0) < specialist_target:
+    if specialist_achieved < specialist_target:
         errors.append("RT-DETR missed its target FPS")
     if int(specialist.get("stale_groups") or 0):
         errors.append("RT-DETR contains stale groups")
@@ -93,7 +103,7 @@ def verify(
         "effective_requests": effective_requests,
         "substituted_requests": substitutions,
         "ppe_requests": reported_ppe,
-        "rtdetr_achieved_fps": specialist.get("achieved_fps"),
+        "rtdetr_achieved_fps": specialist_achieved,
         "primary_latency_ms": latency,
     }
 

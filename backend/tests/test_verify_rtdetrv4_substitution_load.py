@@ -65,6 +65,24 @@ def test_verifier_accepts_exact_fresh_substitution():
     assert result["errors"] == []
 
 
+def test_verifier_accepts_model_server_route_report_schema():
+    verifier = _load_verifier()
+    edge, specialist = _payloads()
+    specialist = {
+        "target_fps": 1.0,
+        "frame_fps": 1.0,
+        "duration_target_seconds": 60.0,
+        "repeats": 30,
+        "batch_size": 2,
+        "stale_groups": 0,
+    }
+
+    result = verifier.verify(edge, specialist, maximum_primary_latency_ms=250.0)
+
+    assert result["ok"] is True
+    assert result["rtdetr_achieved_fps"] == 1.0
+
+
 def test_verifier_rejects_missing_rtdetr_frames():
     verifier = _load_verifier()
     edge, specialist = _payloads()

@@ -9,6 +9,7 @@ COPY requirements-model-server-jetson.txt .
 RUN python3 -m pip install --no-cache-dir -r requirements-model-server-jetson.txt
 
 COPY backend/model_server.py ./backend/model_server.py
+COPY backend/rtdetr_phone_runtime.py ./backend/rtdetr_phone_runtime.py
 COPY backend/model_manager.py ./backend/model_manager.py
 COPY backend/plate_analyzer.py ./backend/plate_analyzer.py
 COPY backend/tensorrt_engine.py ./backend/tensorrt_engine.py

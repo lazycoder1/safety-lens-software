@@ -26,6 +26,8 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
 import model_manager
+from rtdetr_phone_runtime import RUNTIME_POOL as RTDETR_PHONE_RUNTIME_POOL
+from rtdetr_phone_runtime import RTDETRPhoneRuntimeUnavailable
 from logging_config import setup_logging
 
 logger = logging.getLogger("rakshak_lens.model_server")
@@ -89,6 +91,16 @@ class PrimaryFrameBatchItem(BaseModel):
     conf: float = Field(default=0.35, ge=0.0, le=1.0)
     device: str = "cuda"
     imgsz: int = Field(default=640, gt=0)
+    frame_width: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
+    frame_height: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
+    frame_channels: int = Field(default=3)
+    byte_length: int = Field(gt=0)
+
+
+class RTDETRPhoneFrameBatchItem(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    person_conf: float = Field(default=0.3, ge=0.0, le=1.0)
+    phone_conf: float = Field(default=0.15, ge=0.0, le=1.0)
     frame_width: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
     frame_height: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
     frame_channels: int = Field(default=3)
@@ -181,6 +193,57 @@ def _parse_primary_frame_batch(
         expected = item.frame_width * item.frame_height * item.frame_channels
         if item.frame_channels != 3 or item.byte_length != expected:
             raise HTTPException(status_code=400, detail="Invalid primary frame shape")
+    return batch
+
+
+def _parse_rtdetr_phone_frame_batch(
+    batch_json: str,
+    expected_count: int,
+) -> List[RTDETRPhoneFrameBatchItem]:
+    if len(batch_json) > 4_096:
+        raise HTTPException(
+            status_code=413,
+            detail="RT-DETR phone batch metadata is too large",
+        )
+    try:
+        payload = json.loads(batch_json)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid RT-DETR phone batch metadata",
+        ) from exc
+    if not isinstance(payload, list) or len(payload) != expected_count:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"RT-DETR phone batch must contain exactly {expected_count} frames"
+            ),
+        )
+    try:
+        batch = [RTDETRPhoneFrameBatchItem(**item) for item in payload]
+    except (TypeError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid RT-DETR phone batch request",
+        ) from exc
+    if len({item.request_id for item in batch}) != expected_count:
+        raise HTTPException(
+            status_code=400,
+            detail="RT-DETR phone request IDs must be unique",
+        )
+    compatibility = {(item.person_conf, item.phone_conf) for item in batch}
+    if len(compatibility) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="RT-DETR phone batch confidence settings must match",
+        )
+    for item in batch:
+        expected = item.frame_width * item.frame_height * item.frame_channels
+        if item.frame_channels != 3 or item.byte_length != expected:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid RT-DETR phone frame shape",
+            )
     return batch
 
 
@@ -400,6 +463,7 @@ async def startup():
     setup_logging()
     logger.info("Rakshak Lens model server starting")
     model_manager.initialize()
+    RTDETR_PHONE_RUNTIME_POOL.warm_configured()
 
 
 @app.get("/api/health")
@@ -420,6 +484,7 @@ def health():
         "models_total": len(models),
         "specialist_batch_concurrent": _SPECIALIST_BATCH_CONCURRENT,
         "fixed_batch_runtimes": model_manager.fixed_batch_runtime_status(),
+        "rtdetr_phone_runtimes": RTDETR_PHONE_RUNTIME_POOL.status(),
         "anpr_ocr": anpr_ocr,
     }
 
@@ -681,6 +746,73 @@ def infer_raw_primary_batch4(
 ) -> Dict[str, Any]:
     _require_model_server_token(authorization)
     return _infer_raw_primary_frame_batch(frame_bytes, batch_json, 4)
+
+
+def _infer_raw_rtdetr_phone_frame_batch(
+    frame_bytes: bytes,
+    batch_json: str,
+    expected_count: int,
+) -> Dict[str, Any]:
+    """Run person/phone-only RT-DETR recall for one frame group."""
+    batch = _parse_rtdetr_phone_frame_batch(batch_json, expected_count)
+    if len(frame_bytes) != sum(item.byte_length for item in batch):
+        raise HTTPException(
+            status_code=400,
+            detail="RT-DETR phone batch byte length does not match metadata",
+        )
+    frames = []
+    offset = 0
+    for item in batch:
+        end = offset + item.byte_length
+        frames.append(
+            np.frombuffer(memoryview(frame_bytes)[offset:end], dtype=np.uint8).reshape(
+                (item.frame_height, item.frame_width, item.frame_channels)
+            )
+        )
+        offset = end
+    first = batch[0]
+    try:
+        records = RTDETR_PHONE_RUNTIME_POOL.predict(
+            frames,
+            person_conf=first.person_conf,
+            phone_conf=first.phone_conf,
+        )
+    except RTDETRPhoneRuntimeUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("RT-DETR phone inference failed")
+        raise HTTPException(
+            status_code=500,
+            detail="RT-DETR phone inference failed",
+        ) from exc
+    if len(records) != expected_count:
+        raise HTTPException(
+            status_code=500,
+            detail="RT-DETR phone inference returned the wrong result count",
+        )
+    return {
+        "results": {item.request_id: result for item, result in zip(batch, records)}
+    }
+
+
+@app.post("/api/infer/raw/rtdetr-phone-batch1")
+def infer_raw_rtdetr_phone_batch1(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-RTDETR-Phone-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_rtdetr_phone_frame_batch(frame_bytes, batch_json, 1)
+
+
+@app.post("/api/infer/raw/rtdetr-phone-batch2")
+def infer_raw_rtdetr_phone_batch2(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-RTDETR-Phone-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_rtdetr_phone_frame_batch(frame_bytes, batch_json, 2)
 
 
 def _infer_raw_specialist_frame_batch(

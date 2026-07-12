@@ -34,6 +34,15 @@ def test_jetson_model_server_image_contains_anpr_runtime_module():
     assert "COPY backend/plate_analyzer.py ./backend/plate_analyzer.py" in dockerfile
 
 
+def test_jetson_model_server_image_contains_rtdetr_phone_runtime_module():
+    dockerfile = (ROOT / "Dockerfile.model-server-jetson").read_text()
+
+    assert (
+        "COPY backend/rtdetr_phone_runtime.py ./backend/rtdetr_phone_runtime.py"
+        in dockerfile
+    )
+
+
 def test_jetson_edge_uses_measured_inference_admission_defaults():
     compose = yaml.safe_load((ROOT / "docker-compose.jetson.yml").read_text())
     environment = compose["services"]["edge"]["environment"]

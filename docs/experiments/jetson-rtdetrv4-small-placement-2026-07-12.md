@@ -350,6 +350,65 @@ parity. Production integration must route RT-DETR COCO records through the same
 coordinate scaling, tracker, zone, rule, and alert contracts before this tier
 can be deployed.
 
+## Default-off model-server route — 2026-07-13
+
+The RT-DETRv4-S batch-1 and batch-2 engines were then integrated behind
+authenticated raw-frame model-server endpoints. The optional runtime is absent
+unless both an engine path and its exact SHA-256 are configured. Startup warms
+configured engines but a missing or invalid optional engine cannot take down
+the existing YOLO model server. Runtime faults are fenced instead of reusing a
+failed CUDA context. Only COCO person (`0`) and cell phone (`67`) records leave
+the route; all other unvalidated classes are discarded before the normal record
+contract.
+
+The route remains default-off and is not called by the camera worker. That is
+intentional: replacing a normal COCO frame with person/phone-only output could
+otherwise falsely clear unrelated vehicle or animal rules. Worker activation
+still requires rule-state carry-forward and phone-qualified track gating.
+
+### Isolated route results
+
+The same six positive and four negative labelled phone images were sent through
+the actual FastAPI raw-frame endpoints, including request parsing, BGR-to-RGB
+preprocessing, host-to-device copies, TensorRT, output copies, filtering, and
+JSON serialization.
+
+| Route | Actionable positives | Actionable negatives | Frame throughput | Median group latency | p95 | Maximum |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RT-DETRv4-S batch-1 | 5 / 6 | 0 / 4 | 24.717 FPS | 38.086 ms | 44.119 ms | 44.526 ms |
+| RT-DETRv4-S batch-2 | 5 / 6 | 0 / 4 | 28.170 FPS | 70.442 ms / 2 frames | 75.847 ms | 76.771 ms |
+
+The HTTP/runtime wrapper is therefore a measured bottleneck: it reduces the
+standalone batch-1 result from 38.424 to 24.717 FPS and batch-2 from 43.792 to
+28.170 frame-FPS. A universal-primary deployment through this route would have
+only a seven-camera arithmetic ceiling at 4 FPS before PPE duty. The earlier
+direct-engine cadence test supported ten cameras and rejected eleven, but it
+did not include the production transport overhead. Neither result supports
+replacing the current YOLO primary.
+
+### Production-shaped substitution through the route
+
+The passing 20-camera split-phase topology was repeated for 60 seconds using
+the actual model-server endpoint. Cameras 18 and 19 replaced one eighth of
+their primary slots with RT-DETR batch-2, for exactly one aggregate RT-DETR
+frame per second. The four-frame YOLO primary/PPE path and edge microbatch
+transport were unchanged.
+
+| Effective camera load | Effective decisions | PPE passes | Overloads / failures | Primary p95 | Primary maximum | RT-DETR achieved | RT stale groups | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 20 cameras at 4 FPS | 4,800 / 4,800 | 520 | 0 / 0 | 152.624 ms | 224.349 ms | 1.000 FPS | 0 | pass |
+
+Under concurrent load the RT route itself measured 101.486 ms median, 167.641
+ms p95, and 195.464 ms maximum per batch-2 group. It remained below the 250 ms
+freshness budget and preserved the labelled 5/6 positive, 0/4 negative alert
+outcome. The fail-closed substitution verifier passed with no errors.
+
+This proves the server route and confirms the existing experimental boundary:
+20 cameras at 4 effective decision FPS plus one device-wide RT-DETR FPS. It
+does not change the supported live capacity, which remains 21 cameras at 4 FPS
+without RT-DETR until camera-worker rule semantics and track gating are shipped
+and re-gated.
+
 ## Production restoration
 
 After the isolated builds and load tests:
