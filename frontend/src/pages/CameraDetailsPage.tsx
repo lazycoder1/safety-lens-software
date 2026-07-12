@@ -389,6 +389,8 @@ export function CameraDetailsPage() {
                 value={<Badge variant={statusVariantValue}>{camera.status}</Badge>}
               />
               <InfoRow label="Live detections" value={String(camera.detectionsCount)} />
+              <InfoRow label="Stream processing target" value={`${camera.fps} FPS`} />
+              <InfoRow label="Primary inference target" value={`${camera.inference_fps} FPS`} />
             </div>
           </Card>
 
@@ -402,6 +404,7 @@ export function CameraDetailsPage() {
                 <p><span className="font-medium text-[var(--color-text-primary)]">Source Type:</span> {camera.stream_type === "rtsp" ? "RTSP" : "Video File"}</p>
                 <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Source Value:</span> {camera.stream_type === "rtsp" ? camera.connection_summary || camera.rtsp_url : camera.video}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">FPS:</span> {camera.fps}</p>
+                <p><span className="font-medium text-[var(--color-text-primary)]">Inference FPS:</span> {camera.inference_fps} ({camera.inference_fps_source || "camera"})</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Detection Engine:</span> {camera.demo}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Runtime Status:</span> {camera.runtime_status}</p>
                 <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Rule IDs:</span> {(camera.safety_rule_ids || []).join(", ") || "None"}</p>

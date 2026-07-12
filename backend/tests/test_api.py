@@ -54,12 +54,14 @@ def fresh_state():
     alert_store.SNAPSHOTS_DIR = _test_snapshots
     alert_store.init_db()
     error_store.init_db()
+    audit_store.init_db()
 
     # Truncate alerts table
     with alert_store._get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE alert_delivery_outbox, alerts")
             cur.execute("TRUNCATE TABLE error_log")
+            cur.execute("TRUNCATE TABLE audit_log")
         conn.commit()
 
     # Re-create snapshots dir
@@ -85,7 +87,10 @@ def fresh_state():
         for model_key in model_manager.MODEL_DEFINITIONS:
             model_manager._set_model_state(model_key, status="ready", error=None, active_path=config_manager.CONFIG_PATH, job_id=None)
 
-    yield
+    # Camera CRUD is exercised independently of the signed-license state.
+    # Licensing behavior has its own focused test module.
+    with mock.patch("routers.cameras.licensing.can_add_camera", return_value=(True, None)):
+        yield
 
     _stop_worker_threads(state.camera_threads)
     _stop_worker_threads(state.vlm_threads)
@@ -205,6 +210,9 @@ def test_get_cameras_includes_fields():
     assert "rules" in cam
     assert "enabled" in cam
     assert "status" in cam
+    assert "fps" in cam
+    assert "inference_fps" in cam
+    assert cam["inference_fps_source"] in {"camera", "global"}
 
 
 def test_get_cameras_includes_saved_zones():
@@ -1281,6 +1289,46 @@ def test_add_camera(mock_start):
 
 
 @mock.patch("routers.cameras.start_camera")
+def test_add_camera_persists_explicit_stream_and_inference_cadence(mock_start):
+    resp = api_post("/api/cameras", json={
+        "name": "Cadence Cam",
+        "video": "test.mp4",
+        "zone": "ZoneX",
+        "demo": "yolo",
+        "rules": [],
+        "fps": 8,
+        "inference_fps": 4.0,
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fps"] == 8
+    assert data["inference_fps"] == 4.0
+    assert data["inference_fps_source"] == "camera"
+    saved = config_manager.get_config()["cameras"][data["id"]]
+    assert saved["fps"] == 8
+    assert saved["inference_fps"] == 4.0
+    mock_start.assert_called_once()
+
+
+@mock.patch("routers.cameras.start_camera")
+def test_add_camera_rejects_inference_cadence_above_stream_cadence(mock_start):
+    resp = api_post("/api/cameras", json={
+        "name": "Invalid Cadence Cam",
+        "video": "test.mp4",
+        "zone": "ZoneX",
+        "demo": "yolo",
+        "rules": [],
+        "fps": 4,
+        "inference_fps": 5.0,
+    })
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Camera inference FPS cannot exceed stream processing FPS"
+    mock_start.assert_not_called()
+
+
+@mock.patch("routers.cameras.start_camera")
 def test_add_camera_preserves_detector_capability_windows(mock_start):
     resp = api_post("/api/cameras", json={
         "name": "Scheduled Cam",
@@ -1364,6 +1412,36 @@ def test_update_camera(mock_restart):
     assert resp.status_code == 200
     assert resp.json()["name"] == "Updated Name"
     mock_restart.assert_called_once_with(cam_id)
+
+
+@mock.patch("routers.cameras.restart_camera")
+def test_update_camera_changes_stream_and_inference_cadence(mock_restart):
+    cam_id = _first_camera_id()
+
+    resp = api_put(
+        f"/api/cameras/{cam_id}",
+        json={"fps": 8, "inference_fps": 3.5},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["fps"] == 8
+    assert resp.json()["inference_fps"] == 3.5
+    assert config_manager.get_config()["cameras"][cam_id]["inference_fps"] == 3.5
+    mock_restart.assert_called_once_with(cam_id)
+
+
+@mock.patch("routers.cameras.restart_camera")
+def test_update_camera_rejects_inference_cadence_above_stream_cadence(mock_restart):
+    cam_id = _first_camera_id()
+
+    resp = api_put(
+        f"/api/cameras/{cam_id}",
+        json={"fps": 3, "inference_fps": 4.0},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Camera inference FPS cannot exceed stream processing FPS"
+    mock_restart.assert_not_called()
 
 
 def test_get_cameras_derives_display_rules_from_safety_rule_ids():

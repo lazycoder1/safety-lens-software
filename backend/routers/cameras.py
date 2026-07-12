@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from typing import Any, Optional
 
@@ -117,6 +118,12 @@ def _camera_public_payload(
             detection_class_counts[class_name] = detection_class_counts.get(class_name, 0) + 1
     detection_history = state.camera_detection_history.get(cam_id, [])
     recent_detection_history = detection_history[-30:]
+    inference_fps_override = cam.get("inference_fps")
+    inference_fps = (
+        inference_fps_override
+        if inference_fps_override is not None
+        else cfg.get("global", {}).get("inference_fps", 2.0)
+    )
     payload = {
         "id": cam_id,
         "name": cam["name"],
@@ -129,6 +136,8 @@ def _camera_public_payload(
         "rules": display_rules,
         "enabled": cam.get("enabled", True),
         "fps": cam.get("fps", cfg["global"]["target_fps"]),
+        "inference_fps": float(inference_fps),
+        "inference_fps_source": "camera" if inference_fps_override is not None else "global",
         "video": cam.get("video", ""),
         "yoloe_classes": cam.get("yoloe_classes", []),
         "stream_type": cam.get("stream_type", "file"),
@@ -193,6 +202,36 @@ def _next_camera_id(cfg: dict) -> str:
     return f"cam{next_id}"
 
 
+def _validate_camera_cadence(camera_data: dict[str, Any], cfg: dict) -> None:
+    global_config = cfg.get("global") or {}
+    raw_stream_fps = camera_data.get("fps", global_config.get("target_fps", 6))
+    raw_inference_fps = camera_data.get("inference_fps")
+    inference_is_override = raw_inference_fps is not None
+    if raw_inference_fps is None:
+        raw_inference_fps = global_config.get("inference_fps", 2.0)
+    if isinstance(raw_stream_fps, bool) or isinstance(raw_inference_fps, bool):
+        raise HTTPException(status_code=422, detail="Camera FPS values must be numeric")
+    try:
+        stream_fps = float(raw_stream_fps)
+        inference_fps = float(raw_inference_fps)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Camera FPS values must be numeric") from exc
+    if not math.isfinite(stream_fps) or not 1 <= stream_fps <= 60:
+        raise HTTPException(status_code=422, detail="Camera stream FPS must be between 1 and 60")
+    if not math.isfinite(inference_fps) or not 0 < inference_fps <= 60:
+        raise HTTPException(status_code=422, detail="Camera inference FPS must be greater than 0 and at most 60")
+    if inference_fps > stream_fps:
+        raise HTTPException(
+            status_code=422,
+            detail="Camera inference FPS cannot exceed stream processing FPS",
+        )
+    camera_data["fps"] = int(stream_fps)
+    if inference_is_override:
+        camera_data["inference_fps"] = inference_fps
+    else:
+        camera_data.pop("inference_fps", None)
+
+
 def _prepare_camera_submission(payload: dict[str, Any], cfg: dict, *, existing_camera: dict[str, Any] | None = None) -> dict[str, Any]:
     camera_data = dict(payload)
     if camera_data.get("stream_type", existing_camera.get("stream_type") if existing_camera else "file") == "rtsp":
@@ -213,6 +252,7 @@ def _prepare_camera_submission(payload: dict[str, Any], cfg: dict, *, existing_c
         ):
             camera_data.pop(field, None)
 
+    _validate_camera_cadence(camera_data, cfg)
     sync_camera_rule_fields(camera_data)
     camera_data, _changed = normalize_camera_record(camera_data, cfg)
     return camera_data
@@ -317,6 +357,8 @@ class CameraPlanPreviewRequest(BaseModel):
     zone: str = ""
     profile: Optional[str] = None
     capabilities: list[str] = Field(default_factory=list)
+    fps: int = Field(default=6, ge=1, le=60)
+    inference_fps: Optional[float] = Field(default=None, gt=0, le=60)
     stream_type: str = "file"
     video: str = ""
     rtsp_url: str = ""
@@ -346,7 +388,8 @@ class CameraCreate(BaseModel):
     demo: str = "yolo"
     rules: list[str] = Field(default_factory=list)
     enabled: bool = True
-    fps: int = 6
+    fps: int = Field(default=6, ge=1, le=60)
+    inference_fps: Optional[float] = Field(default=None, gt=0, le=60)
     yoloe_classes: list[str] = Field(default_factory=list)
     stream_type: str = "file"
     rtsp_url: str = ""
@@ -377,7 +420,8 @@ class CameraUpdate(BaseModel):
     demo: Optional[str] = None
     rules: Optional[list[str]] = None
     enabled: Optional[bool] = None
-    fps: Optional[int] = None
+    fps: Optional[int] = Field(default=None, ge=1, le=60)
+    inference_fps: Optional[float] = Field(default=None, gt=0, le=60)
     yoloe_classes: Optional[list[str]] = None
     stream_type: Optional[str] = None
     rtsp_url: Optional[str] = None

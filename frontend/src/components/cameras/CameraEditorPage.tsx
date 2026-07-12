@@ -120,6 +120,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
   const [name, setName] = useState("")
   const [zone, setZone] = useState("")
   const [profile, setProfile] = useState<CameraProfile>("general_safety")
+  const [streamFps, setStreamFps] = useState("6")
+  const [inferenceFps, setInferenceFps] = useState("2")
   const [streamType, setStreamType] = useState<"file" | "rtsp">("file")
   const [video, setVideo] = useState("")
   const [rtspUrl, setRtspUrl] = useState("")
@@ -181,6 +183,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
         setName(existingCamera.name)
         setZone(existingCamera.zone)
         setProfile(existingCamera.profile || "general_safety")
+        setStreamFps(String(existingCamera.fps || 6))
+        setInferenceFps(String(existingCamera.inference_fps || 2))
         setStreamType((existingCamera.stream_type || "file") as "file" | "rtsp")
         setVideo(existingCamera.video || videoData[0] || "")
         setRtspUrl(existingCamera.connection_summary || existingCamera.rtsp_url || "")
@@ -327,6 +331,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
           zone,
           profile,
           capabilities: selectedDetections,
+          fps: Number(streamFps),
+          inference_fps: Number(inferenceFps),
           stream_type: streamType,
           video: streamType === "file" ? video : "",
           rtsp_url: streamType === "rtsp" ? rtspUrl : "",
@@ -364,6 +370,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     name,
     zone,
     profile,
+    streamFps,
+    inferenceFps,
     streamType,
     video,
     rtspUrl,
@@ -539,6 +547,20 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       toast.error("RTSP URL is required")
       return
     }
+    const parsedStreamFps = Number(streamFps)
+    const parsedInferenceFps = Number(inferenceFps)
+    if (!Number.isFinite(parsedStreamFps) || parsedStreamFps < 1 || parsedStreamFps > 60) {
+      toast.error("Stream processing FPS must be between 1 and 60")
+      return
+    }
+    if (!Number.isFinite(parsedInferenceFps) || parsedInferenceFps <= 0 || parsedInferenceFps > 60) {
+      toast.error("Primary inference FPS must be greater than 0 and at most 60")
+      return
+    }
+    if (parsedInferenceFps > parsedStreamFps) {
+      toast.error("Primary inference FPS cannot exceed stream processing FPS")
+      return
+    }
     if (usesCustomDetection && customDetectionTerms.length === 0) {
       toast.error("Add at least one visible object or condition for Custom Detection")
       return
@@ -576,6 +598,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       demo: planPreview?.execution_plan?.derived_demo || "yolo",
       video: streamType === "file" ? video : "",
       rules: [],
+      fps: parsedStreamFps,
+      inference_fps: parsedInferenceFps,
       stream_type: streamType,
       rtsp_url: streamType === "rtsp" ? rtspUrl.trim() : "",
       host: streamType === "rtsp" ? rtspHost.trim() : "",
@@ -766,6 +790,37 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                 ))}
               </div>
             </Field>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Stream Processing FPS">
+                <input
+                  type="number"
+                  min="1"
+                  max="60"
+                  step="1"
+                  value={streamFps}
+                  onChange={(event) => setStreamFps(event.target.value)}
+                  className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
+                />
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                  Frames consumed from this source each second. Prefer a lower-FPS AI substream when the camera supports one.
+                </p>
+              </Field>
+              <Field label="Primary Inference FPS">
+                <input
+                  type="number"
+                  min="0.5"
+                  max={streamFps || "60"}
+                  step="0.5"
+                  value={inferenceFps}
+                  onChange={(event) => setInferenceFps(event.target.value)}
+                  className="w-full rounded-[var(--radius-md)] border bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)]"
+                />
+                <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                  Target detector cadence before motion and specialist gating. Use 2–5 FPS for normal safety monitoring.
+                </p>
+              </Field>
+            </div>
 
             <Field label="Source Type">
               <div className="flex gap-2">
@@ -1115,6 +1170,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                   <Badge variant={selectedDetections.length > 0 ? "success" : "default"}>
                     {selectedDetections.length > 0 ? "Runs selected detections" : "Monitoring only"}
                   </Badge>
+                  <Badge variant="info">Primary {inferenceFps || "—"} FPS</Badge>
                   {runtimeLimitedDetectionCount > 0 ? (
                     <Badge variant="info">{runtimeLimitedDetectionCount} scheduled</Badge>
                   ) : (
@@ -1201,6 +1257,8 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
                 <p className="break-all"><span className="font-medium text-[var(--color-text-primary)]">Source Value:</span> {streamType === "rtsp" ? rtspUrl || "Not set" : video || "Not set"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Credentials Update:</span> {streamType === "rtsp" ? (replaceStoredCredentials || rtspUsername || rtspPassword ? "Provided in request" : camera?.credentials_configured ? "Preserve stored" : "None") : "N/A"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Profile:</span> {profile}</p>
+                <p><span className="font-medium text-[var(--color-text-primary)]">Stream Processing FPS:</span> {streamFps}</p>
+                <p><span className="font-medium text-[var(--color-text-primary)]">Primary Inference FPS:</span> {inferenceFps}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Capabilities:</span> {selectedDetections.join(", ") || "None"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Custom Terms:</span> {customDetectionTerms.join(", ") || "None"}</p>
                 <p><span className="font-medium text-[var(--color-text-primary)]">Rule IDs:</span> {selectedRuleIds.join(", ") || "None"}</p>

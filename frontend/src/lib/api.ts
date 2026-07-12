@@ -428,6 +428,7 @@ export async function addCamera(camera: {
   demo: string
   rules: string[]
   fps?: number
+  inference_fps?: number
   yoloe_classes?: string[]
   stream_type?: string
   rtsp_url?: string
@@ -655,6 +656,8 @@ export async function previewCameraPlan(payload: {
   zone?: string
   profile?: string
   capabilities?: string[]
+  fps?: number
+  inference_fps?: number
   stream_type?: string
   video?: string
   rtsp_url?: string

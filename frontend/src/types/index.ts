@@ -206,6 +206,8 @@ export interface Camera {
   detectionsCount: number
   video: string
   fps: number
+  inference_fps: number
+  inference_fps_source?: "camera" | "global"
   enabled: boolean
   yoloe_classes?: string[] | null
   stream_type: string
