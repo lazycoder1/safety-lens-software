@@ -393,6 +393,38 @@ def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch)
     assert invocations["ppe_specialist"] == 1
 
 
+def test_grouped_inference_forwards_runtime_frame_batch_hint(monkeypatch):
+    captured = {}
+
+    def fake_predict_record_batches(_frame, requests, **kwargs):
+        captured["options"] = kwargs
+        return {item["request_id"]: [] for item in requests}
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict_record_batches,
+    )
+    execution_plan = {
+        "run_coco_primary": True,
+        "run_ppe_specialist": False,
+        "run_yoloe_long_tail": False,
+        "run_pose_specialist": False,
+    }
+
+    video_processing._run_grouped_inference(
+        "cam-test",
+        np.zeros((90, 160, 3), dtype=np.uint8),
+        execution_plan,
+        conf=0.3,
+        device="cuda",
+        imgsz=640,
+        frame_batch_size_hint=1,
+    )
+
+    assert captured["options"] == {"frame_batch_size_hint": 1}
+
+
 def test_grouped_inference_can_size_coco_without_downsizing_ppe(monkeypatch):
     captured = {}
 

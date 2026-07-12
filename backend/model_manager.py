@@ -3555,6 +3555,7 @@ class _RemotePrimaryFrameBatcher:
             "batch2_executed": 0,
             "batch4_requests": 0,
             "batch4_executed": 0,
+            "singleton_bypasses": 0,
         }
 
     def _claim_batch(
@@ -3649,8 +3650,15 @@ class _RemotePrimaryFrameBatcher:
         self,
         frame,
         request: dict[str, Any],
+        *,
+        frame_batch_size_hint: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
         if not self._eligible(request):
+            return False, []
+        if frame_batch_size_hint == 1:
+            with self._lock:
+                self._counters["eligible_requests"] += 1
+                self._counters["singleton_bypasses"] += 1
             return False, []
         inference_frame, inference_shape = _prepare_remote_inference_frame(
             frame,
@@ -3770,6 +3778,7 @@ class _RemoteSpecialistFrameBatcher:
             "batch2_executed": 0,
             "batch4_requests": 0,
             "batch4_executed": 0,
+            "singleton_bypasses": 0,
         }
 
     def _claim_batch(
@@ -3889,9 +3898,16 @@ class _RemoteSpecialistFrameBatcher:
         self,
         frame,
         requests: list[dict[str, Any]],
+        *,
+        frame_batch_size_hint: int | None = None,
     ) -> tuple[bool, dict[str, list[dict[str, Any]]]]:
         mapped = self._request_map(requests)
         if mapped is None:
+            return False, {}
+        if frame_batch_size_hint == 1:
+            with self._lock:
+                self._counters["eligible_requests"] += 1
+                self._counters["singleton_bypasses"] += 1
             return False, {}
         primary = mapped["coco_primary"]
         ppe = mapped["ppe_specialist"]
@@ -4062,7 +4078,10 @@ def predict_records(
 
 
 def predict_record_batches(
-    frame, requests: list[dict[str, Any]]
+    frame,
+    requests: list[dict[str, Any]],
+    *,
+    frame_batch_size_hint: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Run multiple record-producing models against one immutable frame."""
     if not requests:
@@ -4122,13 +4141,18 @@ def predict_record_batches(
         handled, specialist_records = _REMOTE_SPECIALIST_FRAME_BATCHER.submit(
             frame,
             normalized,
+            frame_batch_size_hint=frame_batch_size_hint,
         )
         if handled:
             return specialist_records
 
     if len(normalized) == 1:
         item = normalized[0]
-        handled, records = _REMOTE_PRIMARY_FRAME_BATCHER.submit(frame, item)
+        handled, records = _REMOTE_PRIMARY_FRAME_BATCHER.submit(
+            frame,
+            item,
+            frame_batch_size_hint=frame_batch_size_hint,
+        )
         if handled:
             return {item["request_id"]: records}
 

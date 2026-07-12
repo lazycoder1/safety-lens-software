@@ -873,6 +873,71 @@ def test_edge_batch4_profile_flushes_two_primary_frames_via_batch2(monkeypatch):
     assert batcher.stats()["timeout_fallbacks"] == 0
 
 
+def test_edge_batch4_profile_bypasses_rendezvous_for_known_singleton(monkeypatch):
+    batcher = model_manager._RemotePrimaryFrameBatcher(
+        0.1,
+        batch_size=4,
+        batch2_early_flush_seconds=0.005,
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_prepare_remote_inference_frame",
+        lambda *_args: pytest.fail("a singleton bypass must not prepare a batch frame"),
+    )
+    request = {
+        "request_id": "camera-0",
+        "model_key": "coco_primary",
+        "conf": 0.35,
+        "device": "cuda",
+        "imgsz": 640,
+        "classes": [],
+    }
+
+    outcome = batcher.submit(
+        np.zeros((360, 640, 3), dtype=np.uint8),
+        request,
+        frame_batch_size_hint=1,
+    )
+
+    assert outcome == (False, [])
+    assert batcher.stats()["eligible_requests"] == 1
+    assert batcher.stats()["singleton_bypasses"] == 1
+    assert batcher.stats()["timeout_fallbacks"] == 0
+    assert batcher.stats()["pending"] == 0
+
+
+def test_known_singleton_bypass_reuses_existing_single_frame_transport(monkeypatch):
+    batcher = model_manager._RemotePrimaryFrameBatcher(0.1, batch_size=4)
+    calls = []
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager, "_remote_primary_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(model_manager, "_REMOTE_PRIMARY_FRAME_BATCHER", batcher)
+    monkeypatch.setenv("SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT", "true")
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_batch",
+        lambda _path, _frame, *, batch: (
+            calls.append(batch) or {"results": {batch[0]["request_id"]: []}}
+        ),
+    )
+
+    result = model_manager.predict_record_batches(
+        np.zeros((120, 200, 3), dtype=np.uint8),
+        [{"request_id": "primary", "model_key": "coco_primary", "imgsz": 640}],
+        frame_batch_size_hint=1,
+    )
+
+    assert result == {"primary": []}
+    assert len(calls) == 1
+    assert batcher.stats()["singleton_bypasses"] == 1
+    assert batcher.stats()["timeout_fallbacks"] == 0
+
+
 def test_edge_batch4_profile_does_not_flush_without_batch2_route(monkeypatch):
     batcher = model_manager._RemotePrimaryFrameBatcher(
         0.01,
@@ -1304,6 +1369,52 @@ def test_edge_batch4_profile_flushes_two_specialist_frames_via_batch2(monkeypatc
     assert batcher.stats()["batch2_executed"] == 1
     assert batcher.stats()["batch4_executed"] == 0
     assert batcher.stats()["timeout_fallbacks"] == 0
+
+
+def test_edge_specialist_profile_bypasses_rendezvous_for_known_singleton(monkeypatch):
+    batcher = model_manager._RemoteSpecialistFrameBatcher(
+        0.1,
+        batch_size=4,
+        batch2_early_flush_seconds=0.005,
+    )
+    monkeypatch.setattr(
+        model_manager, "_remote_specialist_batch4_route_may_run", lambda: True
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_prepare_remote_inference_frame",
+        lambda *_args: pytest.fail("a singleton bypass must not prepare a batch frame"),
+    )
+    requests = [
+        {
+            "request_id": "coco",
+            "model_key": "coco_primary",
+            "conf": 0.15,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": [],
+        },
+        {
+            "request_id": "ppe",
+            "model_key": "ppe_specialist",
+            "conf": 0.2,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": ["helmet"],
+        },
+    ]
+
+    outcome = batcher.submit(
+        np.zeros((360, 640, 3), dtype=np.uint8),
+        requests,
+        frame_batch_size_hint=1,
+    )
+
+    assert outcome == (False, {})
+    assert batcher.stats()["eligible_requests"] == 1
+    assert batcher.stats()["singleton_bypasses"] == 1
+    assert batcher.stats()["timeout_fallbacks"] == 0
+    assert batcher.stats()["pending"] == 0
 
 
 def test_edge_specialist_batch_requires_matching_prompt_sets(monkeypatch):

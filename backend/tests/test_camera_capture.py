@@ -1140,6 +1140,80 @@ def test_runtime_status_does_not_report_a_dead_registered_worker_online(monkeypa
     assert status == "offline"
 
 
+def test_remote_frame_batch_hint_bypasses_when_no_partner_is_fresh(monkeypatch):
+    monkeypatch.setattr(state, "camera_frames", {"cam1": b"frame", "cam2": None})
+    monkeypatch.setattr(state, "camera_frame_updated_at", {"cam1": 100.0})
+    cfg = {
+        "cameras": {
+            "cam1": {"enabled": True},
+            "cam2": {"enabled": True},
+        }
+    }
+
+    hint = video_processing._remote_frame_batch_size_hint(
+        "cam1",
+        cfg,
+        now_wall=101.0,
+    )
+
+    assert hint == 1
+
+
+def test_remote_frame_batch_hint_waits_when_partner_is_fresh(monkeypatch):
+    monkeypatch.setattr(
+        state,
+        "camera_frames",
+        {"cam1": b"frame", "cam2": b"partner"},
+    )
+    monkeypatch.setattr(
+        state,
+        "camera_frame_updated_at",
+        {"cam1": 100.0, "cam2": 99.0},
+    )
+    cfg = {
+        "cameras": {
+            "cam1": {"enabled": True},
+            "cam2": {"enabled": True},
+        }
+    }
+
+    hint = video_processing._remote_frame_batch_size_hint(
+        "cam1",
+        cfg,
+        now_wall=101.0,
+    )
+
+    assert hint is None
+
+
+def test_remote_frame_batch_hint_ignores_stale_or_disabled_partners(monkeypatch):
+    monkeypatch.setattr(
+        state,
+        "camera_frames",
+        {"cam1": b"frame", "cam2": b"stale", "cam3": b"disabled"},
+    )
+    monkeypatch.setattr(
+        state,
+        "camera_frame_updated_at",
+        {"cam1": 100.0, "cam2": 90.0, "cam3": 100.0},
+    )
+    cfg = {
+        "cameras": {
+            "cam1": {"enabled": True},
+            "cam2": {"enabled": True},
+            "cam3": {"enabled": False},
+        }
+    }
+
+    hint = video_processing._remote_frame_batch_size_hint(
+        "cam1",
+        cfg,
+        now_wall=101.0,
+    )
+
+    assert hint == 1
+
+
 def test_runtime_status_preserves_lifecycle_model_revalidation(monkeypatch):
     class ExitingThread:
         def is_alive(self):

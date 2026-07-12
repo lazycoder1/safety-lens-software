@@ -51,6 +51,7 @@ def _run_scenario(
     group_size: int,
     wait_seconds: float,
     early_flush_seconds: float,
+    frame_batch_size_hint: int | None,
     warmups: int,
     iterations: int,
 ) -> dict[str, Any]:
@@ -74,7 +75,12 @@ def _run_scenario(
 
         def infer() -> dict[str, list[dict[str, Any]]]:
             barrier.wait()
-            return model_manager.predict_record_batches(frame, requests)
+            options = (
+                {"frame_batch_size_hint": frame_batch_size_hint}
+                if frame_batch_size_hint is not None
+                else {}
+            )
+            return model_manager.predict_record_batches(frame, requests, **options)
 
         futures = [pool.submit(infer) for _ in range(group_size)]
         barrier.wait()
@@ -96,6 +102,7 @@ def _run_scenario(
         "name": name,
         "mode": mode,
         "group_size": group_size,
+        "frame_batch_size_hint": frame_batch_size_hint,
         "warmups": warmups,
         "iterations": iterations,
         "median_ms": round(statistics.median(milliseconds), 3),
@@ -124,29 +131,50 @@ def main() -> None:
     if not model_manager.is_remote_inference_enabled():
         raise SystemExit("Remote inference must be enabled")
     scenarios = (
-        ("two_primary_static_batch4", "primary", 2, 0.0),
-        ("four_primary_static_batch4", "primary", 4, 0.0),
+        ("one_primary_static_batch4", "primary", 1, 0.0, None),
+        (
+            "one_primary_singleton_bypass",
+            "primary",
+            1,
+            args.early_flush_seconds,
+            1,
+        ),
+        ("one_specialist_static_batch4", "specialist", 1, 0.0, None),
+        (
+            "one_specialist_singleton_bypass",
+            "specialist",
+            1,
+            args.early_flush_seconds,
+            1,
+        ),
+        ("two_primary_static_batch4", "primary", 2, 0.0, None),
+        ("four_primary_static_batch4", "primary", 4, 0.0, None),
         (
             "two_primary_adaptive_batch2",
             "primary",
             2,
             args.early_flush_seconds,
+            None,
         ),
         (
             "four_primary_adaptive_batch4",
             "primary",
             4,
             args.early_flush_seconds,
+            None,
         ),
         (
             "two_specialist_adaptive_batch2",
             "specialist",
             2,
             args.early_flush_seconds,
+            None,
         ),
     )
     selected = set(args.scenario or ())
-    known = {name for name, _mode, _group_size, _early_flush in scenarios}
+    known = {
+        name for name, _mode, _group_size, _early_flush, _batch_size_hint in scenarios
+    }
     unknown = selected - known
     if unknown:
         parser.error(f"unknown scenario: {', '.join(sorted(unknown))}")
@@ -157,10 +185,11 @@ def main() -> None:
             group_size=group_size,
             wait_seconds=args.wait_seconds,
             early_flush_seconds=early_flush_seconds,
+            frame_batch_size_hint=frame_batch_size_hint,
             warmups=args.warmups,
             iterations=args.iterations,
         )
-        for name, mode, group_size, early_flush_seconds in scenarios
+        for name, mode, group_size, early_flush_seconds, frame_batch_size_hint in scenarios
         if not selected or name in selected
     ]
     print(json.dumps({"scenarios": results}, indent=2, sort_keys=True))

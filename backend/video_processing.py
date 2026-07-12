@@ -1797,6 +1797,7 @@ def _run_grouped_inference(
     device: str,
     imgsz: int,
     cfg: dict | None = None,
+    frame_batch_size_hint: int | None = None,
 ):
     annotated = None
     detections: list[dict] = []
@@ -1897,7 +1898,16 @@ def _run_grouped_inference(
             "device": device,
             "imgsz": imgsz,
         })
-    record_batches = model_manager.predict_record_batches(frame, batch_requests)
+    batch_options = (
+        {"frame_batch_size_hint": frame_batch_size_hint}
+        if frame_batch_size_hint is not None
+        else {}
+    )
+    record_batches = model_manager.predict_record_batches(
+        frame,
+        batch_requests,
+        **batch_options,
+    )
 
     if execution_plan.get("run_coco_primary"):
         records = _filter_coco_records_for_rule_confidence(
@@ -2401,6 +2411,30 @@ def _is_live_frame_fresh(camera_id: str) -> bool:
     return frame_bytes is not None and age is not None and age <= state.CAMERA_FRAME_STALE_SECONDS
 
 
+def _remote_frame_batch_size_hint(
+    camera_id: str,
+    cfg: dict,
+    *,
+    now_wall: float | None = None,
+) -> int | None:
+    """Bypass a batch rendezvous only when no other enabled frame is fresh."""
+    now = time.time() if now_wall is None else now_wall
+    for other_camera_id, camera in (cfg.get("cameras") or {}).items():
+        other_camera_id = str(other_camera_id)
+        if other_camera_id == camera_id:
+            continue
+        if isinstance(camera, dict) and not camera.get("enabled", True):
+            continue
+        updated_at = state.camera_frame_updated_at.get(other_camera_id)
+        if (
+            state.camera_frames.get(other_camera_id) is not None
+            and updated_at is not None
+            and now - updated_at <= state.CAMERA_FRAME_STALE_SECONDS
+        ):
+            return None
+    return 1
+
+
 def _freeze_inference_frame(frame: np.ndarray) -> np.ndarray:
     """Retain one immutable captured buffer across streaming and inference."""
     frame.setflags(write=False)
@@ -2421,6 +2455,7 @@ def _run_detection_job(
     last_face_log_by_key: dict[str, float],
     last_plate_log_by_key: dict[str, float],
     plate_vote_window: list[dict],
+    frame_batch_size_hint: int | None = None,
 ) -> dict:
     fresh_pose_results = None
     model_invocations = {}
@@ -2432,6 +2467,7 @@ def _run_detection_job(
         device=device,
         imgsz=inference_width,
         cfg=current_cfg,
+        frame_batch_size_hint=frame_batch_size_hint,
     )
     model_invocations.setdefault("face_recognition", 0)
     model_invocations.setdefault("plate_recognition", 0)
@@ -3045,6 +3081,10 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                 last_face_log_by_key=last_face_log_by_key,
                                 last_plate_log_by_key=last_plate_log_by_key,
                                 plate_vote_window=plate_vote_window,
+                                frame_batch_size_hint=_remote_frame_batch_size_hint(
+                                    camera_id,
+                                    current_cfg,
+                                ),
                             )
                             pending_inference_signature = inference_signature
                             pending_inference_submitted_at = now
