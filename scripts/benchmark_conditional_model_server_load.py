@@ -72,6 +72,7 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--specialist-duty", type=float, default=0.111)
     parser.add_argument("--phone-probe-interval", type=float, default=1.0)
+    parser.add_argument("--phone-probe-width", type=int, default=960)
     parser.add_argument(
         "--phone-context-duty",
         type=float,
@@ -103,6 +104,8 @@ def main() -> int:
         parser.error("specialist-duty must be between 0 and 1")
     if not 0 <= args.phone_context_duty <= 1:
         parser.error("phone-context-duty must be between 0 and 1")
+    if not 160 <= args.phone_probe_width <= 1920:
+        parser.error("phone-probe-width must be between 160 and 1920")
     if args.max_inflight < 1 or args.admission_timeout < 0:
         parser.error("max-inflight must be positive and admission-timeout non-negative")
     if not 20 <= args.jpeg_quality <= 100:
@@ -114,8 +117,8 @@ def main() -> int:
         if source is None:
             parser.error(f"could not decode frame: {path}")
         frame_sets.append({
-            640: _resize(source, 640),
-            960: _resize(source, 960),
+            maximum_dimension: _resize(source, maximum_dimension)
+            for maximum_dimension in {640, args.phone_probe_width}
         })
 
     token = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
@@ -137,7 +140,7 @@ def main() -> int:
     reports: list[dict] = [{} for _ in range(args.cameras)]
 
     def post(camera_index: int, sequence: int, phone_probe: bool, specialist: bool) -> None:
-        maximum_dimension = 960 if phone_probe else 640
+        maximum_dimension = args.phone_probe_width if phone_probe else 640
         frame = frame_sets[camera_index % len(frame_sets)][maximum_dimension]
         batch = [
             {
@@ -325,6 +328,7 @@ def main() -> int:
         "specialist_duty_target": args.specialist_duty,
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
         "phone_context_duty_target": args.phone_context_duty,
+        "phone_probe_width": args.phone_probe_width,
         "admission_timeout_seconds": args.admission_timeout,
         "transport": args.transport,
         "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,

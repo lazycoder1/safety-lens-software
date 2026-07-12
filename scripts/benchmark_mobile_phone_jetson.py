@@ -80,6 +80,42 @@ def _infer(
     return detections, latencies_ms
 
 
+def _infer_local(
+    model,
+    frame,
+    *,
+    conf: float,
+    imgsz: int,
+    repeats: int,
+) -> tuple[list[dict[str, Any]], list[float]]:
+    latencies_ms = []
+    detections: list[dict[str, Any]] = []
+    for _ in range(repeats):
+        started = time.perf_counter()
+        results = model.predict(
+            frame,
+            conf=conf,
+            imgsz=imgsz,
+            device=0,
+            verbose=False,
+        )
+        latencies_ms.append((time.perf_counter() - started) * 1000)
+        boxes = results[0].boxes if results else None
+        detections = [] if boxes is None else [
+            {
+                "bbox": [round(float(value), 2) for value in xyxy],
+                "confidence": float(confidence),
+                "class_id": int(class_id),
+            }
+            for xyxy, confidence, class_id in zip(
+                boxes.xyxy.cpu().tolist(),
+                boxes.conf.cpu().tolist(),
+                boxes.cls.cpu().tolist(),
+            )
+        ]
+    return detections, latencies_ms
+
+
 def _class_summary(detections: list[dict[str, Any]]) -> dict[str, Any]:
     persons = [item for item in detections if item.get("class_id") == PERSON_CLASS_ID]
     phones = [item for item in detections if item.get("class_id") == CELL_PHONE_CLASS_ID]
@@ -95,6 +131,20 @@ def _class_summary(detections: list[dict[str, Any]]) -> dict[str, Any]:
         "persons": len(persons),
         "phones": len(phones),
         "phone_confidences": [round(float(item.get("confidence") or 0), 4) for item in phones],
+        "person_boxes": [
+            {
+                "bbox": item.get("bbox"),
+                "confidence": round(float(item.get("confidence") or 0), 4),
+            }
+            for item in persons
+        ],
+        "phone_boxes": [
+            {
+                "bbox": item.get("bbox"),
+                "confidence": round(float(item.get("confidence") or 0), 4),
+            }
+            for item in phones
+        ],
         "relevant_class_confidences": relevant,
     }
 
@@ -110,7 +160,7 @@ def _expanded_crop(frame, bbox: list[int], expansion: float = 0.15):
     y1 = max(0, y1 - y_padding)
     x2 = min(width, x2 + x_padding)
     y2 = min(height, y2 + y_padding)
-    return frame[y1:y2, x1:x2]
+    return frame[y1:y2, x1:x2], [x1, y1, x2, y2]
 
 
 def _source_variants(frame, *, native_only: bool) -> list[tuple[str, Any]]:
@@ -126,20 +176,51 @@ def _source_variants(frame, *, native_only: bool) -> list[tuple[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("images", nargs="+", type=Path)
-    parser.add_argument("--url", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--url")
+    source.add_argument("--model", type=Path)
     parser.add_argument("--conf", type=float, default=0.10)
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--native-only", action="store_true")
     parser.add_argument("--skip-person-crops", action="store_true")
+    parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if not 160 <= args.imgsz <= 1920:
         parser.error("imgsz must be between 160 and 1920")
 
     token = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
-    session = requests.Session()
+    session = requests.Session() if args.url else None
+    local_model = None
+    if args.model:
+        from ultralytics import YOLO
+
+        local_model = YOLO(str(args.model), task="detect")
+
+    def infer_frame(frame):
+        if local_model is not None:
+            return _infer_local(
+                local_model,
+                frame,
+                conf=args.conf,
+                imgsz=args.imgsz,
+                repeats=args.repeats,
+            )
+        assert session is not None and args.url is not None
+        return _infer(
+            session,
+            args.url,
+            token,
+            frame,
+            conf=args.conf,
+            imgsz=args.imgsz,
+            repeats=args.repeats,
+        )
+
     report: dict[str, Any] = {
         "model": "yolo26s",
+        "model_path": args.model.name if args.model else None,
+        "transport": "local" if args.model else "http_jpeg",
         "conf": args.conf,
         "imgsz": args.imgsz,
         "images": [],
@@ -154,15 +235,7 @@ def main() -> int:
             frame,
             native_only=args.native_only,
         ):
-            detections, latencies = _infer(
-                session,
-                args.url,
-                token,
-                variant_frame,
-                conf=args.conf,
-                imgsz=args.imgsz,
-                repeats=args.repeats,
-            )
+            detections, latencies = infer_frame(variant_frame)
             variant_report: dict[str, Any] = {
                 "variant": variant_name,
                 "source_shape": list(variant_frame.shape[:2]),
@@ -174,29 +247,26 @@ def main() -> int:
                 item for item in detections if item.get("class_id") == PERSON_CLASS_ID
             ]
             for person in person_detections[:3]:
-                crop = _expanded_crop(variant_frame, person["bbox"])
+                crop, source_bbox = _expanded_crop(variant_frame, person["bbox"])
                 if crop.size == 0:
                     continue
-                crop_detections, crop_latencies = _infer(
-                    session,
-                    args.url,
-                    token,
-                    crop,
-                    conf=args.conf,
-                    imgsz=args.imgsz,
-                    repeats=args.repeats,
-                )
+                crop_detections, crop_latencies = infer_frame(crop)
                 variant_report["person_crops"].append(
                     {
                         **_class_summary(crop_detections),
                         "source_shape": list(crop.shape[:2]),
+                        "source_bbox": source_bbox,
                         "latency_median_ms": round(statistics.median(crop_latencies), 2),
                     }
                 )
             image_report["variants"].append(variant_report)
         report["images"].append(image_report)
 
-    print(json.dumps(report, indent=2))
+    rendered = json.dumps(report, indent=2)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
     return 0
 
 

@@ -59,5 +59,7 @@ It is not yet the intended:
 
 A lower detector cadence should not be reconsidered until a real object
 tracker is implemented and validated for temporal recall, zone crossings, and
-alert timing. Separately, phone-probe crop or resolution work is a more direct
-next target because the fixed full-frame 960px pass now limits scaling.
+alert timing. The follow-up phone-probe experiment found that a true 832px
+engine and 640px person crops preserved the small phone corpus, but neither
+produced a safe new camera tier in the current full-frame, tracker-free
+architecture.
