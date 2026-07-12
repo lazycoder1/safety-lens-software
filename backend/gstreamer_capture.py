@@ -34,7 +34,7 @@ def _pipeline_description(tcp_timeout_us: int) -> str:
     return (
         "rtspsrc name=source protocols=tcp latency=100 drop-on-latency=true "
         f"tcp-timeout={tcp_timeout_us} "
-        "! decodebin "
+        "! decodebin name=decoder_bin "
         "! nvvidconv name=converter "
         f"interpolation-method={_NVVIDCONV_INTERPOLATION_METHOD} "
         "! capsfilter name=scale_caps "
@@ -99,6 +99,28 @@ def _output_caps_description(width: int, height: int, max_dimension: int) -> str
     )
 
 
+def _bounded_decoder_drop_interval(value: int | None) -> int:
+    """Return the nvv4l2decoder output interval (zero disables dropping)."""
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return min(30, max(0, parsed))
+
+
+def _configure_decoder_drop_interval(element: Any, interval: int) -> bool:
+    """Apply Jetson decoder output dropping before the pipeline starts."""
+    if interval <= 0 or element is None:
+        return False
+    factory = element.get_factory()
+    if factory is None or factory.get_name() != "nvv4l2decoder":
+        return False
+    if element.find_property("drop-frame-interval") is None:
+        return False
+    element.set_property("drop-frame-interval", interval)
+    return True
+
+
 class GStreamerCapture:
     """Small cv2.VideoCapture-compatible wrapper around a latest-frame appsink."""
 
@@ -113,6 +135,7 @@ class GStreamerCapture:
         read_timeout_ms: int,
         max_dimension: int = 0,
         max_fps: float | None = None,
+        decoder_drop_interval: int = 0,
     ) -> None:
         if not nvdec_runtime_available():
             raise RuntimeError("Jetson NVDEC GStreamer runtime is unavailable")
@@ -130,10 +153,15 @@ class GStreamerCapture:
         self._rate_limiter: Any = None
         self._rate_filter: Any = None
         self._max_rate = _bounded_max_rate(max_fps)
+        self._decoder_drop_interval = _bounded_decoder_drop_interval(
+            decoder_drop_interval
+        )
+        self._decoder_drop_applied = False
 
         tcp_timeout_us = max(1_000_000, int(read_timeout_ms) * 1_000)
         pipeline = Gst.parse_launch(_pipeline_description(tcp_timeout_us))
         source_element = pipeline.get_by_name("source")
+        decoder_bin = pipeline.get_by_name("decoder_bin")
         converter = pipeline.get_by_name("converter")
         scale_filter = pipeline.get_by_name("scale_caps")
         rate_limiter = pipeline.get_by_name("rate_limiter")
@@ -141,6 +169,7 @@ class GStreamerCapture:
         sink = pipeline.get_by_name("sink")
         if (
             source_element is None
+            or decoder_bin is None
             or converter is None
             or scale_filter is None
             or rate_limiter is None
@@ -153,6 +182,8 @@ class GStreamerCapture:
         # Set the URL as a property, not in the parse string, so parse errors
         # can never echo credentials embedded in the source.
         source_element.set_property("location", source)
+        if self._decoder_drop_interval > 0:
+            decoder_bin.connect("element-added", self._on_decoder_element_added)
         rate_limiter.set_property("max-rate", self._max_rate)
         rate_filter.set_property(
             "caps",
@@ -184,6 +215,18 @@ class GStreamerCapture:
             return
         self._pending_frame = first_frame
         self._opened = True
+
+    def _on_decoder_element_added(
+        self,
+        _container: Any,
+        element: Any,
+    ) -> None:
+        """Set output dropping while the hardware decoder is still NULL/READY."""
+        if _configure_decoder_drop_interval(
+            element,
+            self._decoder_drop_interval,
+        ):
+            self._decoder_drop_applied = True
 
     def _configure_output_caps(self, _pad: Any, info: Any, settings: Any) -> Any:
         """Fix output dimensions from the decoder CAPS event before frame flow."""

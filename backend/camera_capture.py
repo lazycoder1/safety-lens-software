@@ -93,6 +93,12 @@ NVDEC_RETRY_SECONDS = _env_float(
     minimum=5.0,
     maximum=3_600.0,
 )
+NVDEC_DROP_FRAME_INTERVAL = _env_int(
+    "SAFETYLENS_NVDEC_DROP_FRAME_INTERVAL",
+    0,
+    minimum=0,
+    maximum=30,
+)
 _NVDEC_RETRY_CACHE_MAX_ENTRIES = 128
 _NVDEC_RETRY_LOCK = threading.Lock()
 _NVDEC_RETRY_AFTER: dict[bytes, float] = {}
@@ -179,6 +185,7 @@ def _open_gstreamer_capture(source: str, *, max_fps: float | None = None):
             read_timeout_ms=RTSP_READ_TIMEOUT_MS,
             max_dimension=_rtsp_max_dimension(),
             max_fps=max_fps,
+            decoder_drop_interval=NVDEC_DROP_FRAME_INTERVAL,
         )
         if capture.isOpened():
             return capture

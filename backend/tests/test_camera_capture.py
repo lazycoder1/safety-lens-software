@@ -357,6 +357,36 @@ def test_rtsp_max_dimension_is_disabled_or_safely_bounded(
     assert camera_capture._rtsp_max_dimension() == expected
 
 
+def test_nvdec_drop_interval_is_safely_bounded():
+    assert 0 <= camera_capture.NVDEC_DROP_FRAME_INTERVAL <= 30
+
+
+def test_nvdec_drop_interval_is_forwarded_to_gstreamer(monkeypatch):
+    captured = {}
+
+    class OpenCapture:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def isOpened(self):
+            return True
+
+    monkeypatch.setattr(camera_capture, "NVDEC_DROP_FRAME_INTERVAL", 3)
+    monkeypatch.setitem(
+        sys.modules,
+        "gstreamer_capture",
+        SimpleNamespace(
+            GStreamerCapture=OpenCapture,
+            nvdec_runtime_available=lambda: True,
+        ),
+    )
+
+    result = camera_capture._open_gstreamer_capture("rtsp://camera/live")
+
+    assert isinstance(result, OpenCapture)
+    assert captured["decoder_drop_interval"] == 3
+
+
 def test_open_rtsp_capture_does_not_fall_back_after_ffmpeg_error(monkeypatch):
     class FailedCapture:
         def __init__(self):
