@@ -72,6 +72,12 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--specialist-duty", type=float, default=0.111)
     parser.add_argument("--phone-probe-interval", type=float, default=1.0)
+    parser.add_argument(
+        "--phone-context-duty",
+        type=float,
+        default=1.0,
+        help="Fraction of scheduled phone-probe slots with primary person context.",
+    )
     parser.add_argument("--max-inflight", type=int, default=2)
     parser.add_argument("--admission-timeout", type=float, default=0.065)
     parser.add_argument(
@@ -92,6 +98,8 @@ def main() -> int:
         parser.error("cameras, fps, and duration must be positive")
     if not 0 <= args.specialist_duty <= 1:
         parser.error("specialist-duty must be between 0 and 1")
+    if not 0 <= args.phone_context_duty <= 1:
+        parser.error("phone-context-duty must be between 0 and 1")
     if args.max_inflight < 1 or args.admission_timeout < 0:
         parser.error("max-inflight must be positive and admission-timeout non-negative")
     if not 20 <= args.jpeg_quality <= 100:
@@ -202,6 +210,12 @@ def main() -> int:
             if remaining > 0:
                 time.sleep(remaining)
             specialist = _specialist_due(sequence, args.specialist_duty)
+            phone_probe_slot = sequence % probe_every == 0
+            phone_probe_index = sequence // probe_every
+            phone_probe = phone_probe_slot and _specialist_due(
+                phone_probe_index + camera_index,
+                args.phone_context_duty,
+            )
             if not admission.acquire(timeout=args.admission_timeout):
                 overloads += 1
                 sequence += 1
@@ -211,7 +225,7 @@ def main() -> int:
                 post(
                     camera_index,
                     sequence,
-                    sequence % probe_every == 0,
+                    phone_probe,
                     specialist,
                 )
             except Exception:
@@ -259,6 +273,7 @@ def main() -> int:
         "duration_seconds": args.duration,
         "specialist_duty_target": args.specialist_duty,
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
+        "phone_context_duty_target": args.phone_context_duty,
         "admission_timeout_seconds": args.admission_timeout,
         "transport": args.transport,
         "jpeg_quality": args.jpeg_quality if args.transport == "jpeg" else None,

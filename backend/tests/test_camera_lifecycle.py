@@ -24,6 +24,8 @@ def test_phone_probe_health_reports_runtime_counts_and_ages(monkeypatch):
                     "lastProbeAt": "1970-01-01T00:01:30+00:00",
                     "lastHitAt": "1970-01-01T00:01:20+00:00",
                     "lastProbePhoneDetections": 0,
+                    "contextSuppressedCount": 7,
+                    "lastContextSuppressedAt": "1970-01-01T00:01:38+00:00",
                 }
             }
         },
@@ -35,6 +37,8 @@ def test_phone_probe_health_reports_runtime_counts_and_ages(monkeypatch):
     assert health["hitProbeCount"] == 2
     assert health["lastProbeAgeSeconds"] == 10.0
     assert health["lastHitAgeSeconds"] == 20.0
+    assert health["contextSuppressedCount"] == 7
+    assert health["lastContextSuppressedAgeSeconds"] == 2.0
 
 
 @pytest.fixture

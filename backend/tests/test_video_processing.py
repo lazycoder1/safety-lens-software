@@ -602,6 +602,32 @@ def test_detection_history_records_high_resolution_phone_probe_telemetry():
     )
 
 
+def test_detection_history_records_context_suppressed_phone_probe_telemetry():
+    state.camera_detection_history.clear()
+    state.camera_schedule_telemetry.clear()
+
+    video_processing._record_detection_history(
+        "cam_phone",
+        [],
+        schedule_state={},
+        model_invocations={"coco_primary": 1},
+        runtime_probe_suppression_reason=(
+            video_processing._MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON
+        ),
+    )
+
+    sample = state.camera_detection_history["cam_phone"][-1]
+    telemetry = state.camera_schedule_telemetry["cam_phone"]["phoneProbe"]
+    assert sample["runtimeProbeSuppressionReason"] == (
+        "awaiting_primary_person_context"
+    )
+    assert telemetry["contextSuppressedCount"] == 1
+    assert telemetry["lastContextSuppressionReason"] == (
+        "awaiting_primary_person_context"
+    )
+    assert telemetry["lastContextSuppressedAt"]
+
+
 def test_violation_window_ignores_stale_display_frames_for_detection_rules():
     windows = {"Missing gloves": [True, True]}
     video_processing._advance_violation_window(

@@ -200,26 +200,85 @@ def test_mobile_phone_probe_periodically_overrides_only_coco_width():
         }
     }
 
-    probed, due = video_processing._mobile_phone_probe_execution_plan(
+    probed, due, suppressed = video_processing._mobile_phone_probe_execution_plan(
         plan,
         cfg,
         now=10.0,
         last_probe_at=8.9,
+        previous_detections=[
+            {"class": "person", "model_family": "coco_primary"},
+        ],
     )
-    waiting, waiting_due = video_processing._mobile_phone_probe_execution_plan(
+    waiting, waiting_due, waiting_suppressed = video_processing._mobile_phone_probe_execution_plan(
         plan,
         cfg,
         now=10.0,
         last_probe_at=9.1,
+        previous_detections=[
+            {"class": "person", "model_family": "coco_primary"},
+        ],
     )
 
     assert due is True
+    assert suppressed is False
     assert probed is not plan
     assert probed["coco_inference_width_override"] == 960
     assert probed["runtime_probe_reason"] == "mobile_phone_small_object_recall"
     assert waiting is plan
     assert waiting_due is False
+    assert waiting_suppressed is False
     assert "coco_inference_width_override" not in plan
+
+
+def test_mobile_phone_probe_waits_for_primary_person_context():
+    plan = {"capabilities": ["mobile_phone"], "run_coco_primary": True}
+    cfg = {
+        "global": {
+            "coco_inference_width": 640,
+            "mobile_phone_inference_width": 960,
+            "mobile_phone_probe_interval_seconds": 1.0,
+        }
+    }
+
+    empty, empty_due, empty_suppressed = video_processing._mobile_phone_probe_execution_plan(
+        plan,
+        cfg,
+        now=10.0,
+        last_probe_at=None,
+        previous_detections=[],
+    )
+    repeated, repeated_due, repeated_suppressed = (
+        video_processing._mobile_phone_probe_execution_plan(
+            plan,
+            cfg,
+            now=10.5,
+            last_probe_at=None,
+            last_context_suppressed_at=10.0,
+            previous_detections=[],
+        )
+    )
+    specialist_only, specialist_due, specialist_suppressed = video_processing._mobile_phone_probe_execution_plan(
+        plan,
+        cfg,
+        now=10.0,
+        last_probe_at=None,
+        previous_detections=[
+            {"class": "person", "model_family": "ppe_specialist"},
+        ],
+    )
+
+    assert empty is not plan
+    assert empty_due is False
+    assert empty_suppressed is True
+    assert empty["runtime_probe_suppression_reason"] == (
+        "awaiting_primary_person_context"
+    )
+    assert repeated is plan
+    assert repeated_due is False
+    assert repeated_suppressed is False
+    assert specialist_only is not plan
+    assert specialist_due is False
+    assert specialist_suppressed is True
 
 
 def test_mobile_phone_probe_is_disabled_for_non_phone_plan():
@@ -232,7 +291,7 @@ def test_mobile_phone_probe_is_disabled_for_non_phone_plan():
         }
     }
 
-    result, due = video_processing._mobile_phone_probe_execution_plan(
+    result, due, suppressed = video_processing._mobile_phone_probe_execution_plan(
         plan,
         cfg,
         now=10.0,
@@ -241,6 +300,7 @@ def test_mobile_phone_probe_is_disabled_for_non_phone_plan():
 
     assert result is plan
     assert due is False
+    assert suppressed is False
 
 
 def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch):

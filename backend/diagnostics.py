@@ -78,6 +78,7 @@ def _phone_probe_health(camera_id: str, now: float) -> dict:
     for timestamp_key, age_key in (
         ("lastProbeAt", "lastProbeAgeSeconds"),
         ("lastHitAt", "lastHitAgeSeconds"),
+        ("lastContextSuppressedAt", "lastContextSuppressedAgeSeconds"),
     ):
         timestamp = phone_probe.get(timestamp_key)
         if not timestamp:

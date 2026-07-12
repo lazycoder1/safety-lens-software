@@ -110,6 +110,7 @@ _COCO_CLASS_TO_CAPABILITIES = {
     "umbrella": ["object_lifecycle"],
 }
 _MOBILE_PHONE_PROBE_REASON = "mobile_phone_small_object_recall"
+_MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON = "awaiting_primary_person_context"
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
 PLATE_LOG_COOLDOWN_SECONDS = 10.0
@@ -845,6 +846,7 @@ def _record_detection_history(
     schedule_state: dict | None = None,
     model_invocations: dict | None = None,
     runtime_probe_reason: str | None = None,
+    runtime_probe_suppression_reason: str | None = None,
 ) -> None:
     class_counts: dict[str, int] = {}
     for detection in detections:
@@ -862,6 +864,8 @@ def _record_detection_history(
         sample["modelInvocationCounts"] = model_invocations
     if runtime_probe_reason:
         sample["runtimeProbeReason"] = runtime_probe_reason
+    if runtime_probe_suppression_reason:
+        sample["runtimeProbeSuppressionReason"] = runtime_probe_suppression_reason
     history = state.camera_detection_history.setdefault(camera_id, [])
     history.append(sample)
     if len(history) > DETECTION_HISTORY_LIMIT:
@@ -885,6 +889,18 @@ def _record_detection_history(
             if phone_detections:
                 phone_probe["hitProbeCount"] = int(phone_probe.get("hitProbeCount") or 0) + 1
                 phone_probe["lastHitAt"] = sample["timestamp"]
+        if (
+            runtime_probe_suppression_reason
+            == _MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON
+        ):
+            phone_probe.update(
+                contextSuppressedCount=int(
+                    phone_probe.get("contextSuppressedCount") or 0
+                )
+                + 1,
+                lastContextSuppressedAt=sample["timestamp"],
+                lastContextSuppressionReason=runtime_probe_suppression_reason,
+            )
         if phone_probe:
             telemetry["phoneProbe"] = phone_probe
         state.camera_schedule_telemetry[camera_id] = telemetry
@@ -1315,44 +1331,63 @@ def _mobile_phone_probe_execution_plan(
     *,
     now: float,
     last_probe_at: float | None,
-) -> tuple[dict, bool]:
-    """Periodically recover small-phone recall without upscaling every frame."""
+    last_context_suppressed_at: float | None = None,
+    previous_detections: list[dict] | None = None,
+) -> tuple[dict, bool, bool]:
+    """Recover small-phone recall only after the primary pass finds a person."""
     if not (
         execution_plan.get("run_coco_primary")
         and "mobile_phone" in set(execution_plan.get("capabilities") or [])
         and isinstance(cfg, dict)
     ):
-        return execution_plan, False
+        return execution_plan, False, False
     global_config = cfg.get("global")
     if not isinstance(global_config, dict):
-        return execution_plan, False
+        return execution_plan, False, False
 
     probe_width = global_config.get("mobile_phone_inference_width")
     if type(probe_width) is not int or not 160 <= probe_width <= 1920:
-        return execution_plan, False
+        return execution_plan, False, False
     default_width = global_config.get("inference_width", 960)
     if type(default_width) is not int or not 160 <= default_width <= 1920:
         default_width = 960
     normal_width = _coco_inference_imgsz(cfg, default_width)
     if probe_width <= normal_width:
-        return execution_plan, False
+        return execution_plan, False, False
 
     raw_interval = global_config.get("mobile_phone_probe_interval_seconds")
     if isinstance(raw_interval, bool):
-        return execution_plan, False
+        return execution_plan, False, False
     try:
         interval = float(raw_interval)
     except (TypeError, ValueError):
-        return execution_plan, False
+        return execution_plan, False, False
     if not math.isfinite(interval) or not 0.1 <= interval <= 3600:
-        return execution_plan, False
+        return execution_plan, False, False
     if last_probe_at is not None and now - last_probe_at < interval:
-        return execution_plan, False
+        return execution_plan, False, False
+
+    has_primary_person_context = any(
+        detection.get("class") == "person"
+        and detection.get("model_family") in {None, "coco_primary"}
+        for detection in (previous_detections or [])
+    )
+    if not has_primary_person_context:
+        if (
+            last_context_suppressed_at is not None
+            and now - last_context_suppressed_at < interval
+        ):
+            return execution_plan, False, False
+        suppressed = deepcopy(execution_plan)
+        suppressed["runtime_probe_suppression_reason"] = (
+            _MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON
+        )
+        return suppressed, False, True
 
     probed = deepcopy(execution_plan)
     probed["coco_inference_width_override"] = probe_width
     probed["runtime_probe_reason"] = _MOBILE_PHONE_PROBE_REASON
-    return probed, True
+    return probed, True, False
 
 
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
@@ -2711,6 +2746,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         pending_inference_signature = None
         pending_inference_submitted_at = None
         last_mobile_phone_probe_at = None
+        last_mobile_phone_probe_context_suppressed_at = None
         alert_confirmation_required = False
         received_frame = False
         try:
@@ -2799,6 +2835,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             schedule_state=result["schedule_state"],
                             model_invocations=result["model_invocations"],
                             runtime_probe_reason=result["scheduled_plan"].get("runtime_probe_reason"),
+                            runtime_probe_suppression_reason=result[
+                                "scheduled_plan"
+                            ].get("runtime_probe_suppression_reason"),
                         )
                         alert_confirmation_required = _process_detection_observation(
                             camera_id,
@@ -2920,12 +2959,23 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             frame_w=frame.shape[1],
                             frame_h=frame.shape[0],
                         )
-                        runtime_plan, mobile_phone_probe_due = (
+                        (
+                            runtime_plan,
+                            mobile_phone_probe_due,
+                            mobile_phone_probe_context_suppressed,
+                        ) = (
                             _mobile_phone_probe_execution_plan(
                                 runtime_plan,
                                 current_cfg,
                                 now=now,
                                 last_probe_at=last_mobile_phone_probe_at,
+                                last_context_suppressed_at=(
+                                    last_mobile_phone_probe_context_suppressed_at
+                                ),
+                                previous_detections=state.camera_detections.get(
+                                    camera_id,
+                                    [],
+                                ),
                             )
                         )
                         try:
@@ -2948,6 +2998,8 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             pending_inference_submitted_at = now
                             if mobile_phone_probe_due:
                                 last_mobile_phone_probe_at = now
+                            if mobile_phone_probe_context_suppressed:
+                                last_mobile_phone_probe_context_suppressed_at = now
                         except RuntimeError as exc:
                             if not _is_executor_shutdown_error(exc):
                                 raise
