@@ -5,7 +5,7 @@
 > sustained 20 cameras at an effective 4 FPS plus one device-wide RT-DETRv4-S
 > FPS, with every PPE pass preserved and maximum primary latency below 235 ms.
 > The 21-camera probes exceeded the 250 ms freshness limit. The substitution
-> topology is benchmark-proven but is not yet integrated into live alerts.
+> topology is integrated into the live worker and mobile-phone alert path.
 
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
@@ -32,8 +32,8 @@ earlier additive follow-up found an 18-camera zero-drop throughput boundary but
 unacceptable tail jitter. Replacing selected scheduled YOLO frame slots instead
 of adding work raised the repeatably freshness-safe experimental boundary to
 20 cameras at effective 4 FPS plus one device-wide RT-DETRv4 specialist FPS.
-RT-DETRv4 was not deployed because its results are not yet merged into the live
-tracker and alert path.
+The later integration below merged capability-scoped results into the live
+tracker and alert path and promoted this tier.
 
 ## Question
 
