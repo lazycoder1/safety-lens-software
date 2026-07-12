@@ -48,10 +48,42 @@ def test_jetson_edge_uses_measured_inference_admission_defaults():
     environment = compose["services"]["edge"]["environment"]
 
     assert environment["SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT"] == (
-        "${SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT:-3}"
+        "${SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT:-4}"
     )
     assert environment["SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS"] == (
-        "${SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS:-0.075}"
+        "${SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS:-0.125}"
+    )
+    assert environment["SAFETYLENS_REMOTE_PRIMARY_BATCH_WAIT_SECONDS"].endswith(
+        ":-0.014}"
+    )
+    assert environment["SAFETYLENS_REMOTE_SPECIALIST_BATCH_WAIT_SECONDS"].endswith(
+        ":-0.014}"
+    )
+    assert environment["SAFETYLENS_REMOTE_FRAME_BATCH_SIZE"].endswith(":-4}")
+    assert environment["SAFETYLENS_REMOTE_BATCH2_EARLY_FLUSH_SECONDS"].endswith(
+        ":-0.006}"
+    )
+    assert environment["SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE"].endswith(":-4}")
+    assert environment["SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS"] == (
+        "${SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS:-0.014}"
+    )
+
+
+def test_jetson_rtdetr_phone_engines_are_optional_and_identity_pinned():
+    compose = yaml.safe_load((ROOT / "docker-compose.jetson.yml").read_text())
+    environment = compose["services"]["model-server"]["environment"]
+
+    assert environment["SAFETYLENS_RTDETR_PHONE_BATCH1_TENSORRT_ENGINE"].endswith(
+        ":-}"
+    )
+    assert environment["SAFETYLENS_RTDETR_PHONE_BATCH1_ENGINE_SHA256"].endswith(
+        ":-}"
+    )
+    assert environment["SAFETYLENS_RTDETR_PHONE_BATCH2_TENSORRT_ENGINE"].endswith(
+        ":-}"
+    )
+    assert environment["SAFETYLENS_RTDETR_PHONE_BATCH2_ENGINE_SHA256"].endswith(
+        ":-}"
     )
 
 

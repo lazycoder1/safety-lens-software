@@ -261,6 +261,29 @@ def test_check_violations_applies_rule_specific_confidence(mock_cfg):
 
 
 @mock.patch("detection.get_config")
+def test_check_violations_can_limit_partial_observation_to_phone(mock_cfg):
+    mock_cfg.return_value = _cfg_with_safety_rule_ids(
+        "cam1", ["alert_mobile_phone", "alert_animal"]
+    )
+    detections = [
+        _det("person", bbox=[0, 0, 100, 200]),
+        _det("cell phone", bbox=[50, 50, 60, 70]),
+        _det("dog", bbox=[120, 80, 180, 160]),
+    ]
+    for detection in detections:
+        detection["model_family"] = "rtdetr_phone"
+
+    violations = check_violations(
+        detections,
+        "cam1",
+        capability_filter={"mobile_phone"},
+    )
+
+    assert [candidate["rule"] for candidate in violations] == ["Mobile Phone Usage"]
+    assert violations[0]["source"] == "RT-DETR Phone Recall"
+
+
+@mock.patch("detection.get_config")
 def test_check_violations_prefers_camera_confidence_override(mock_cfg):
     cfg = _cfg_with_safety_rule_ids("cam1", ["alert_mobile_phone"])
     cfg["global"] = {"yolo_conf": 0.30}

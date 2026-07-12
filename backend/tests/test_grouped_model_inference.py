@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 
 import video_processing
@@ -338,6 +340,339 @@ def test_mobile_phone_probe_is_disabled_when_primary_already_uses_probe_width():
     assert result is plan
     assert due is False
     assert suppressed is False
+
+
+def test_rtdetr_phone_substitution_replaces_primary_and_defers_ppe(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        video_processing.RTDETR_PHONE_SUBSTITUTION_SCHEDULER,
+        "consider",
+        lambda camera_id, cfg, *, now, stable_person: captured.update(
+            camera_id=camera_id,
+            cfg=cfg,
+            now=now,
+            stable_person=stable_person,
+        )
+        or True,
+    )
+    plan = {
+        "capabilities": ["mobile_phone", "helmet_required"],
+        "required_model_keys": ["coco_primary", "ppe_specialist"],
+        "run_coco_primary": True,
+        "run_ppe_specialist": True,
+        "ppe_prompt_terms": ["helmet"],
+    }
+    cfg = {"global": {"rtdetr_phone_substitution_enabled": True}}
+
+    result, selected = video_processing._rtdetr_phone_substitution_execution_plan(
+        "cam-phone",
+        plan,
+        cfg,
+        now=12.5,
+        stable_person_track=True,
+    )
+
+    assert selected is True
+    assert result["run_coco_primary"] is False
+    assert result["run_rtdetr_phone"] is True
+    assert result["run_ppe_specialist"] is False
+    assert result["partial_detection_capabilities"] == ["mobile_phone"]
+    assert result["required_model_keys"] == []
+    assert result["runtime_deferred_model_keys"] == ["ppe_specialist"]
+    assert captured["stable_person"] is True
+
+
+def test_rtdetr_phone_substitution_rejects_unvalidated_companion(monkeypatch):
+    stable_values = []
+    monkeypatch.setattr(
+        video_processing.RTDETR_PHONE_SUBSTITUTION_SCHEDULER,
+        "consider",
+        lambda _camera_id, _cfg, *, now, stable_person: stable_values.append(
+            stable_person
+        )
+        or False,
+    )
+    plan = {
+        "capabilities": ["mobile_phone", "fall_detection"],
+        "run_coco_primary": True,
+        "run_pose_specialist": True,
+    }
+
+    result, selected = video_processing._rtdetr_phone_substitution_execution_plan(
+        "cam-phone",
+        plan,
+        {"global": {"rtdetr_phone_substitution_enabled": True}},
+        now=12.5,
+        stable_person_track=True,
+    )
+
+    assert result is plan
+    assert selected is False
+    assert stable_values == [False]
+
+
+def test_grouped_inference_runs_rtdetr_phone_records_without_primary(monkeypatch):
+    captured = {}
+
+    def fake_rtdetr(frame, *, person_conf, phone_conf, frame_batch_size_hint):
+        captured.update(
+            frame=frame,
+            person_conf=person_conf,
+            phone_conf=phone_conf,
+            frame_batch_size_hint=frame_batch_size_hint,
+        )
+        return [
+            {"class_id": 0, "confidence": 0.9, "bbox": [0, 0, 100, 200]},
+            {"class_id": 67, "confidence": 0.8, "bbox": [45, 50, 55, 70]},
+        ]
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_rtdetr_phone_records",
+        fake_rtdetr,
+    )
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("primary route must be substituted")
+        ),
+    )
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    cfg = {
+        "cameras": {"cam-phone": {"safety_rule_ids": ["alert_mobile_phone"]}},
+        "safety_rules": [
+            {
+                "id": "alert_mobile_phone",
+                "type": "alert",
+                "enabled": True,
+                "confidence": 0.15,
+            }
+        ],
+    }
+
+    _annotated, detections, _pose, invocations = video_processing._run_grouped_inference(
+        "cam-phone",
+        frame,
+        {"capabilities": ["mobile_phone"], "run_rtdetr_phone": True},
+        conf=0.3,
+        device="cuda",
+        imgsz=640,
+        cfg=cfg,
+        frame_batch_size_hint=2,
+    )
+
+    assert [detection["class"] for detection in detections] == [
+        "person",
+        "cell phone",
+    ]
+    assert {detection["model_family"] for detection in detections} == {
+        "rtdetr_phone"
+    }
+    assert invocations["rtdetr_phone"] == 1
+    assert invocations["coco_primary"] == 0
+    assert captured["phone_conf"] == 0.15
+    assert captured["frame_batch_size_hint"] == 2
+
+
+def test_grouped_inference_falls_back_to_primary_when_rtdetr_is_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_rtdetr_phone_records",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            video_processing.model_manager.RemoteRTDETRPhoneUnavailableError(
+                "unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        lambda _frame, requests, **_kwargs: {
+            requests[0]["request_id"]: [
+                {"class_id": 0, "confidence": 0.9, "bbox": [1, 2, 30, 40]}
+            ]
+        },
+    )
+
+    _annotated, detections, _pose, invocations = video_processing._run_grouped_inference(
+        "cam-phone",
+        np.zeros((90, 160, 3), dtype=np.uint8),
+        {"capabilities": ["mobile_phone"], "run_rtdetr_phone": True},
+        conf=0.3,
+        device="cuda",
+        imgsz=640,
+    )
+
+    assert detections[0]["model_family"] == "coco_primary"
+    assert invocations["rtdetr_phone_fallback"] == 1
+    assert invocations["coco_primary"] == 1
+
+
+def test_partial_phone_observation_does_not_clear_unrelated_alert_state():
+    active = {"Animal Intrusion"}
+    windows = {
+        "Animal Intrusion": [],
+        "Mobile Phone Usage": [True],
+    }
+    cfg = {
+        "safety_rules": [
+            {
+                "id": "alert_mobile_phone",
+                "name": "Mobile Phone Usage",
+                "type": "alert",
+                "enabled": True,
+            },
+            {
+                "id": "alert_animal",
+                "name": "Animal Intrusion",
+                "type": "alert",
+                "enabled": True,
+            },
+        ]
+    }
+    cam = {
+        "safety_rule_ids": ["alert_mobile_phone", "alert_animal"],
+    }
+
+    video_processing._process_detection_observation(
+        "cam-phone",
+        np.zeros((90, 160, 3), dtype=np.uint8),
+        None,
+        [],
+        None,
+        {
+            "capabilities": ["mobile_phone", "animal_presence"],
+            "partial_detection_capabilities": ["mobile_phone"],
+            "run_pose_specialist": False,
+            "run_ppe_specialist": False,
+            "run_ppe_closed_set_candidate": False,
+        },
+        cam,
+        cfg,
+        last_alert_by_rule={},
+        active_violations=active,
+        violation_window=windows,
+        alert_cooldown=30,
+        window_size=15,
+    )
+
+    assert active == {"Animal Intrusion"}
+    assert windows["Animal Intrusion"] == []
+    assert windows["Mobile Phone Usage"] == [True, False]
+
+
+def test_partial_phone_observations_create_phone_alert_after_threshold(monkeypatch):
+    alerts = []
+    capability_filters = []
+    candidate = {
+        "camera_id": "cam-phone",
+        "rule": "Mobile Phone Usage",
+        "severity": "P3",
+        "confidence": 0.8,
+        "description": "Mobile phone detected near a worker",
+        "source": "RT-DETR Phone Recall",
+        "threshold": 2,
+    }
+
+    def check_violations(_detections, _camera_id, *, capability_filter=None):
+        capability_filters.append(capability_filter)
+        return [candidate]
+
+    monkeypatch.setattr(video_processing, "check_violations", check_violations)
+    monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args: [])
+    monkeypatch.setattr(
+        video_processing,
+        "_encode_inference_snapshot_pair",
+        lambda *_args, **_kwargs: (b"annotated", b"clean"),
+    )
+    monkeypatch.setattr(
+        video_processing.policy_engine,
+        "evaluate_candidate",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                fallback=True,
+                output_ids=None,
+                rule_id="",
+                rule_name="Fallback",
+                severity="P3",
+                priority=3,
+                message=None,
+                cooldown_seconds=60,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "create_alert",
+        lambda **kwargs: alerts.append(kwargs) or {"id": "phone-alert"},
+    )
+    plan = {
+        "capabilities": ["mobile_phone", "animal_presence"],
+        "partial_detection_capabilities": ["mobile_phone"],
+        "run_pose_specialist": False,
+        "run_ppe_specialist": False,
+        "run_ppe_closed_set_candidate": False,
+    }
+    cam = {"safety_rule_ids": ["alert_mobile_phone", "alert_animal"]}
+    cfg = {
+        "global": {"jpeg_quality": 70},
+        "safety_rules": [
+            {
+                "id": "alert_mobile_phone",
+                "name": "Mobile Phone Usage",
+                "type": "alert",
+                "enabled": True,
+            },
+            {
+                "id": "alert_animal",
+                "name": "Animal Intrusion",
+                "type": "alert",
+                "enabled": True,
+            },
+        ],
+    }
+    detections = [
+        {
+            "class": "person",
+            "confidence": 0.9,
+            "bbox": [0, 0, 100, 200],
+            "model_family": "rtdetr_phone",
+        },
+        {
+            "class": "cell phone",
+            "confidence": 0.8,
+            "bbox": [45, 50, 55, 70],
+            "model_family": "rtdetr_phone",
+        },
+    ]
+    active = {"Animal Intrusion"}
+    windows = {"Animal Intrusion": [True, True, True]}
+
+    for _ in range(2):
+        video_processing._process_detection_observation(
+            "cam-phone",
+            np.zeros((90, 160, 3), dtype=np.uint8),
+            None,
+            detections,
+            None,
+            plan,
+            cam,
+            cfg,
+            last_alert_by_rule={},
+            active_violations=active,
+            violation_window=windows,
+            alert_cooldown=60,
+            window_size=15,
+        )
+
+    assert capability_filters == [{"mobile_phone"}, {"mobile_phone"}]
+    assert len(alerts) == 1
+    assert alerts[0]["rule"] == "Mobile Phone Usage"
+    assert "Animal Intrusion" in active
+    assert windows["Animal Intrusion"] == [True, True, True]
 
 
 def test_grouped_inference_submits_record_models_as_one_frame_batch(monkeypatch):

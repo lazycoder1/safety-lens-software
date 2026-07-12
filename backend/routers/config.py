@@ -37,6 +37,10 @@ class GlobalConfigUpdate(BaseModel):
     ppe_inference_width: Optional[int] = Field(None, ge=160, le=1920)
     mobile_phone_inference_width: Optional[int] = Field(None, ge=160, le=1920)
     mobile_phone_probe_interval_seconds: Optional[float] = Field(None, ge=0.1, le=3600)
+    rtdetr_phone_substitution_enabled: Optional[bool] = None
+    rtdetr_phone_target_fps: Optional[float] = Field(None, ge=0.1, le=1.0)
+    rtdetr_phone_person_track_min_hits: Optional[int] = Field(None, ge=1, le=10)
+    rtdetr_phone_person_track_ttl_seconds: Optional[float] = Field(None, ge=0.25, le=5.0)
     device: Optional[str] = None
     alert_cooldown: Optional[int] = Field(None, ge=0, le=86400)
 

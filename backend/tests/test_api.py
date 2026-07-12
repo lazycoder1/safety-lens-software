@@ -198,6 +198,18 @@ def test_health():
         "route_fallbacks",
         "admission_overloads",
     } <= set(data["inferenceTransport"]["specialistFrameBatch"])
+    assert {
+        "submitted_frames",
+        "batch1_executed",
+        "batch2_executed",
+        "route_failures",
+    } <= set(data["inferenceTransport"]["rtdetrPhoneFrameBatch"])
+    assert {
+        "tracked_contexts",
+        "selected_pairs",
+        "selected_frames",
+        "missed_pair_windows",
+    } <= set(data["inferenceTransport"]["rtdetrPhoneSubstitution"])
 
 
 def test_error_reporting_is_public_but_error_query_requires_auth():
@@ -739,6 +751,10 @@ def test_update_global_partial(mock_restart):
             "ppe_inference_width": 640,
             "mobile_phone_inference_width": 960,
             "mobile_phone_probe_interval_seconds": 1.0,
+            "rtdetr_phone_substitution_enabled": True,
+            "rtdetr_phone_target_fps": 1.0,
+            "rtdetr_phone_person_track_min_hits": 2,
+            "rtdetr_phone_person_track_ttl_seconds": 1.0,
         },
     )
     assert resp.status_code == 200
@@ -748,6 +764,10 @@ def test_update_global_partial(mock_restart):
     assert data["ppe_inference_width"] == 640
     assert data["mobile_phone_inference_width"] == 960
     assert data["mobile_phone_probe_interval_seconds"] == 1.0
+    assert data["rtdetr_phone_substitution_enabled"] is True
+    assert data["rtdetr_phone_target_fps"] == 1.0
+    assert data["rtdetr_phone_person_track_min_hits"] == 2
+    assert data["rtdetr_phone_person_track_ttl_seconds"] == 1.0
     assert data["target_fps"] == 6
 
 

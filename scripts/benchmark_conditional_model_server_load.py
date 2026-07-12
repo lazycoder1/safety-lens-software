@@ -138,6 +138,12 @@ def main() -> int:
         help="Fraction of primary slots replaced on --substitute-cameras",
     )
     parser.add_argument(
+        "--substitution-source",
+        choices=("external", "rtdetr"),
+        default="external",
+        help="Supply substituted slots externally or through the edge RT-DETR route.",
+    )
+    parser.add_argument(
         "--transport",
         choices=("edge", "raw", "jpeg"),
         default="raw",
@@ -188,6 +194,8 @@ def main() -> int:
         parser.error(
             "substitute-cameras and a positive substitute-duty are required together"
         )
+    if args.substitution_source == "rtdetr" and args.transport != "edge":
+        parser.error("RT-DETR substitution requires --transport edge")
     if not 20 <= args.jpeg_quality <= 100:
         parser.error("jpeg-quality must be between 20 and 100")
 
@@ -315,6 +323,18 @@ def main() -> int:
         if set(payload.get("results") or {}) != expected:
             raise RuntimeError("model server returned an incomplete grouped result")
 
+    def post_rtdetr(camera_index: int) -> None:
+        if edge_model_manager is None:
+            raise RuntimeError("RT-DETR substitution requires edge model transport")
+        frame = frame_sets[camera_index % len(frame_sets)][640]
+        records = edge_model_manager.predict_rtdetr_phone_records(
+            frame,
+            person_conf=0.3,
+            phone_conf=0.15,
+        )
+        if not isinstance(records, list):
+            raise RuntimeError("edge returned an invalid RT-DETR record batch")
+
     def run_camera(camera_index: int) -> None:
         if edge_model_manager is not None:
             try:
@@ -343,6 +363,8 @@ def main() -> int:
         failures = 0
         specialist_requests = 0
         substituted_requests = 0
+        substitution_attempts = 0
+        rtdetr_latencies: list[float] = []
         specialist_deferred = False
         frame_batch_size_hint = (
             _phase_group_cardinality(
@@ -385,7 +407,27 @@ def main() -> int:
                 # PPE coverage by moving a coincident specialist pass forward
                 # one camera frame instead of silently dropping it.
                 specialist_deferred = specialist_deferred or specialist
-                substituted_requests += 1
+                substitution_attempts += 1
+                if args.substitution_source == "external":
+                    substituted_requests += 1
+                    sequence += 1
+                    continue
+                request_started = time.perf_counter()
+                try:
+                    post_rtdetr(camera_index)
+                except Exception as exc:
+                    if edge_model_manager is not None and isinstance(
+                        exc,
+                        edge_model_manager.RemoteInferenceOverloadedError,
+                    ):
+                        overloads += 1
+                    else:
+                        failures += 1
+                else:
+                    substituted_requests += 1
+                    rtdetr_latencies.append(
+                        (time.perf_counter() - request_started) * 1000.0
+                    )
                 sequence += 1
                 continue
             admitted_externally = edge_model_manager is None
@@ -425,6 +467,7 @@ def main() -> int:
             "successes": len(latencies),
             "specialist_requests": specialist_requests,
             "substituted_requests": substituted_requests,
+            "substitution_attempts": substitution_attempts,
             "overloads": overloads,
             "failures": failures,
             "achieved_fps": round(len(latencies) / args.duration, 3),
@@ -433,6 +476,7 @@ def main() -> int:
                 3,
             ),
             "latencies_ms": latencies,
+            "rtdetr_latencies_ms": rtdetr_latencies,
         }
 
     benchmark_start = 0.0
@@ -460,8 +504,14 @@ def main() -> int:
     all_latencies = [
         latency for report in reports for latency in report.get("latencies_ms", [])
     ]
+    all_rtdetr_latencies = [
+        latency
+        for report in reports
+        for latency in report.get("rtdetr_latencies_ms", [])
+    ]
     for report in reports:
         report.pop("latencies_ms", None)
+        report.pop("rtdetr_latencies_ms", None)
     result = {
         "cameras": args.cameras,
         "target_fps": args.fps,
@@ -470,6 +520,10 @@ def main() -> int:
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
         "substitute_cameras": sorted(substitution_cameras),
         "substitute_duty_target": args.substitute_duty,
+        "substitution_source": args.substitution_source,
+        "substitution_attempts": sum(
+            report["substitution_attempts"] for report in reports
+        ),
         "substituted_requests": sum(
             report["substituted_requests"] for report in reports
         ),
@@ -491,6 +545,11 @@ def main() -> int:
             if edge_model_manager is not None
             else None
         ),
+        "edge_rtdetr_phone_batch": (
+            edge_model_manager.remote_rtdetr_phone_batch_stats()
+            if edge_model_manager is not None
+            else None
+        ),
         "requests": len(all_latencies),
         "effective_requests": len(all_latencies)
         + sum(report["substituted_requests"] for report in reports),
@@ -508,6 +567,17 @@ def main() -> int:
             if all_latencies
             else None,
             "maximum": round(max(all_latencies), 3) if all_latencies else None,
+        },
+        "rtdetr_latency_ms": {
+            "median": round(statistics.median(all_rtdetr_latencies), 3)
+            if all_rtdetr_latencies
+            else None,
+            "p95": round(_percentile(all_rtdetr_latencies, 0.95), 3)
+            if all_rtdetr_latencies
+            else None,
+            "maximum": round(max(all_rtdetr_latencies), 3)
+            if all_rtdetr_latencies
+            else None,
         },
         "per_camera": reports,
     }

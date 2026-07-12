@@ -8,6 +8,7 @@ import math
 import cv2
 import numpy as np
 
+from capability_registry import RULE_ID_TO_CAPABILITY
 from config_manager import get_config
 from constants import COCO_NAMES, CLASS_COLORS
 
@@ -619,6 +620,8 @@ def _source_label_for_model_families(model_families: set[str]) -> str:
         return "PPE Specialist"
     if model_families == {"coco_primary"}:
         return "COCO Primary"
+    if model_families == {"rtdetr_phone"}:
+        return "RT-DETR Phone Recall"
     return "YOLO"
 
 
@@ -1518,8 +1521,13 @@ def _alert_rule_confidence(cfg: dict, cam: dict, rule: dict) -> float:
     return 0.35
 
 
-def check_violations(detections: list, camera_id: str) -> list:
-    """Return candidate violation dicts for COCO-based detections, config-driven from safety_rules."""
+def check_violations(
+    detections: list,
+    camera_id: str,
+    *,
+    capability_filter: set[str] | None = None,
+) -> list:
+    """Return COCO candidates, optionally limited to freshly evaluated capabilities."""
     cfg = get_config()
     cam = cfg["cameras"].get(camera_id, {})
     candidates = []
@@ -1535,6 +1543,8 @@ def check_violations(detections: list, camera_id: str) -> list:
     persons = [d for d in detections if d["class"] == "person"]
 
     for rid in rule_ids:
+        if capability_filter is not None and RULE_ID_TO_CAPABILITY.get(rid) not in capability_filter:
+            continue
         rule = all_rules.get(rid)
         if not rule or not rule.get("enabled", True):
             continue

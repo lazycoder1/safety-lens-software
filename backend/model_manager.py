@@ -42,6 +42,10 @@ class RemoteInferenceOverloadedError(RuntimeError):
     """The bounded remote inference pool is busy with fresher admitted work."""
 
 
+class RemoteRTDETRPhoneUnavailableError(RuntimeError):
+    """The optional remote RT-DETR phone route is absent or unhealthy."""
+
+
 def _bounded_env_int(
     name: str,
     default: int,
@@ -110,6 +114,12 @@ _REMOTE_SPECIALIST_BATCH2_SUPPORT_LOCK = threading.Lock()
 _REMOTE_SPECIALIST_BATCH2_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
 _REMOTE_SPECIALIST_BATCH4_SUPPORT_LOCK = threading.Lock()
 _REMOTE_SPECIALIST_BATCH4_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
+_REMOTE_RTDETR_PHONE_SUPPORT_LOCK = threading.Lock()
+_REMOTE_RTDETR_PHONE_SUPPORT: dict[str, Any] = {
+    "url": None,
+    "1": None,
+    "2": None,
+}
 _REMOTE_PRIMARY_BATCH_WAIT_SECONDS = _bounded_env_float(
     "SAFETYLENS_REMOTE_PRIMARY_BATCH_WAIT_SECONDS",
     0.0,
@@ -137,6 +147,13 @@ _REMOTE_BATCH2_EARLY_FLUSH_SECONDS = _bounded_env_float(
     minimum=0.0,
     maximum=0.02,
 )
+_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS = _bounded_env_float(
+    "SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS",
+    0.014,
+    minimum=0.0,
+    maximum=0.02,
+)
+_REMOTE_RTDETR_PHONE_IMGSZ = 640
 _COCO_LOW_RES_ENGINE_ENV = "SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE"
 _COCO_BATCH2_ENGINE_ENV = "SAFETYLENS_COCO_BATCH2_TENSORRT_ENGINE"
 _COCO_BATCH4_ENGINE_ENV = "SAFETYLENS_COCO_BATCH4_TENSORRT_ENGINE"
@@ -1273,6 +1290,96 @@ def _remote_post_raw_primary_batch4(
     with _REMOTE_PRIMARY_BATCH4_SUPPORT_LOCK:
         if _REMOTE_PRIMARY_BATCH4_SUPPORT["url"] == settings["url"]:
             _REMOTE_PRIMARY_BATCH4_SUPPORT["supported"] = True
+    return response.json()
+
+
+def _remote_rtdetr_phone_route_may_run(batch_size: int) -> bool:
+    if batch_size not in {1, 2} or not _remote_raw_transport_enabled():
+        return False
+    settings = _remote_settings()
+    with _REMOTE_RTDETR_PHONE_SUPPORT_LOCK:
+        if _REMOTE_RTDETR_PHONE_SUPPORT["url"] != settings["url"]:
+            _REMOTE_RTDETR_PHONE_SUPPORT.update(
+                url=settings["url"],
+                **{"1": None, "2": None},
+            )
+        return _REMOTE_RTDETR_PHONE_SUPPORT[str(batch_size)] is not False
+
+
+def _remote_post_raw_rtdetr_phone_batch(
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Post one or two RT-DETR phone frames through the optional fixed route."""
+    batch_size = len(items)
+    if batch_size not in {1, 2}:
+        raise ValueError("Remote RT-DETR phone batch requires one or two frames")
+    if not _remote_rtdetr_phone_route_may_run(batch_size):
+        raise RemoteRTDETRPhoneUnavailableError(
+            f"RT-DETR phone batch-{batch_size} route is unavailable"
+        )
+    settings = _remote_settings()
+    metadata = []
+    contiguous_frames = []
+    total_bytes = 0
+    for index, item in enumerate(items):
+        frame = item["frame"]
+        if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError("RT-DETR phone frames must be uint8 BGR arrays")
+        contiguous = np.ascontiguousarray(frame)
+        height, width, channels = contiguous.shape
+        byte_length = int(contiguous.nbytes)
+        contiguous_frames.append(contiguous)
+        total_bytes += byte_length
+        metadata.append(
+            {
+                "request_id": f"frame-{index}",
+                "person_conf": item["person_conf"],
+                "phone_conf": item["phone_conf"],
+                "frame_width": width,
+                "frame_height": height,
+                "frame_channels": channels,
+                "byte_length": byte_length,
+            }
+        )
+
+    body = bytearray(total_bytes)
+    offset = 0
+    for frame in contiguous_frames:
+        view = memoryview(frame).cast("B")
+        body[offset : offset + len(view)] = view
+        offset += len(view)
+    headers = _remote_headers(settings["token"])
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-RTDETR-Phone-Batch": json.dumps(
+                metadata,
+                separators=(",", ":"),
+            ),
+        }
+    )
+    response = _remote_session().post(
+        f"{settings['url']}/api/infer/raw/rtdetr-phone-batch{batch_size}",
+        data=body,
+        headers=headers,
+        timeout=settings["timeout_seconds"],
+    )
+    if response.status_code in {404, 409}:
+        with _REMOTE_RTDETR_PHONE_SUPPORT_LOCK:
+            if _REMOTE_RTDETR_PHONE_SUPPORT["url"] == settings["url"]:
+                _REMOTE_RTDETR_PHONE_SUPPORT[str(batch_size)] = False
+        raise RemoteRTDETRPhoneUnavailableError(
+            f"RT-DETR phone batch-{batch_size} route is unavailable"
+        )
+    try:
+        response.raise_for_status()
+    except Exception as exc:
+        raise RemoteRTDETRPhoneUnavailableError(
+            f"RT-DETR phone batch-{batch_size} request failed"
+        ) from exc
+    with _REMOTE_RTDETR_PHONE_SUPPORT_LOCK:
+        if _REMOTE_RTDETR_PHONE_SUPPORT["url"] == settings["url"]:
+            _REMOTE_RTDETR_PHONE_SUPPORT[str(batch_size)] = True
     return response.json()
 
 
@@ -4002,6 +4109,169 @@ _REMOTE_SPECIALIST_FRAME_BATCHER = _RemoteSpecialistFrameBatcher(
 
 def remote_specialist_batch_stats() -> dict[str, Any]:
     return _REMOTE_SPECIALIST_FRAME_BATCHER.stats()
+
+
+class _RemoteRTDETRPhoneFrameBatcher:
+    """Pair phase-aligned phone probes and fall back to batch-1 safely."""
+
+    def __init__(self, wait_seconds: float):
+        self.wait_seconds = min(0.02, max(0.0, float(wait_seconds)))
+        self._lock = threading.Lock()
+        self._pending: dict[tuple[float, float], list[dict[str, Any]]] = {}
+        self._counters = {
+            "submitted_frames": 0,
+            "batch1_frames": 0,
+            "batch2_frames": 0,
+            "batch1_executed": 0,
+            "batch2_executed": 0,
+            "admission_overloads": 0,
+            "route_failures": 0,
+        }
+
+    def _execute(
+        self,
+        items: list[dict[str, Any]],
+        current: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        batch_size = len(items)
+        admitted = False
+        try:
+            admitted = _REMOTE_JOB_ADMISSION.acquire(
+                timeout=_REMOTE_JOB_ADMISSION_WAIT_SECONDS
+            )
+            if not admitted:
+                with self._lock:
+                    self._counters["admission_overloads"] += batch_size
+                raise RemoteInferenceOverloadedError(
+                    "Remote inference is at its bounded concurrency limit"
+                )
+            response = _remote_post_raw_rtdetr_phone_batch(items)
+            results = response.get("results")
+            expected = {f"frame-{index}" for index in range(batch_size)}
+            if not isinstance(results, dict) or set(results) != expected:
+                raise RuntimeError(
+                    "Model server returned an incomplete RT-DETR phone batch"
+                )
+            with self._lock:
+                self._counters[f"batch{batch_size}_executed"] += 1
+                self._counters[f"batch{batch_size}_frames"] += batch_size
+            for index, item in enumerate(items):
+                item["records"] = _scale_remote_records_to_source(
+                    results[f"frame-{index}"],
+                    item["source_shape"],
+                    item["inference_shape"],
+                )
+        except Exception as exc:
+            with self._lock:
+                self._counters["route_failures"] += batch_size
+            for item in items:
+                item["error"] = exc
+        finally:
+            if admitted:
+                _REMOTE_JOB_ADMISSION.release()
+            for item in items:
+                item["event"].set()
+        if current["error"] is not None:
+            raise current["error"]
+        return current["records"]
+
+    def submit(
+        self,
+        frame: np.ndarray,
+        *,
+        person_conf: float,
+        phone_conf: float,
+        frame_batch_size_hint: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if not is_remote_inference_enabled() or not _remote_raw_transport_enabled():
+            raise RemoteRTDETRPhoneUnavailableError(
+                "RT-DETR phone inference requires remote raw transport"
+            )
+        inference_frame, inference_shape = _prepare_remote_inference_frame(
+            frame,
+            _REMOTE_RTDETR_PHONE_IMGSZ,
+        )
+        current = {
+            "frame": inference_frame,
+            "source_shape": frame.shape,
+            "inference_shape": inference_shape,
+            "person_conf": float(person_conf),
+            "phone_conf": float(phone_conf),
+            "event": threading.Event(),
+            "records": [],
+            "error": None,
+        }
+        with self._lock:
+            self._counters["submitted_frames"] += 1
+        if frame_batch_size_hint == 1 or self.wait_seconds <= 0:
+            return self._execute([current], current)
+
+        key = (float(person_conf), float(phone_conf))
+        items = None
+        with self._lock:
+            pending = self._pending.setdefault(key, [])
+            pending.append(current)
+            if len(pending) == 2:
+                items = self._pending.pop(key)
+        if items is not None:
+            return self._execute(items, current)
+
+        if current["event"].wait(self.wait_seconds):
+            if current["error"] is not None:
+                raise current["error"]
+            return current["records"]
+        with self._lock:
+            pending = self._pending.get(key)
+            if pending is not None:
+                for index, item in enumerate(pending):
+                    if item is current:
+                        pending.pop(index)
+                        if not pending:
+                            self._pending.pop(key, None)
+                        items = [current]
+                        break
+        if items is not None:
+            return self._execute(items, current)
+        current["event"].wait()
+        if current["error"] is not None:
+            raise current["error"]
+        return current["records"]
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "enabled": self.wait_seconds > 0,
+                "wait_ms": round(self.wait_seconds * 1000.0, 3),
+                "pending": sum(len(items) for items in self._pending.values()),
+                **self._counters,
+            }
+
+
+_REMOTE_RTDETR_PHONE_FRAME_BATCHER = _RemoteRTDETRPhoneFrameBatcher(
+    _REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS
+)
+
+
+def predict_rtdetr_phone_records(
+    frame: np.ndarray,
+    *,
+    person_conf: float,
+    phone_conf: float,
+    frame_batch_size_hint: int | None = None,
+) -> list[dict[str, Any]]:
+    """Run the optional person/phone RT-DETR route with batch-2 rendezvous."""
+    if not 0.0 <= person_conf <= 1.0 or not 0.0 <= phone_conf <= 1.0:
+        raise ValueError("RT-DETR confidence thresholds must be between 0 and 1")
+    return _REMOTE_RTDETR_PHONE_FRAME_BATCHER.submit(
+        frame,
+        person_conf=person_conf,
+        phone_conf=phone_conf,
+        frame_batch_size_hint=frame_batch_size_hint,
+    )
+
+
+def remote_rtdetr_phone_batch_stats() -> dict[str, Any]:
+    return _REMOTE_RTDETR_PHONE_FRAME_BATCHER.stats()
 
 
 def fixed_batch_runtime_status() -> dict[str, dict[str, dict[str, Any]]]:

@@ -18,21 +18,38 @@ def _phase_group_size() -> int:
     return min(4, max(1, value))
 
 
-def camera_phase_offset(camera_id: str, cfg: dict, interval_seconds: float) -> float:
-    """Spread enabled cameras evenly across one inference interval."""
-    if interval_seconds <= 0:
-        raise ValueError("Inference interval must be positive")
+def camera_phase_groups(cfg: dict) -> list[list[str]]:
+    """Return the stable camera groups that share one inference phase."""
     camera_ids = sorted(
         str(configured_id)
         for configured_id, camera in (cfg.get("cameras") or {}).items()
         if not isinstance(camera, dict) or camera.get("enabled", True)
     )
+    group_size = _phase_group_size()
+    return [
+        camera_ids[index : index + group_size]
+        for index in range(0, len(camera_ids), group_size)
+    ]
+
+
+def camera_phase_offset(camera_id: str, cfg: dict, interval_seconds: float) -> float:
+    """Spread enabled cameras evenly across one inference interval."""
+    if interval_seconds <= 0:
+        raise ValueError("Inference interval must be positive")
+    groups = camera_phase_groups(cfg)
+    camera_ids = [camera for group in groups for camera in group]
     if camera_id not in camera_ids:
         camera_ids.append(camera_id)
         camera_ids.sort()
-    group_size = _phase_group_size()
-    group_count = math.ceil(len(camera_ids) / group_size)
-    group_index = camera_ids.index(camera_id) // group_size
+        group_size = _phase_group_size()
+        groups = [
+            camera_ids[index : index + group_size]
+            for index in range(0, len(camera_ids), group_size)
+        ]
+    group_count = len(groups)
+    group_index = next(
+        index for index, group in enumerate(groups) if camera_id in group
+    )
     return group_index * interval_seconds / group_count
 
 

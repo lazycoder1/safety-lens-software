@@ -33,6 +33,10 @@ import object_lifecycle_analytics
 import state
 import notification_dispatcher
 import policy_engine
+from rtdetr_phone_scheduler import (
+    SUBSTITUTION_SCHEDULER as RTDETR_PHONE_SUBSTITUTION_SCHEDULER,
+    PrimaryPersonTracker,
+)
 from camera_capture import (
     CAMERA_STOP_TIMEOUT_SECONDS,
     CameraConnectionEvent,
@@ -78,6 +82,10 @@ logger = logging.getLogger("rakshak_lens")
 _last_pose_results: dict[str, object] = {}
 
 
+def rtdetr_phone_substitution_stats() -> dict:
+    return RTDETR_PHONE_SUBSTITUTION_SCHEDULER.stats()
+
+
 def _is_executor_shutdown_error(exc: RuntimeError) -> bool:
     message = str(exc).lower()
     return (
@@ -112,6 +120,8 @@ _COCO_CLASS_TO_CAPABILITIES = {
 _MOBILE_PHONE_PROBE_REASON = "mobile_phone_small_object_recall"
 _MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON = "awaiting_primary_person_context"
 _PPE_PHONE_PROBE_DEFERRAL_REASON = "deferred_for_mobile_phone_probe"
+_RTDETR_PHONE_PROBE_REASON = "rtdetr_phone_track_recall"
+_RTDETR_PHONE_FALLBACK_REASON = "rtdetr_phone_route_fallback"
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
 PLATE_LOG_COOLDOWN_SECONDS = 10.0
@@ -922,6 +932,7 @@ def _advance_violation_window(
     fresh_detection_evaluated: bool,
     fresh_fall_evaluated: bool,
     fresh_ppe_evaluated: bool = True,
+    fresh_detection_rule_keys: set[str] | None = None,
 ) -> None:
     """Advance confirmation windows only when the source model produced a fresh observation."""
     all_tracked = set(violation_window) | set(current_violation_rules)
@@ -934,6 +945,12 @@ def _advance_violation_window(
             if not fresh_detection_evaluated:
                 continue
             if rule_key.startswith("Missing ") and not fresh_ppe_evaluated:
+                continue
+            if (
+                fresh_detection_rule_keys is not None
+                and not rule_key.startswith("Missing ")
+                and rule_key not in fresh_detection_rule_keys
+            ):
                 continue
         violation_window.setdefault(rule_key, []).append(observed)
         if len(violation_window[rule_key]) > window_size:
@@ -948,6 +965,7 @@ def _record_empty_violation_observation(
     fresh_detection_evaluated: bool,
     fresh_fall_evaluated: bool,
     fresh_ppe_evaluated: bool = True,
+    fresh_detection_rule_keys: set[str] | None = None,
 ) -> None:
     for rule_key in list(violation_window):
         if rule_key == "Fall Detected":
@@ -956,6 +974,8 @@ def _record_empty_violation_observation(
         elif rule_key.startswith("Missing ") and not fresh_ppe_evaluated:
             continue
         elif not fresh_detection_evaluated:
+            continue
+        elif fresh_detection_rule_keys is not None and rule_key not in fresh_detection_rule_keys:
             continue
         violation_window[rule_key].append(False)
         if len(violation_window[rule_key]) > window_size:
@@ -1423,6 +1443,84 @@ def _mobile_phone_probe_execution_plan(
     return probed, True, False
 
 
+def _rtdetr_phone_tracker_settings(cfg: dict | None) -> tuple[int, float]:
+    global_config = cfg.get("global") if isinstance(cfg, dict) else None
+    if not isinstance(global_config, dict):
+        return 2, 1.0
+    raw_hits = global_config.get("rtdetr_phone_person_track_min_hits", 2)
+    raw_ttl = global_config.get("rtdetr_phone_person_track_ttl_seconds", 1.0)
+    if isinstance(raw_hits, bool):
+        raw_hits = 2
+    try:
+        min_hits = int(raw_hits)
+        ttl_seconds = float(raw_ttl)
+    except (TypeError, ValueError):
+        return 2, 1.0
+    if not 1 <= min_hits <= 10:
+        min_hits = 2
+    if not math.isfinite(ttl_seconds) or not 0.25 <= ttl_seconds <= 5.0:
+        ttl_seconds = 1.0
+    return min_hits, ttl_seconds
+
+
+def _rtdetr_phone_substitution_execution_plan(
+    camera_id: str,
+    execution_plan: dict,
+    cfg: dict | None,
+    *,
+    now: float,
+    stable_person_track: bool,
+) -> tuple[dict, bool]:
+    """Replace one phase-aligned primary slot only for stable phone context."""
+    capabilities = set(execution_plan.get("capabilities") or [])
+    unsupported_companion = any(
+        execution_plan.get(key)
+        for key in (
+            "run_ppe_closed_set_candidate",
+            "run_yoloe_long_tail",
+            "run_fire_smoke_specialist",
+            "run_face_recognition",
+            "run_pose_specialist",
+            "run_plate_recognition",
+        )
+    )
+    eligible = bool(
+        isinstance(cfg, dict)
+        and execution_plan.get("run_coco_primary")
+        and "mobile_phone" in capabilities
+        and not unsupported_companion
+        and stable_person_track
+    )
+    selected = RTDETR_PHONE_SUBSTITUTION_SCHEDULER.consider(
+        camera_id,
+        cfg if isinstance(cfg, dict) else {},
+        now=now,
+        stable_person=eligible,
+    )
+    if not selected:
+        return execution_plan, False
+
+    substituted = deepcopy(execution_plan)
+    substituted["run_coco_primary"] = False
+    substituted["run_rtdetr_phone"] = True
+    substituted["partial_detection_capabilities"] = ["mobile_phone"]
+    substituted["runtime_probe_reason"] = _RTDETR_PHONE_PROBE_REASON
+    substituted["required_model_keys"] = [
+        model_key
+        for model_key in substituted.get("required_model_keys", [])
+        if model_key not in {"coco_primary", "ppe_specialist"}
+    ]
+    if substituted.get("run_ppe_specialist"):
+        substituted["run_ppe_specialist"] = False
+        substituted["ppe_prompt_terms"] = []
+        deferred_model_keys = list(substituted.get("runtime_deferred_model_keys") or [])
+        if "ppe_specialist" not in deferred_model_keys:
+            deferred_model_keys.append("ppe_specialist")
+        substituted["runtime_deferred_model_keys"] = deferred_model_keys
+        substituted["runtime_specialist_deferral_reason"] = _PPE_PHONE_PROBE_DEFERRAL_REASON
+    return substituted, True
+
+
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
     """Emit a policy candidate for count-threshold rules without enabling person_presence."""
     persons = [d for d in detections if d.get("class") == "person"]
@@ -1805,6 +1903,8 @@ def _run_grouped_inference(
     pose_results = None
     model_invocations = {
         "coco_primary": 0,
+        "rtdetr_phone": 0,
+        "rtdetr_phone_fallback": 0,
         "ppe_specialist": 0,
         "ppe_closed_set_candidate": 0,
         "yoloe_long_tail": 0,
@@ -1814,7 +1914,27 @@ def _run_grouped_inference(
     ppe_prompts = execution_plan.get("ppe_prompt_terms") or []
     long_tail_prompts = execution_plan.get("yoloe_prompt_terms") or []
     batch_requests = []
-    if execution_plan.get("run_coco_primary"):
+    rtdetr_records = None
+    rtdetr_fallback = False
+    if execution_plan.get("run_rtdetr_phone"):
+        person_conf = _rule_confidence_for_capability(
+            camera_id, "person_presence", conf, cfg=cfg
+        )
+        phone_conf = _rule_confidence_for_capability(
+            camera_id, "mobile_phone", min(conf, 0.15), cfg=cfg
+        )
+        model_invocations["rtdetr_phone"] += 1
+        try:
+            rtdetr_records = model_manager.predict_rtdetr_phone_records(
+                frame,
+                person_conf=person_conf,
+                phone_conf=phone_conf,
+                frame_batch_size_hint=frame_batch_size_hint,
+            )
+        except model_manager.RemoteRTDETRPhoneUnavailableError:
+            rtdetr_fallback = True
+            model_invocations["rtdetr_phone_fallback"] += 1
+    if execution_plan.get("run_coco_primary") or rtdetr_fallback:
         coco_conf = _rule_confidence_for_model_family(
             camera_id,
             "coco_primary",
@@ -1904,12 +2024,18 @@ def _run_grouped_inference(
         else {}
     )
     record_batches = model_manager.predict_record_batches(
-        frame,
-        batch_requests,
-        **batch_options,
-    )
+        frame, batch_requests, **batch_options
+    ) if batch_requests else {}
 
-    if execution_plan.get("run_coco_primary"):
+    if execution_plan.get("run_rtdetr_phone") and not rtdetr_fallback:
+        records = _filter_coco_records_for_rule_confidence(
+            camera_id, rtdetr_records or [], conf, cfg=cfg
+        )
+        phone_detections = _detection_batch_from_records(records, "rtdetr_phone")
+        detections.extend(phone_detections)
+        visible_detection_count += len(phone_detections)
+
+    if execution_plan.get("run_coco_primary") or rtdetr_fallback:
         records = _filter_coco_records_for_rule_confidence(
             camera_id,
             record_batches["coco_primary"],
@@ -2469,6 +2595,13 @@ def _run_detection_job(
         cfg=current_cfg,
         frame_batch_size_hint=frame_batch_size_hint,
     )
+    effective_plan = scheduled_plan
+    if model_invocations.get("rtdetr_phone_fallback"):
+        effective_plan = deepcopy(scheduled_plan)
+        effective_plan["run_coco_primary"] = True
+        effective_plan["run_rtdetr_phone"] = False
+        effective_plan.pop("partial_detection_capabilities", None)
+        effective_plan["runtime_probe_reason"] = _RTDETR_PHONE_FALLBACK_REASON
     model_invocations.setdefault("face_recognition", 0)
     model_invocations.setdefault("plate_recognition", 0)
     if scheduled_plan.get("run_face_recognition"):
@@ -2515,10 +2648,32 @@ def _run_detection_job(
         "detections": detections,
         "fresh_pose_results": fresh_pose_results,
         "model_invocations": model_invocations,
-        "scheduled_plan": scheduled_plan,
+        "scheduled_plan": effective_plan,
         "schedule_state": schedule_state,
         "current_cam": current_cam,
         "current_cfg": current_cfg,
+    }
+
+
+def _fresh_rule_names_for_capabilities(
+    current_cfg: dict,
+    current_cam: dict,
+    capabilities: set[str],
+) -> set[str]:
+    rule_map = {str(rule.get("id")): rule for rule in current_cfg.get("safety_rules", [])}
+    assigned_rule_ids = current_cam.get("safety_rule_ids") or [
+        rule_id
+        for rule_id in rule_map
+        if RULE_ID_TO_CAPABILITY.get(rule_id) in capabilities
+    ]
+    return {
+        str(rule["name"])
+        for rule_id in assigned_rule_ids
+        if RULE_ID_TO_CAPABILITY.get(str(rule_id)) in capabilities
+        and (rule := rule_map.get(str(rule_id)))
+        and rule.get("enabled", True)
+        and rule.get("type") == "alert"
+        and rule.get("name")
     }
 
 
@@ -2539,9 +2694,21 @@ def _process_detection_observation(
     window_size: int,
 ) -> None:
     frame_h, frame_w = frame.shape[:2]
+    raw_partial_capabilities = scheduled_plan.get("partial_detection_capabilities")
+    partial_capabilities = (
+        set(raw_partial_capabilities)
+        if isinstance(raw_partial_capabilities, list)
+        else None
+    )
+    fresh_detection_rule_keys = (
+        _fresh_rule_names_for_capabilities(current_cfg, current_cam, partial_capabilities)
+        if partial_capabilities is not None
+        else None
+    )
     object_lifecycle_events = []
     if (
         "object_lifecycle" in scheduled_plan.get("capabilities", [])
+        and (partial_capabilities is None or "object_lifecycle" in partial_capabilities)
         and object_lifecycle_analytics.is_object_lifecycle_enabled(current_cam)
     ):
         object_lifecycle_events = object_lifecycle_analytics.update_object_lifecycle(
@@ -2568,11 +2735,27 @@ def _process_detection_observation(
         if detections:
             if scheduled_plan.get("run_ppe_specialist") or scheduled_plan.get("run_ppe_closed_set_candidate"):
                 candidates.extend(check_yoloe_violations(detections, camera_id, frame_w, frame_h))
-            candidates.extend(check_violations(detections, camera_id))
-            if "crowd_count_threshold" in scheduled_plan.get("capabilities", []):
+            if partial_capabilities is None:
+                candidates.extend(check_violations(detections, camera_id))
+            else:
+                candidates.extend(check_violations(
+                    detections,
+                    camera_id,
+                    capability_filter=partial_capabilities,
+                ))
+            if (
+                "crowd_count_threshold" in scheduled_plan.get("capabilities", [])
+                and (
+                    partial_capabilities is None
+                    or "crowd_count_threshold" in partial_capabilities
+                )
+            ):
                 candidates.extend(_crowd_count_threshold_candidates(camera_id, detections))
 
-            if "zone_intrusion" in scheduled_plan.get("capabilities", []):
+            if (
+                "zone_intrusion" in scheduled_plan.get("capabilities", [])
+                and (partial_capabilities is None or "zone_intrusion" in partial_capabilities)
+            ):
                 candidates.extend(check_zone_intrusions(detections, camera_id, frame_w, frame_h))
 
         candidates.extend(fall_candidates)
@@ -2585,9 +2768,12 @@ def _process_detection_observation(
             fresh_detection_evaluated=True,
             fresh_fall_evaluated=fresh_fall_evaluated,
             fresh_ppe_evaluated=fresh_ppe_evaluated,
+            fresh_detection_rule_keys=fresh_detection_rule_keys,
         )
 
         for rule_key in list(active_violations):
+            if fresh_detection_rule_keys is not None and rule_key not in fresh_detection_rule_keys:
+                continue
             if sum(violation_window.get(rule_key, [])[-window_size:]) < 2:
                 active_violations.discard(rule_key)
 
@@ -2682,6 +2868,8 @@ def _process_detection_observation(
                 )
 
         for rule_key in list(violation_window):
+            if fresh_detection_rule_keys is not None and rule_key not in fresh_detection_rule_keys:
+                continue
             if len(violation_window[rule_key]) >= window_size and sum(violation_window[rule_key]) == 0:
                 violation_window.pop(rule_key, None)
     else:
@@ -2692,6 +2880,7 @@ def _process_detection_observation(
             fresh_detection_evaluated=True,
             fresh_fall_evaluated=fresh_fall_evaluated,
             fresh_ppe_evaluated=fresh_ppe_evaluated,
+            fresh_detection_rule_keys=fresh_detection_rule_keys,
         )
     return _alert_confirmation_required(active_violations, violation_window)
 
@@ -2832,6 +3021,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         pending_inference_submitted_at = None
         last_mobile_phone_probe_at = None
         last_mobile_phone_probe_context_suppressed_at = None
+        primary_person_tracker = PrimaryPersonTracker()
+        last_full_primary_detections: list[dict] = []
+        last_full_primary_at: float | None = None
         alert_confirmation_required = False
         received_frame = False
         try:
@@ -2847,6 +3039,9 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                     _clear_camera_observation(camera_id)
                     active_violations.clear()
                     violation_window.clear()
+                    primary_person_tracker.clear()
+                    last_full_primary_detections = []
+                    last_full_primary_at = None
                     last_annotated = None
                     break
                 if not received_frame:
@@ -2912,6 +3107,19 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                         last_inference_signature = completed_signature
                         last_inference_submitted_at = completed_submitted_at
                         detections = result["detections"]
+                        completed_at = time.monotonic()
+                        result_plan = result["scheduled_plan"]
+                        if result_plan.get("run_coco_primary") and not result_plan.get(
+                            "partial_detection_capabilities"
+                        ):
+                            _, tracker_ttl = _rtdetr_phone_tracker_settings(result["current_cfg"])
+                            primary_person_tracker.update(
+                                detections,
+                                now=completed_at,
+                                ttl_seconds=tracker_ttl,
+                            )
+                            last_full_primary_detections = list(detections)
+                            last_full_primary_at = completed_at
                         last_annotated = result.get("annotated_frame")
                         state.camera_detections[camera_id] = detections
                         _record_detection_history(
@@ -3040,9 +3248,16 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                             now=now + inference_interval / 2,
                         )
                     else:
+                        min_track_hits, tracker_ttl = _rtdetr_phone_tracker_settings(current_cfg)
+                        primary_context_detections = (
+                            last_full_primary_detections
+                            if last_full_primary_at is not None
+                            and now - last_full_primary_at <= tracker_ttl
+                            else []
+                        )
                         runtime_plan = _context_gated_execution_plan(
                             scheduled_plan,
-                            state.camera_detections.get(camera_id, []),
+                            primary_context_detections,
                             camera=current_cam,
                             frame_w=frame.shape[1],
                             frame_h=frame.shape[0],
@@ -3060,9 +3275,19 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                 last_context_suppressed_at=(
                                     last_mobile_phone_probe_context_suppressed_at
                                 ),
-                                previous_detections=state.camera_detections.get(
-                                    camera_id,
-                                    [],
+                                previous_detections=primary_context_detections,
+                            )
+                        )
+                        runtime_plan, _rtdetr_phone_selected = (
+                            _rtdetr_phone_substitution_execution_plan(
+                                camera_id,
+                                runtime_plan,
+                                current_cfg,
+                                now=now,
+                                stable_person_track=primary_person_tracker.has_stable_person(
+                                    now=now,
+                                    min_hits=min_track_hits,
+                                    ttl_seconds=tracker_ttl,
                                 ),
                             )
                         )
@@ -3116,6 +3341,7 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
         _clear_camera_observation(camera_id)
         active_violations.clear()
         violation_window.clear()
+        primary_person_tracker.clear()
         last_annotated = None
         cap.release()
         if stop_event.is_set():
