@@ -2,8 +2,10 @@
 
 ## Decision
 
-Keep raw BGR transport enabled for the local edge-to-model-server hop and raise
-the bounded remote admission wait from 50 ms to 65 ms.
+Keep raw BGR transport enabled for the local edge-to-model-server hop. The
+original mixed workload raised the bounded remote admission wait from 50 ms to
+65 ms. After calibrated 640px INT8 Small retired the 960px phone burst, a new
+boundary test raised the measured default to 75 ms.
 
 The production inference scheduler deterministically phases enabled cameras
 across their inference interval. Under that schedule, 65 ms removed the
@@ -96,3 +98,16 @@ completion. The later single-process edge-capacity experiment exercised the
 exact shared-admission path: eleven conditional cameras completed without a
 drop, while twelve shed five of 1440 jobs. Both live cameras accumulated zero
 inference drops or failures throughout the follow-up.
+
+## 640-only Small follow-up
+
+With the high-resolution phone burst removed, 65 ms completed 1670 of 1680
+jobs at fourteen cameras. A 75 ms wait completed 1680 of 1680 twice with all
+182 specialist calls preserved; p95 was 71.424 ms and 70.876 ms. Fifteen
+cameras dropped 25 of 1800 jobs at 75 ms. The supported conditional boundary
+therefore moves to fourteen cameras at 4 FPS, with fifteen retained as the
+measured overload boundary.
+
+`SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS` now exposes the bounded
+setting for platform-specific tuning. Invalid values fall back to 75 ms and
+values are clamped to 0-200 ms, below one 4 FPS frame period.

@@ -34,6 +34,18 @@ def test_jetson_model_server_image_contains_anpr_runtime_module():
     assert "COPY backend/plate_analyzer.py ./backend/plate_analyzer.py" in dockerfile
 
 
+def test_jetson_edge_uses_measured_inference_admission_defaults():
+    compose = yaml.safe_load((ROOT / "docker-compose.jetson.yml").read_text())
+    environment = compose["services"]["edge"]["environment"]
+
+    assert environment["SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT"] == (
+        "${SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT:-3}"
+    )
+    assert environment["SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS"] == (
+        "${SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS:-0.075}"
+    )
+
+
 def test_split_services_default_to_same_small_coco_model():
     compose = yaml.safe_load((ROOT / "docker-compose.split.yml").read_text())
 

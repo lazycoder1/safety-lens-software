@@ -98,8 +98,9 @@ person-associated phone recall on representative site footage. Setting a
 larger width periodically routes the COCO request through that fixed engine,
 so it is a measurable accuracy-versus-capacity tradeoff rather than a safe
 default. The July 2026 Orin validation found identical actionable phone recall
-at 640px INT8 and 960px FP16, while retiring the 960px burst raised the clean
-conditional tier from eleven to thirteen cameras at 4 inference FPS.
+at 640px INT8 and 960px FP16. Retiring the 960px burst and retuning the bounded
+admission wait raised the clean conditional tier from eleven to fourteen
+cameras at 4 inference FPS.
 
 Configure a larger width only when a matching fixed COCO engine is installed,
 the larger engine recovers labelled cases that the compact engine misses, and

@@ -1044,6 +1044,36 @@ def test_remote_inference_concurrency_is_safely_bounded(
     ) == expected
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, 0.075),
+        ("invalid", 0.075),
+        ("nan", 0.075),
+        ("-1", 0.0),
+        ("0.08", 0.08),
+        ("1", 0.2),
+    ],
+)
+def test_remote_inference_admission_wait_is_safely_bounded(
+    monkeypatch,
+    configured,
+    expected,
+):
+    name = "TEST_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS"
+    if configured is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, configured)
+
+    assert model_manager._bounded_env_float(
+        name,
+        0.075,
+        minimum=0.0,
+        maximum=0.2,
+    ) == expected
+
+
 def test_model_server_runs_singleton_batch_without_executor_hop(monkeypatch):
     detections = [{"class_id": 0, "confidence": 0.9, "bbox": [1, 2, 3, 4]}]
     captured = {}

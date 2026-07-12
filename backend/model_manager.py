@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import logging
-import os
 import base64
 import gc
 import json
+import logging
+import math
+import os
 import queue
 import shutil
 import tempfile
@@ -55,6 +56,22 @@ def _bounded_env_int(
     return min(maximum, max(minimum, parsed))
 
 
+def _bounded_env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        parsed = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    return min(maximum, max(minimum, parsed))
+
+
 MODELS_ROOT = PROJECT_ROOT / "models"
 TMP_MODELS_ROOT = Path(tempfile.gettempdir()) / "rakshak-lens-models"
 _JOB_POLL_FINAL_STATES = {"ready", "failed"}
@@ -70,10 +87,16 @@ _REMOTE_JOB_MAX_INFLIGHT = _bounded_env_int(
     maximum=8,
 )
 _REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(_REMOTE_JOB_MAX_INFLIGHT)
-# The phase scheduler keeps normal camera arrivals staggered. A 65 ms bounded
+# The phase scheduler keeps normal camera arrivals staggered. A 75 ms bounded
 # wait absorbs short service-time jitter without allowing stale camera work to
-# build an unbounded model-server queue.
-_REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.065
+# build an unbounded model-server queue. The upper bound stays below one 4 FPS
+# frame period even when an operator overrides the measured default.
+_REMOTE_JOB_ADMISSION_WAIT_SECONDS = _bounded_env_float(
+    "SAFETYLENS_REMOTE_INFERENCE_ADMISSION_WAIT_SECONDS",
+    0.075,
+    minimum=0.0,
+    maximum=0.2,
+)
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
 _REMOTE_RAW_TRANSPORT_ENV = "SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT"

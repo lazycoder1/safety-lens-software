@@ -74,20 +74,27 @@ alert policy. This avoids running a tracker solely to answer a boolean
 
 The capacity workload used staggered cameras at 4 FPS, calibrated INT8 Small
 640px primary inference, 11.1% PPE specialist duty, one-second phone scheduling,
-three admission slots, 65 ms admission wait, and deferred phone/PPE overlap.
+three admission slots and deferred phone/PPE overlap. The initial 65 ms result
+was followed by a bounded admission sweep after the 640-only workload removed
+the high-resolution phone burst.
 All specialist evaluations were preserved.
 
 | Cameras | Run | Completed | Drops / failures | Minimum FPS | Specialist calls | Median | p95 |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 13 | A | 1560 / 1560 | 0 / 0 | 4.000 | 169 | 17.506 ms | 69.537 ms |
 | 13 | B | 1560 / 1560 | 0 / 0 | 4.000 | 169 | 17.505 ms | 68.441 ms |
-| 14 | boundary | 1670 / 1680 | 10 / 0 | 3.767 | 182 | 17.571 ms | 71.520 ms |
+| 14 | 65 ms boundary | 1670 / 1680 | 10 / 0 | 3.767 | 182 | 17.571 ms | 71.520 ms |
+| 14 | 75 ms A | 1680 / 1680 | 0 / 0 | 4.000 | 182 | 17.529 ms | 71.424 ms |
+| 14 | 75 ms B | 1680 / 1680 | 0 / 0 | 4.000 | 182 | 17.484 ms | 70.876 ms |
+| 15 | 75 ms boundary | 1775 / 1800 | 25 / 0 | 3.733 | 190 | 17.953 ms | 72.247 ms |
 
-Thirteen conditional cameras at 4 inference FPS is the supported tier for this
-workload. Fourteen is the measured failure boundary. This replaces the prior
-eleven-camera tier that retained a 960px FP16 phone burst.
+Fourteen conditional cameras at 4 inference FPS is the supported tier for this
+workload. Fifteen is the measured failure boundary. The 75 ms wait remains well
+below the 250 ms frame period and is bounded to prevent sustained excess demand
+from becoming an unbounded queue. This replaces the prior eleven-camera tier
+that retained a 960px FP16 phone burst.
 
-This is not a claim that every mix of thirteen cameras is safe. A workload that
+This is not a claim that every mix of fourteen cameras is safe. A workload that
 runs PPE on every person frame, enables pose or other specialists everywhere,
 or uses denser phone rules must be benchmarked separately. The conservative
 all-person planning tier remains lower than the conditional tier.
