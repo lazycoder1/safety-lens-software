@@ -48,6 +48,13 @@ python -m uvicorn server:app --app-dir backend --host 0.0.0.0 --port 8000
 
 `SAFETYLENS_MODEL_SERVER_URL` and `SAFETYLENS_MODEL_SERVER_TOKEN` are now first-boot defaults. Admins can change the active model server from **System Settings -> Model Server** without changing environment variables or rebuilding the edge container. If the saved model-server URL is empty or remote inference is disabled, the backend behaves like the original all-in-one process and loads models locally.
 
+For edge and model-server containers on the same host, set
+`SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT=true` on the edge service to avoid JPEG
+encode/decode overhead. The raw route validates frame dimensions and byte count,
+and the edge falls back to JPEG when rolling against an older model server. Keep
+this disabled across machines or untrusted networks because raw BGR frames are
+substantially larger than JPEG payloads.
+
 The admin setting accepts either a full URL or an IP/host with port:
 
 ```text

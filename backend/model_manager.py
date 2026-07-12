@@ -53,6 +53,9 @@ _REMOTE_JOB_ADMISSION = threading.BoundedSemaphore(2)
 _REMOTE_JOB_ADMISSION_WAIT_SECONDS = 0.05
 _REMOTE_JPEG_QUALITY = 85
 _RESIZED_GROUPED_REMOTE_JPEG_QUALITY = 90
+_REMOTE_RAW_TRANSPORT_ENV = "SAFETYLENS_MODEL_SERVER_RAW_TRANSPORT"
+_REMOTE_RAW_BATCH_SUPPORT_LOCK = threading.Lock()
+_REMOTE_RAW_BATCH_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
 _COCO_LOW_RES_ENGINE_ENV = "SAFETYLENS_COCO_LOW_RES_TENSORRT_ENGINE"
 _OPEN_VOCAB_MODEL_KEYS = {"ppe_specialist", "yoloe_long_tail"}
 _REMOTE_MODEL_CACHE_LOCK = threading.RLock()
@@ -890,6 +893,64 @@ def _remote_post_jpeg_batch(
         except (AttributeError, TypeError, ValueError):
             pass
     response.raise_for_status()
+    return response.json()
+
+
+def _remote_raw_transport_enabled() -> bool:
+    return os.environ.get(_REMOTE_RAW_TRANSPORT_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _remote_post_raw_batch(
+    path: str,
+    frame,
+    *,
+    batch: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Post one contiguous BGR frame, or return None for an older server."""
+    settings = _remote_settings()
+    with _REMOTE_RAW_BATCH_SUPPORT_LOCK:
+        if _REMOTE_RAW_BATCH_SUPPORT["url"] != settings["url"]:
+            _REMOTE_RAW_BATCH_SUPPORT.update(url=settings["url"], supported=None)
+        if _REMOTE_RAW_BATCH_SUPPORT["supported"] is False:
+            return None
+
+    if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+        return None
+    contiguous = np.ascontiguousarray(frame)
+    height, width, channels = contiguous.shape
+    headers = _remote_headers(settings["token"])
+    headers.update({
+        "Content-Type": "application/octet-stream",
+        "X-Rakshak-Inference-Batch": json.dumps(batch, separators=(",", ":")),
+        "X-Rakshak-Frame-Width": str(width),
+        "X-Rakshak-Frame-Height": str(height),
+        "X-Rakshak-Frame-Channels": str(channels),
+    })
+    response = _remote_session().post(
+        f"{settings['url']}{path}",
+        data=contiguous.tobytes(),
+        headers=headers,
+        timeout=settings["timeout_seconds"],
+    )
+    if response.status_code == 404:
+        try:
+            route_missing = response.json().get("detail") == "Not Found"
+        except (AttributeError, TypeError, ValueError):
+            route_missing = False
+        if route_missing:
+            with _REMOTE_RAW_BATCH_SUPPORT_LOCK:
+                if _REMOTE_RAW_BATCH_SUPPORT["url"] == settings["url"]:
+                    _REMOTE_RAW_BATCH_SUPPORT["supported"] = False
+            return None
+    response.raise_for_status()
+    with _REMOTE_RAW_BATCH_SUPPORT_LOCK:
+        if _REMOTE_RAW_BATCH_SUPPORT["url"] == settings["url"]:
+            _REMOTE_RAW_BATCH_SUPPORT["supported"] = True
     return response.json()
 
 
@@ -2153,13 +2214,11 @@ def _remote_predict_records_jpeg(
     return _remote_post("/api/infer", payload).get("detections", [])
 
 
-def _prepare_remote_inference_jpeg(
+def _prepare_remote_inference_frame(
     frame,
     imgsz: int,
-    *,
-    jpeg_quality: int = _REMOTE_JPEG_QUALITY,
-) -> tuple[bytes, tuple[int, ...]]:
-    """Encode no more pixels than the remote model can consume."""
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Return a contiguous frame with no more pixels than the model consumes."""
     import cv2
 
     source_shape = frame.shape
@@ -2176,6 +2235,20 @@ def _prepare_remote_inference_jpeg(
                 max(1, round(source_height * scale)),
             ),
         )
+    inference_frame = np.ascontiguousarray(inference_frame)
+    return inference_frame, inference_frame.shape
+
+
+def _prepare_remote_inference_jpeg(
+    frame,
+    imgsz: int,
+    *,
+    jpeg_quality: int = _REMOTE_JPEG_QUALITY,
+) -> tuple[bytes, tuple[int, ...]]:
+    """Encode no more pixels than the remote model can consume."""
+    import cv2
+
+    inference_frame, inference_shape = _prepare_remote_inference_frame(frame, imgsz)
     ok, buffer = cv2.imencode(
         ".jpg",
         inference_frame,
@@ -2183,7 +2256,7 @@ def _prepare_remote_inference_jpeg(
     )
     if not ok:
         raise RuntimeError("Could not encode frame for remote inference")
-    return buffer.tobytes(), inference_frame.shape
+    return buffer.tobytes(), inference_shape
 
 
 def _scale_remote_records_to_source(
@@ -2294,7 +2367,8 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
             "classes": list(request.get("classes") or []),
         })
 
-    if len(normalized) == 1:
+    remote_inference = is_remote_inference_enabled()
+    if len(normalized) == 1 and not remote_inference:
         item = normalized[0]
         return {
             item["request_id"]: predict_records(
@@ -2307,7 +2381,7 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
             )
         }
 
-    if not is_remote_inference_enabled():
+    if not remote_inference:
         return {
             item["request_id"]: predict_records(
                 item["model_key"],
@@ -2330,6 +2404,31 @@ def predict_record_batches(frame, requests: list[dict[str, Any]]) -> dict[str, l
             "Remote inference is at its bounded concurrency limit"
         )
     try:
+        response = None
+        inference_shape = frame.shape
+        if _remote_raw_transport_enabled():
+            inference_frame, inference_shape = _prepare_remote_inference_frame(
+                frame,
+                maximum_imgsz,
+            )
+            response = _remote_post_raw_batch(
+                "/api/infer/raw/batch",
+                inference_frame,
+                batch=normalized,
+            )
+        if response is not None:
+            results = response.get("results")
+            if not isinstance(results, dict) or set(results) != request_ids:
+                raise RuntimeError("Model server returned an incomplete inference batch")
+            return {
+                request_id: _scale_remote_records_to_source(
+                    records,
+                    frame.shape,
+                    inference_shape,
+                )
+                for request_id, records in results.items()
+            }
+
         # Preserve the existing byte path for camera frames that already fit.
         # Oversized grouped frames use the smallest higher quality that retained
         # operational class presence across the Jetson validation corpus.

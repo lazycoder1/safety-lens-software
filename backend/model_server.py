@@ -38,6 +38,7 @@ _DECODE_CACHE_LOCK = threading.Lock()
 _DECODE_CACHE = OrderedDict()
 _DECODE_INFLIGHT: Dict[bytes, threading.Event] = {}
 _DECODE_SLOTS = threading.BoundedSemaphore(2)
+_MAX_RAW_FRAME_DIMENSION = 1920
 _BATCH_INFERENCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="model-batch",
@@ -81,6 +82,45 @@ class InferenceBatchItem(BaseModel):
 
 class ModelInstallRequest(BaseModel):
     model_keys: List[str] = Field(default_factory=list)
+
+
+def _parse_inference_batch(batch_json: str) -> List[InferenceBatchItem]:
+    if len(batch_json) > 16_384:
+        raise HTTPException(status_code=413, detail="Inference batch metadata is too large")
+    try:
+        payload = json.loads(batch_json)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid inference batch metadata") from exc
+    if not isinstance(payload, list) or not 1 <= len(payload) <= 8:
+        raise HTTPException(status_code=400, detail="Inference batch must contain 1 to 8 requests")
+    try:
+        batch = [InferenceBatchItem(**item) for item in payload]
+    except (TypeError, ValidationError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid inference batch request") from exc
+    request_ids = [item.request_id for item in batch]
+    if len(set(request_ids)) != len(request_ids):
+        raise HTTPException(status_code=400, detail="Inference batch request IDs must be unique")
+    return batch
+
+
+def _run_inference_batch(frame, batch: List[InferenceBatchItem]) -> Dict[str, Any]:
+    futures = {
+        item.request_id: _BATCH_INFERENCE_EXECUTOR.submit(
+            _run_inference_frame,
+            model_key=item.model_key,
+            frame=frame,
+            conf=item.conf,
+            device=item.device,
+            imgsz=item.imgsz,
+            classes=item.classes,
+        )
+        for item in batch
+    }
+    results = {
+        request_id: future.result()["detections"]
+        for request_id, future in futures.items()
+    }
+    return {"results": results}
 
 
 class AnprRequest(BaseModel):
@@ -361,37 +401,32 @@ def infer_jpeg_batch(
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     _require_model_server_token(authorization)
-    if len(batch_json) > 16_384:
-        raise HTTPException(status_code=413, detail="Inference batch metadata is too large")
-    try:
-        payload = json.loads(batch_json)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid inference batch metadata") from exc
-    if not isinstance(payload, list) or not 1 <= len(payload) <= 8:
-        raise HTTPException(status_code=400, detail="Inference batch must contain 1 to 8 requests")
-    try:
-        batch = [InferenceBatchItem(**item) for item in payload]
-    except (TypeError, ValidationError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid inference batch request") from exc
-    request_ids = [item.request_id for item in batch]
-    if len(set(request_ids)) != len(request_ids):
-        raise HTTPException(status_code=400, detail="Inference batch request IDs must be unique")
-
+    batch = _parse_inference_batch(batch_json)
     frame = _decode_frame(frame_jpeg)
-    futures = {
-        item.request_id: _BATCH_INFERENCE_EXECUTOR.submit(
-            _run_inference_frame,
-            model_key=item.model_key,
-            frame=frame,
-            conf=item.conf,
-            device=item.device,
-            imgsz=item.imgsz,
-            classes=item.classes,
-        )
-        for item in batch
-    }
-    results = {
-        request_id: future.result()["detections"]
-        for request_id, future in futures.items()
-    }
-    return {"results": results}
+    return _run_inference_batch(frame, batch)
+
+
+@app.post("/api/infer/raw/batch")
+def infer_raw_batch(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-Inference-Batch"),
+    frame_width: int = Header(..., alias="X-Rakshak-Frame-Width"),
+    frame_height: int = Header(..., alias="X-Rakshak-Frame-Height"),
+    frame_channels: int = Header(..., alias="X-Rakshak-Frame-Channels"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    batch = _parse_inference_batch(batch_json)
+    if not (
+        1 <= frame_width <= _MAX_RAW_FRAME_DIMENSION
+        and 1 <= frame_height <= _MAX_RAW_FRAME_DIMENSION
+        and frame_channels == 3
+    ):
+        raise HTTPException(status_code=400, detail="Invalid raw frame shape")
+    expected_bytes = frame_width * frame_height * frame_channels
+    if len(frame_bytes) != expected_bytes:
+        raise HTTPException(status_code=400, detail="Raw frame byte length does not match shape")
+    frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
+        (frame_height, frame_width, frame_channels)
+    )
+    return _run_inference_batch(frame, batch)
