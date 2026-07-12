@@ -32,6 +32,7 @@ def test_fixed_prompt_export_freezes_classes_and_writes_manifest(tmp_path, monke
             exported.write_bytes(b"tensorrt-engine")
             assert kwargs["dynamic"] is False
             assert kwargs["half"] is True
+            assert kwargs["batch"] == 1
             return str(exported)
 
     def fake_yolo(path):
@@ -117,9 +118,10 @@ def test_low_memory_export_wraps_trtexec_engine_and_records_builder(
     source.write_bytes(b"pytorch-model")
     trtexec.write_bytes(b"binary")
 
-    def fake_onnx_export(*, source_path, output_path, imgsz, device, classes):
+    def fake_onnx_export(*, source_path, output_path, imgsz, batch, device, classes):
         assert source_path.name == "yolo26s.pt"
         assert imgsz == 512
+        assert batch == 2
         assert device == 0
         assert classes == []
         output_path.write_bytes(b"onnx-model")
@@ -142,7 +144,7 @@ def test_low_memory_export_wraps_trtexec_engine_and_records_builder(
         export_module,
         "_read_onnx_metadata",
         lambda _path: {
-            "batch": 1,
+            "batch": 2,
             "imgsz": [512, 512],
             "names": {0: "person", 67: "cell phone"},
             "stride": 32,
@@ -161,6 +163,7 @@ def test_low_memory_export_wraps_trtexec_engine_and_records_builder(
         low_memory=True,
         low_memory_workspace_mib=192,
         trtexec_path=trtexec,
+        batch=2,
     )
 
     with output.open("rb") as handle:
@@ -168,9 +171,12 @@ def test_low_memory_export_wraps_trtexec_engine_and_records_builder(
         metadata = json.loads(handle.read(metadata_size))
         engine = handle.read()
     assert metadata["imgsz"] == [512, 512]
+    assert metadata["batch"] == 2
     assert metadata["args"]["half"] is True
     assert engine == b"bare-tensorrt-engine"
     assert report["metadata"]["builder"] == "trtexec_heuristic"
+    assert report["batch"] == 2
+    assert report["metadata"]["batch"] == 2
     assert report["metadata"]["workspaceMiB"] == 192
 
 

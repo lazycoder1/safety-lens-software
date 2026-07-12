@@ -31,12 +31,15 @@ def build_manifest(
     imgsz: int,
     precision: str,
     task: str,
+    batch: int = 1,
     classes: list[str] | None = None,
     class_groups: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if imgsz < 1:
         raise ValueError("TensorRT image size must be positive")
+    if batch < 1:
+        raise ValueError("TensorRT batch size must be positive")
     precision = precision.lower()
     if precision not in {"fp16", "fp32", "int8"}:
         raise ValueError(f"Unsupported TensorRT precision: {precision}")
@@ -50,6 +53,7 @@ def build_manifest(
         "engineFile": engine_path.name,
         "engineSha256": file_sha256(engine_path),
         "imgsz": imgsz,
+        "batch": batch,
         "precision": precision,
         "task": task,
         "classes": list(classes or []),
@@ -70,6 +74,7 @@ def validate_engine(
     source_path: Path,
     engine_path: Path,
     expected_task: str,
+    expected_batch: int = 1,
     expected_classes: list[str] | None = None,
     expected_class_groups: list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -118,6 +123,19 @@ def validate_engine(
         return None, "TensorRT manifest image size is invalid"
     if imgsz < 1:
         return None, "TensorRT manifest image size is invalid"
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return None, "TensorRT manifest metadata is invalid"
+    try:
+        batch = int(payload.get("batch", metadata.get("batch", 1)))
+    except (TypeError, ValueError):
+        return None, "TensorRT manifest batch size is invalid"
+    if batch < 1:
+        return None, "TensorRT manifest batch size is invalid"
+    if batch != expected_batch:
+        return None, (
+            f"TensorRT batch size mismatch: expected {expected_batch}, found {batch}"
+        )
     if payload.get("sourceSha256") != file_sha256(source_path):
         return None, "TensorRT source-model hash does not match the active model"
     if payload.get("engineSha256") != file_sha256(engine_path):

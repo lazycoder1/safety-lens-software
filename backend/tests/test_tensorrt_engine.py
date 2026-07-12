@@ -33,6 +33,42 @@ def test_validate_engine_accepts_matching_artifacts(tmp_path):
     assert error is None
     assert payload == expected
     assert payload["imgsz"] == 960
+    assert payload["batch"] == 1
+
+
+def test_validate_engine_requires_explicit_opt_in_for_batch_two(tmp_path):
+    source = tmp_path / "model.pt"
+    engine = tmp_path / "model.engine"
+    source.write_bytes(b"pytorch-model")
+    engine.write_bytes(b"tensorrt-engine")
+    write_manifest(
+        manifest_path(engine),
+        build_manifest(
+            source_path=source,
+            engine_path=engine,
+            imgsz=640,
+            precision="fp16",
+            task="detect",
+            batch=2,
+        ),
+    )
+
+    payload, error = validate_engine(
+        source_path=source,
+        engine_path=engine,
+        expected_task="detect",
+    )
+    assert payload is None
+    assert error == "TensorRT batch size mismatch: expected 1, found 2"
+
+    payload, error = validate_engine(
+        source_path=source,
+        engine_path=engine,
+        expected_task="detect",
+        expected_batch=2,
+    )
+    assert error is None
+    assert payload["batch"] == 2
 
 
 def test_validate_engine_rejects_missing_manifest(tmp_path):

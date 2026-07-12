@@ -73,6 +73,7 @@ def _onnx_export_worker(
     source_path: Path,
     output_path: Path,
     imgsz: int,
+    batch: int,
     device: int,
     classes: list[str],
 ) -> None:
@@ -92,7 +93,7 @@ def _onnx_export_worker(
                 format="onnx",
                 imgsz=imgsz,
                 half=False,
-                batch=1,
+                batch=batch,
                 dynamic=False,
                 simplify=False,
                 opset=17,
@@ -115,6 +116,7 @@ def _run_onnx_export_process(
     source_path: Path,
     output_path: Path,
     imgsz: int,
+    batch: int,
     device: int,
     classes: list[str],
 ) -> None:
@@ -125,6 +127,7 @@ def _run_onnx_export_process(
             "source_path": source_path,
             "output_path": output_path,
             "imgsz": imgsz,
+            "batch": batch,
             "device": device,
             "classes": classes,
         },
@@ -145,6 +148,7 @@ def _export_low_memory_engine(
     temporary_dir: Path,
     output_name: str,
     imgsz: int,
+    batch: int,
     device: int,
     classes: list[str],
     workspace_mib: int,
@@ -161,6 +165,7 @@ def _export_low_memory_engine(
         source_path=source_path,
         output_path=exported_onnx,
         imgsz=imgsz,
+        batch=batch,
         device=device,
         classes=classes,
     )
@@ -207,6 +212,7 @@ def export_engine(
     low_memory: bool = False,
     low_memory_workspace_mib: int = 256,
     trtexec_path: Path = DEFAULT_TRTEXEC_PATH,
+    batch: int = 1,
 ) -> dict:
     if source_path.suffix.lower() != ".pt" or not source_path.is_file():
         raise ValueError("Source must be an existing Ultralytics .pt model")
@@ -216,6 +222,8 @@ def export_engine(
         raise FileExistsError(f"Refusing to overwrite existing engine: {output_path}")
     if low_memory and low_memory_workspace_mib < 1:
         raise ValueError("Low-memory TensorRT workspace must be positive")
+    if not 1 <= batch <= 8:
+        raise ValueError("TensorRT batch size must be between 1 and 8")
     if low_memory and not trtexec_path.is_file():
         raise FileNotFoundError(f"TensorRT builder does not exist: {trtexec_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -267,6 +275,7 @@ def export_engine(
                     temporary_dir=Path(temporary_dir),
                     output_name=output_path.name,
                     imgsz=imgsz,
+                    batch=batch,
                     device=device,
                     classes=classes,
                     workspace_mib=low_memory_workspace_mib,
@@ -286,7 +295,7 @@ def export_engine(
                         format="engine",
                         imgsz=imgsz,
                         half=True,
-                        batch=1,
+                        batch=batch,
                         dynamic=False,
                         workspace=workspace,
                         device=device,
@@ -305,10 +314,11 @@ def export_engine(
         imgsz=imgsz,
         precision="fp16",
         task=task,
+        batch=batch,
         classes=classes,
         class_groups=class_groups,
         metadata={
-            "batch": 1,
+            "batch": batch,
             "builder": "trtexec_heuristic" if low_memory else "ultralytics",
             "dynamic": False,
             **(
@@ -337,6 +347,7 @@ def main() -> int:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--workspace", type=float, default=2.0)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--class", dest="classes", action="append", default=[])
@@ -367,6 +378,7 @@ def main() -> int:
         low_memory=args.low_memory,
         low_memory_workspace_mib=args.low_memory_workspace_mib,
         trtexec_path=args.trtexec.resolve(),
+        batch=args.batch,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
