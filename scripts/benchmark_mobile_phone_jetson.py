@@ -17,6 +17,28 @@ import requests
 
 PERSON_CLASS_ID = 0
 CELL_PHONE_CLASS_ID = 67
+RELEVANT_COCO_CLASSES = {
+    0: "person",
+    1: "bicycle",
+    2: "car",
+    3: "motorcycle",
+    4: "airplane",
+    5: "bus",
+    6: "train",
+    7: "truck",
+    8: "boat",
+    14: "bird",
+    15: "cat",
+    16: "dog",
+    17: "horse",
+    18: "sheep",
+    19: "cow",
+    20: "elephant",
+    21: "bear",
+    22: "zebra",
+    23: "giraffe",
+    67: "cell_phone",
+}
 
 
 def _infer(
@@ -26,6 +48,7 @@ def _infer(
     frame,
     *,
     conf: float,
+    imgsz: int,
     repeats: int,
 ) -> tuple[list[dict[str, Any]], list[float]]:
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -38,7 +61,7 @@ def _infer(
         "model_key": "coco_primary",
         "conf": conf,
         "device": "cuda",
-        "imgsz": 960,
+        "imgsz": imgsz,
     }
     latencies_ms = []
     detections: list[dict[str, Any]] = []
@@ -60,10 +83,19 @@ def _infer(
 def _class_summary(detections: list[dict[str, Any]]) -> dict[str, Any]:
     persons = [item for item in detections if item.get("class_id") == PERSON_CLASS_ID]
     phones = [item for item in detections if item.get("class_id") == CELL_PHONE_CLASS_ID]
+    relevant: dict[str, list[float]] = {}
+    for item in detections:
+        class_name = RELEVANT_COCO_CLASSES.get(item.get("class_id"))
+        if class_name is None:
+            continue
+        relevant.setdefault(class_name, []).append(
+            round(float(item.get("confidence") or 0), 4)
+        )
     return {
         "persons": len(persons),
         "phones": len(phones),
         "phone_confidences": [round(float(item.get("confidence") or 0), 4) for item in phones],
+        "relevant_class_confidences": relevant,
     }
 
 
@@ -96,14 +128,22 @@ def main() -> int:
     parser.add_argument("images", nargs="+", type=Path)
     parser.add_argument("--url", required=True)
     parser.add_argument("--conf", type=float, default=0.10)
+    parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--native-only", action="store_true")
     parser.add_argument("--skip-person-crops", action="store_true")
     args = parser.parse_args()
+    if not 160 <= args.imgsz <= 1920:
+        parser.error("imgsz must be between 160 and 1920")
 
     token = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
     session = requests.Session()
-    report: dict[str, Any] = {"model": "yolo26s", "conf": args.conf, "images": []}
+    report: dict[str, Any] = {
+        "model": "yolo26s",
+        "conf": args.conf,
+        "imgsz": args.imgsz,
+        "images": [],
+    }
 
     for image_path in args.images:
         frame = cv2.imread(str(image_path))
@@ -120,6 +160,7 @@ def main() -> int:
                 token,
                 variant_frame,
                 conf=args.conf,
+                imgsz=args.imgsz,
                 repeats=args.repeats,
             )
             variant_report: dict[str, Any] = {
@@ -142,6 +183,7 @@ def main() -> int:
                     token,
                     crop,
                     conf=args.conf,
+                    imgsz=args.imgsz,
                     repeats=args.repeats,
                 )
                 variant_report["person_crops"].append(
