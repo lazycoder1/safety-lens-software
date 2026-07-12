@@ -58,3 +58,18 @@ separate ingest validation limit.
 reason, and its health age distinguish a healthy context gate from a stalled
 phone detector. Suppression telemetry is throttled to the configured probe
 interval, while person discovery is checked on every normal inference result.
+
+## Deployed live validation
+
+Exact edge revision `fee313e` ran both production RTSP cameras for 30 seconds:
+
+| Camera | Normal inference successes | Actual 960px probes | Context-suppressed probes | Failures / overload drops |
+| --- | ---: | ---: | ---: | ---: |
+| cam1 | 29 | 0 | 29 | 0 / 0 |
+| cam2 | 103 | 6 | 22 | 0 / 0 |
+
+Cam1 had no person samples. Cam2 had four person samples in its recent history,
+and the actual probes remained enabled around that context. Combined actual
+high-resolution probes fell from about 54 to 6 per 30 seconds, an 88.9%
+reduction for the observed scene. Alert persistence, delivery, and backpressure
+failures remained zero.
