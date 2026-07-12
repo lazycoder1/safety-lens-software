@@ -60,3 +60,38 @@ runtime does not use that arrival policy: `inference_scheduler` assigns each
 enabled camera a stable phase within the interval. The paired result is retained
 as evidence that the phase scheduler is part of the capacity contract and that
 simply increasing the wait further would be the wrong fix.
+
+## Three-slot Jetson follow-up
+
+After person-context phone gating reduced the conditional workload, bounded
+admission was re-tested with two and three concurrent jobs. The generic default
+remains two; the Jetson Compose overlay now selects three.
+
+At ten virtual plus two live camera-equivalents, direct raw model-server load
+produced:
+
+| Admission slots | Run | Completed | Drops | Minimum FPS | p95 | Maximum |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 2 | A | 1199 / 1200 | 1 | 3.967 | 55.711 ms | 105.789 ms |
+| 2 | B | 1197 / 1200 | 3 | 3.933 | 57.294 ms | 102.569 ms |
+| 3 | A | 1200 / 1200 | 0 | 4.000 | 68.071 ms | 105.554 ms |
+| 3 | B | 1200 / 1200 | 0 | 4.000 | 77.271 ms | 118.372 ms |
+
+The third slot removes the small admission loss by accepting a higher, still
+sub-cadence tail. At eleven virtual plus two live camera-equivalents, three
+slots dropped four of 1320 jobs, so thirteen is still beyond the clean
+boundary. The all-person eleven-camera workload also dropped four of 1080 jobs;
+the conservative all-person planning limit therefore remains ten.
+
+An added `edge` benchmark mode exercises
+`model_manager.predict_record_batches()` rather than emulating its semaphore
+with direct HTTP calls. Running that mode in a second edge process while the
+production process remained active is intentionally harsher because the two
+processes do not share one admission semaphore. In that stress shape, three
+slots reduced twelve-camera overloads from 10 to 8 of 1200, while p95 moved
+from 71.621 to 81.395 ms. It did not prove a new end-to-end planning limit.
+
+For that reason, production uses three slots for better near-saturation
+completion, but the published supported number remains eleven conditional
+cameras until twelve workers are exercised inside one edge process. Both live
+cameras accumulated zero inference drops or failures throughout the follow-up.

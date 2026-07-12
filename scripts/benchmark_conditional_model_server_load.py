@@ -82,9 +82,12 @@ def main() -> int:
     parser.add_argument("--admission-timeout", type=float, default=0.065)
     parser.add_argument(
         "--transport",
-        choices=("raw", "jpeg"),
+        choices=("edge", "raw", "jpeg"),
         default="raw",
-        help="Frame transport used for the grouped model-server request.",
+        help=(
+            "Frame transport used for the grouped request. 'edge' exercises "
+            "model_manager admission and its configured transport directly."
+        ),
     )
     parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument(
@@ -116,6 +119,11 @@ def main() -> int:
         })
 
     token = os.environ.get("SAFETYLENS_MODEL_SERVER_TOKEN", "")
+    edge_model_manager = None
+    if args.transport == "edge":
+        import model_manager
+
+        edge_model_manager = model_manager
     admission = threading.BoundedSemaphore(args.max_inflight)
     barrier = threading.Barrier(args.cameras + 1)
     period = 1.0 / args.fps
@@ -146,6 +154,12 @@ def main() -> int:
                     "classes": PPE_CLASSES,
                 }
             )
+        if edge_model_manager is not None:
+            results = edge_model_manager.predict_record_batches(frame, batch)
+            expected = {item["request_id"] for item in batch}
+            if set(results) != expected:
+                raise RuntimeError("edge returned an incomplete grouped result")
+            return
         batch_header = json.dumps(batch, separators=(",", ":"))
         if args.transport == "raw":
             height, width, channels = frame.shape
@@ -216,7 +230,10 @@ def main() -> int:
                 phone_probe_index + camera_index,
                 args.phone_context_duty,
             )
-            if not admission.acquire(timeout=args.admission_timeout):
+            admitted_externally = edge_model_manager is None
+            if admitted_externally and not admission.acquire(
+                timeout=args.admission_timeout
+            ):
                 overloads += 1
                 sequence += 1
                 continue
@@ -228,13 +245,23 @@ def main() -> int:
                     phone_probe,
                     specialist,
                 )
-            except Exception:
-                failures += 1
+            except Exception as exc:
+                if (
+                    edge_model_manager is not None
+                    and isinstance(
+                        exc,
+                        edge_model_manager.RemoteInferenceOverloadedError,
+                    )
+                ):
+                    overloads += 1
+                else:
+                    failures += 1
             else:
                 latencies.append((time.perf_counter() - request_started) * 1000.0)
                 specialist_requests += int(specialist)
             finally:
-                admission.release()
+                if admitted_externally:
+                    admission.release()
             sequence += 1
         reports[camera_index] = {
             "camera": camera_index,
