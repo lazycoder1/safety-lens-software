@@ -104,6 +104,18 @@ def _parse_inference_batch(batch_json: str) -> List[InferenceBatchItem]:
 
 
 def _run_inference_batch(frame, batch: List[InferenceBatchItem]) -> Dict[str, Any]:
+    if len(batch) == 1:
+        item = batch[0]
+        result = _run_inference_frame(
+            model_key=item.model_key,
+            frame=frame,
+            conf=item.conf,
+            device=item.device,
+            imgsz=item.imgsz,
+            classes=item.classes,
+        )
+        return {"results": {item.request_id: result["detections"]}}
+
     futures = {
         item.request_id: _BATCH_INFERENCE_EXECUTOR.submit(
             _run_inference_frame,

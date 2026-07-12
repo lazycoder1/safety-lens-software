@@ -962,3 +962,41 @@ def test_remote_inference_concurrency_is_safely_bounded(
         minimum=1,
         maximum=8,
     ) == expected
+
+
+def test_model_server_runs_singleton_batch_without_executor_hop(monkeypatch):
+    detections = [{"class_id": 0, "confidence": 0.9, "bbox": [1, 2, 3, 4]}]
+    captured = {}
+
+    def fake_inference(**kwargs):
+        captured.update(kwargs)
+        return {"detections": detections}
+
+    monkeypatch.setattr(model_server, "_run_inference_frame", fake_inference)
+    monkeypatch.setattr(
+        model_server._BATCH_INFERENCE_EXECUTOR,
+        "submit",
+        lambda *_args, **_kwargs: pytest.fail(
+            "singleton batch reached the nested executor"
+        ),
+    )
+    frame = np.zeros((90, 160, 3), dtype=np.uint8)
+    item = model_server.InferenceBatchItem(
+        request_id="primary",
+        model_key="coco_primary",
+        conf=0.3,
+        device="cuda",
+        imgsz=640,
+    )
+
+    result = model_server._run_inference_batch(frame, [item])
+
+    assert result == {"results": {"primary": detections}}
+    assert captured.pop("frame") is frame
+    assert captured == {
+        "model_key": "coco_primary",
+        "conf": 0.3,
+        "device": "cuda",
+        "imgsz": 640,
+        "classes": [],
+    }
