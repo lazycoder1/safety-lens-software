@@ -18,7 +18,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from tensorrt_engine import build_manifest, manifest_path, write_manifest  # noqa: E402
+from tensorrt_engine import (  # noqa: E402
+    build_manifest,
+    file_sha256,
+    manifest_path,
+    write_manifest,
+)
 
 
 DEFAULT_TRTEXEC_PATH = Path("/usr/src/tensorrt/bin/trtexec")
@@ -213,6 +218,8 @@ def export_engine(
     low_memory_workspace_mib: int = 256,
     trtexec_path: Path = DEFAULT_TRTEXEC_PATH,
     batch: int = 1,
+    precision: str = "fp16",
+    calibration_data: Path | None = None,
 ) -> dict:
     if source_path.suffix.lower() != ".pt" or not source_path.is_file():
         raise ValueError("Source must be an existing Ultralytics .pt model")
@@ -224,6 +231,15 @@ def export_engine(
         raise ValueError("Low-memory TensorRT workspace must be positive")
     if not 1 <= batch <= 8:
         raise ValueError("TensorRT batch size must be between 1 and 8")
+    precision = precision.lower()
+    if precision not in {"fp16", "int8"}:
+        raise ValueError("TensorRT export precision must be fp16 or int8")
+    if precision == "int8" and (
+        calibration_data is None or not calibration_data.is_file()
+    ):
+        raise FileNotFoundError("INT8 export requires a calibration dataset YAML")
+    if precision == "int8" and low_memory:
+        raise ValueError("INT8 calibration is not supported by the low-memory trtexec path")
     if low_memory and not trtexec_path.is_file():
         raise FileNotFoundError(f"TensorRT builder does not exist: {trtexec_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,7 +310,13 @@ def export_engine(
                     model.export(
                         format="engine",
                         imgsz=imgsz,
-                        half=True,
+                        half=precision == "fp16",
+                        int8=precision == "int8",
+                        **(
+                            {"data": str(calibration_data.resolve())}
+                            if calibration_data is not None
+                            else {}
+                        ),
                         batch=batch,
                         dynamic=False,
                         workspace=workspace,
@@ -312,7 +334,7 @@ def export_engine(
         source_path=source_path,
         engine_path=output_path,
         imgsz=imgsz,
-        precision="fp16",
+        precision=precision,
         task=task,
         batch=batch,
         classes=classes,
@@ -332,6 +354,14 @@ def export_engine(
                 else {"workspaceGiB": workspace}
             ),
             "tensorrtVersion": getattr(tensorrt, "__version__", "unknown"),
+            **(
+                {
+                    "calibrationDataFile": calibration_data.name,
+                    "calibrationDataSha256": file_sha256(calibration_data),
+                }
+                if calibration_data is not None
+                else {}
+            ),
         },
     )
     write_manifest(manifest_path(output_path), payload)
@@ -348,6 +378,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--precision", choices=("fp16", "int8"), default="fp16")
+    parser.add_argument("--calibration-data", type=Path)
     parser.add_argument("--workspace", type=float, default=2.0)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--class", dest="classes", action="append", default=[])
@@ -379,6 +411,10 @@ def main() -> int:
         low_memory_workspace_mib=args.low_memory_workspace_mib,
         trtexec_path=args.trtexec.resolve(),
         batch=args.batch,
+        precision=args.precision,
+        calibration_data=(
+            args.calibration_data.resolve() if args.calibration_data else None
+        ),
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

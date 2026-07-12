@@ -210,3 +210,80 @@ def test_low_memory_export_requires_trtexec_before_model_load(tmp_path, monkeypa
 
     assert model_loaded is False
     assert output.exists() is False
+
+
+def test_int8_export_requires_and_records_calibration_data(tmp_path, monkeypatch):
+    source = tmp_path / "yolo26s.pt"
+    output = tmp_path / "yolo26s-int8.engine"
+    calibration = tmp_path / "office-calibration.yaml"
+    source.write_bytes(b"pytorch-model")
+    calibration.write_text("path: /calibration\ntrain: images\n", encoding="utf-8")
+
+    class FakeModel:
+        task = "detect"
+
+        def __init__(self, path):
+            self.path = path
+
+        def export(self, **kwargs):
+            assert kwargs["half"] is False
+            assert kwargs["int8"] is True
+            assert kwargs["data"] == str(calibration.resolve())
+            exported = self.path.with_suffix(".engine")
+            exported.write_bytes(b"int8-engine")
+            return str(exported)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ultralytics",
+        SimpleNamespace(YOLO=lambda path: FakeModel(type(source)(path))),
+    )
+    monkeypatch.setitem(
+        sys.modules, "tensorrt", SimpleNamespace(__version__="test-version")
+    )
+
+    report = export_engine(
+        source_path=source,
+        output_path=output,
+        imgsz=640,
+        workspace=0.5,
+        device=0,
+        force=False,
+        precision="int8",
+        calibration_data=calibration,
+    )
+
+    assert report["precision"] == "int8"
+    assert report["metadata"]["calibrationDataFile"] == calibration.name
+    assert len(report["metadata"]["calibrationDataSha256"]) == 64
+
+
+def test_int8_export_rejects_missing_data_and_low_memory_path(tmp_path):
+    source = tmp_path / "yolo26s.pt"
+    output = tmp_path / "yolo26s-int8.engine"
+    calibration = tmp_path / "office-calibration.yaml"
+    source.write_bytes(b"pytorch-model")
+    calibration.write_text("train: images\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="calibration dataset YAML"):
+        export_engine(
+            source_path=source,
+            output_path=output,
+            imgsz=640,
+            workspace=0.5,
+            device=0,
+            force=False,
+            precision="int8",
+        )
+    with pytest.raises(ValueError, match="low-memory"):
+        export_engine(
+            source_path=source,
+            output_path=output,
+            imgsz=640,
+            workspace=0.5,
+            device=0,
+            force=False,
+            precision="int8",
+            calibration_data=calibration,
+            low_memory=True,
+        )
