@@ -48,6 +48,7 @@ def _container_info():
             "Privileged": False,
             "ReadonlyRootfs": False,
             "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+            "Runtime": "nvidia",
             "SecurityOpt": None,
             "ShmSize": 67108864,
             "Sysctls": None,
@@ -82,6 +83,7 @@ def test_build_create_args_clones_runtime_without_shell_interpolation():
 
     assert args[:3] == ["create", "--name", "rakshak-edge"]
     assert _pairs(args, "--restart") == ["unless-stopped"]
+    assert _pairs(args, "--runtime") == ["nvidia"]
     assert _pairs(args, "--network") == ["rakshak-net"]
     assert _pairs(args, "--publish") == ["8000:8000/tcp"]
     assert _pairs(args, "--device") == ["/dev/nvhost-gpu:/dev/nvhost-gpu:rwm"]
@@ -108,6 +110,21 @@ def test_build_create_args_refuses_unreconstructable_network_topology():
         assert "multiple networks" in str(exc)
     else:
         raise AssertionError("multiple networks must fail closed")
+
+
+def test_build_create_args_can_repair_an_incorrect_runtime():
+    info = _container_info()
+    info["HostConfig"]["Runtime"] = "runc"
+
+    args = jetson_container_swap.build_create_args(
+        info,
+        name="rakshak-edge",
+        image="edge:candidate",
+        env_overrides={},
+        runtime_override="nvidia",
+    )
+
+    assert _pairs(args, "--runtime") == ["nvidia"]
 
 
 def test_parse_env_file_and_explicit_override(tmp_path):
@@ -150,7 +167,7 @@ def test_restore_preserves_displaced_candidate(monkeypatch):
     monkeypatch.setattr(
         jetson_container_swap,
         "_wait_for_health",
-        lambda url, timeout: calls.append(("health", url, timeout)),
+        lambda url, timeout, **kwargs: calls.append(("health", url, timeout, kwargs)),
     )
 
     result = jetson_container_swap.restore(
@@ -159,6 +176,8 @@ def test_restore_preserves_displaced_candidate(monkeypatch):
         displaced="edge-candidate",
         health_url="http://127.0.0.1/health",
         health_timeout=30,
+        required_fresh_cameras=(),
+        required_camera_backends={},
         dry_run=False,
     )
 
@@ -168,5 +187,49 @@ def test_restore_preserves_displaced_candidate(monkeypatch):
         ("rename", "edge", "edge-candidate"),
         ("rename", "edge-old", "edge"),
         ("start", "edge"),
-        ("health", "http://127.0.0.1/health", 30),
+        (
+            "health",
+            "http://127.0.0.1/health",
+            30,
+            {"required_fresh_cameras": (), "required_camera_backends": {}},
+        ),
     ]
+
+
+def test_camera_health_requirements_cover_freshness_and_backend():
+    payload = {
+        "cameras": [
+            {
+                "id": "cam2",
+                "frameFresh": True,
+                "connection": {"captureBackend": "gstreamer_nvdec"},
+            }
+        ]
+    }
+
+    assert (
+        jetson_container_swap._camera_requirement_error(
+            payload,
+            ("cam2",),
+            {"cam2": "gstreamer_nvdec"},
+        )
+        is None
+    )
+    assert "not fresh" in jetson_container_swap._camera_requirement_error(
+        {"cameras": [{**payload["cameras"][0], "frameFresh": False}]},
+        ("cam2",),
+        {},
+    )
+    assert "wrong capture backend" in (
+        jetson_container_swap._camera_requirement_error(
+            payload,
+            (),
+            {"cam2": "ffmpeg"},
+        )
+    )
+
+
+def test_parse_camera_backend_requirements():
+    assert jetson_container_swap._parse_camera_backends(
+        ["cam2=gstreamer_nvdec", "cam1=ffmpeg"]
+    ) == {"cam2": "gstreamer_nvdec", "cam1": "ffmpeg"}

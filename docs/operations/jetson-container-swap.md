@@ -5,12 +5,12 @@ containers with ad hoc shell commands. The tool clones the inspected runtime
 configuration with subprocess argument arrays, so environment values are not
 interpolated by a shell or printed in its result.
 
-It preserves environment, mounts, devices, ports, restart policy, network,
-resource limits, logging, entrypoint, and command. Promotion first creates and
-removes an exact staging container before stopping the active service. If the
-candidate cannot start or its HTTP health endpoint does not return 200, the
-tool removes the candidate, restores the old name, starts the rollback, and
-checks it again.
+It preserves environment, mounts, devices, ports, restart policy, OCI runtime,
+network, resource limits, logging, entrypoint, and command. Promotion first
+creates and removes an exact staging container before stopping the active
+service. If the candidate cannot start or its HTTP health endpoint does not
+return 200, the tool removes the candidate, restores the old name, starts the
+rollback, and checks it again.
 
 ## Promote
 
@@ -22,6 +22,9 @@ python3 scripts/jetson_container_swap.py \
   --image rakshak-lens-edge:candidate-adaptive-microbatch \
   --rollback rakshak-edge-pre-adaptive \
   --health-url http://127.0.0.1:8000/api/health \
+  --runtime nvidia \
+  --require-camera-fresh cam2 \
+  --require-camera-backend cam2=gstreamer_nvdec \
   --set-env SAFETYLENS_REMOTE_BATCH2_EARLY_FLUSH_SECONDS=0.006 \
   --dry-run
 ```
@@ -29,6 +32,8 @@ python3 scripts/jetson_container_swap.py \
 Remove `--dry-run` only after the reported mount and device counts match the
 active container. Use a root-readable `--env-file` for a larger runtime
 profile. The output lists overridden variable names but never their values.
+The existing runtime is cloned by default; `--runtime nvidia` is an explicit
+repair guard for a Jetson container that was previously recreated as `runc`.
 
 ## Restore a preserved container
 
@@ -44,11 +49,13 @@ python3 scripts/jetson_container_swap.py \
   --health-url http://127.0.0.1:8000/api/health
 ```
 
-The HTTP check proves process readiness. After either transition, separately
-verify the SafetyLens health payload for fresh expected cameras, the intended
-capture backend, and zero new inference overloads or failures. A pre-existing
-camera source outage may legitimately keep overall health degraded even when
-the replacement container is sound.
+The HTTP check proves process readiness. The optional camera requirements keep
+polling the same SafetyLens health payload until named cameras are fresh and on
+their intended capture backend; a mismatch triggers the same automatic
+rollback as a failed HTTP check. Also verify zero new inference overloads or
+failures. A pre-existing camera source outage may legitimately keep overall
+health degraded even when the replacement container is sound, so require only
+the cameras expected to be available during the transition.
 
 ## Validated live transition
 
@@ -57,8 +64,10 @@ edge endpoint, restored the preserved batch-4 container, and restored the
 adaptive candidate again. Every existing environment value was retained; the
 adaptive early-flush setting was the only added variable. Mount and device
 sets, network, port, restart policy, and resource configuration matched the
-original container. The final active state is the adaptive image, with the
-batch-4 container stopped under its rollback name. A separate
-failure-injection promotion used an unreachable health endpoint; the tool
-removed the failed candidate, restored the original active container and
+original container. A later NVDEC health audit found that the initial version
+did not clone `HostConfig.Runtime`; it silently changed the edge from `nvidia`
+to `runc`, blacklisted the NVIDIA GStreamer plugins, and forced CPU decode. The
+tool now clones the OCI runtime and supports an explicit repair override. A
+separate failure-injection promotion used an unreachable health endpoint; the
+tool removed the failed candidate, restored the original active container and
 environment, and returned the real health endpoint to HTTP 200.

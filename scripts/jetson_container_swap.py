@@ -82,6 +82,16 @@ def _parse_env(values: list[str], env_file: Path | None) -> dict[str, str]:
     return overrides
 
 
+def _parse_camera_backends(values: list[str]) -> dict[str, str]:
+    backends: dict[str, str] = {}
+    for value in values:
+        camera_id, separator, backend = value.partition("=")
+        if not separator or not camera_id.strip() or not backend.strip():
+            raise SwapError(f"invalid camera backend requirement: {value!r}")
+        backends[camera_id.strip()] = backend.strip()
+    return backends
+
+
 def _merged_environment(existing: list[str], overrides: dict[str, str]) -> list[str]:
     order: list[str] = []
     merged: dict[str, str] = {}
@@ -132,6 +142,7 @@ def build_create_args(
     name: str,
     image: str,
     env_overrides: dict[str, str],
+    runtime_override: str | None = None,
 ) -> list[str]:
     """Build a shell-safe docker-create argv from an inspected container."""
     config = info["Config"]
@@ -145,6 +156,9 @@ def build_create_args(
         raise SwapError("legacy links and volumes-from are not supported")
 
     args = ["create", "--name", name]
+    runtime = runtime_override or host.get("Runtime")
+    if runtime:
+        args.extend(("--runtime", str(runtime)))
     restart = host.get("RestartPolicy") or {}
     restart_name = restart.get("Name") or "no"
     if restart_name == "on-failure" and restart.get("MaximumRetryCount"):
@@ -264,15 +278,63 @@ def build_create_args(
     return args
 
 
-def _wait_for_health(url: str, timeout_seconds: float) -> None:
+def _camera_requirement_error(
+    payload: dict[str, Any],
+    required_fresh_cameras: tuple[str, ...],
+    required_camera_backends: dict[str, str],
+) -> str | None:
+    cameras = {
+        str(camera.get("id")): camera
+        for camera in payload.get("cameras") or []
+        if isinstance(camera, dict) and camera.get("id") is not None
+    }
+    for camera_id in required_fresh_cameras:
+        camera = cameras.get(camera_id)
+        if camera is None:
+            return f"required camera {camera_id!r} is missing"
+        if not camera.get("frameFresh"):
+            return f"required camera {camera_id!r} is not fresh"
+    for camera_id, expected_backend in required_camera_backends.items():
+        camera = cameras.get(camera_id)
+        if camera is None:
+            return f"required camera {camera_id!r} is missing"
+        connection = camera.get("connection") or {}
+        if connection.get("captureBackend") != expected_backend:
+            return f"required camera {camera_id!r} has the wrong capture backend"
+    return None
+
+
+def _wait_for_health(
+    url: str,
+    timeout_seconds: float,
+    *,
+    required_fresh_cameras: tuple[str, ...] = (),
+    required_camera_backends: dict[str, str] | None = None,
+) -> None:
+    required_camera_backends = required_camera_backends or {}
     deadline = time.monotonic() + timeout_seconds
     last_error = "no response"
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=2.0) as response:
                 if response.status == 200:
-                    return
-                last_error = f"HTTP {response.status}"
+                    if not required_fresh_cameras and not required_camera_backends:
+                        return
+                    try:
+                        payload = json.load(response)
+                    except (TypeError, ValueError):
+                        last_error = "health response is not JSON"
+                    else:
+                        requirement_error = _camera_requirement_error(
+                            payload,
+                            required_fresh_cameras,
+                            required_camera_backends,
+                        )
+                        if requirement_error is None:
+                            return
+                        last_error = requirement_error
+                else:
+                    last_error = f"HTTP {response.status}"
         except Exception as exc:  # Health failures are reported without secrets.
             last_error = type(exc).__name__
         time.sleep(1.0)
@@ -288,6 +350,13 @@ def _environment_matches(info: dict[str, Any], overrides: dict[str, str]) -> boo
     return all(current.get(key) == value for key, value in overrides.items())
 
 
+def _runtime_matches(info: dict[str, Any], runtime_override: str | None) -> bool:
+    return (
+        runtime_override is None
+        or info["HostConfig"].get("Runtime") == runtime_override
+    )
+
+
 def promote(
     *,
     active: str,
@@ -296,13 +365,25 @@ def promote(
     health_url: str,
     health_timeout: float,
     env_overrides: dict[str, str],
+    runtime_override: str | None,
+    required_fresh_cameras: tuple[str, ...],
+    required_camera_backends: dict[str, str],
     dry_run: bool,
 ) -> dict[str, Any]:
     info = _inspect_container(active)
     desired_image_id = _image_id(image)
-    if info.get("Image") == desired_image_id and _environment_matches(
-        info, env_overrides
+    if (
+        info.get("Image") == desired_image_id
+        and _environment_matches(info, env_overrides)
+        and _runtime_matches(info, runtime_override)
     ):
+        if not dry_run:
+            _wait_for_health(
+                health_url,
+                health_timeout,
+                required_fresh_cameras=required_fresh_cameras,
+                required_camera_backends=required_camera_backends,
+            )
         return {"status": "already_promoted", "active": active, "image": image}
     if _container_exists(rollback):
         raise SwapError(f"rollback container {rollback!r} already exists")
@@ -313,6 +394,7 @@ def promote(
         name=staging,
         image=image,
         env_overrides=env_overrides,
+        runtime_override=runtime_override,
     )
     if dry_run:
         return {
@@ -323,6 +405,9 @@ def promote(
             "environment_overrides": sorted(env_overrides),
             "mounts": len(_volume_arguments(info)),
             "devices": len(info["HostConfig"].get("Devices") or []),
+            "runtime": runtime_override or info["HostConfig"].get("Runtime"),
+            "required_fresh_cameras": list(required_fresh_cameras),
+            "required_camera_backends": dict(required_camera_backends),
         }
 
     candidate_created = False
@@ -338,11 +423,17 @@ def promote(
             name=active,
             image=image,
             env_overrides=env_overrides,
+            runtime_override=runtime_override,
         )
         _docker(*active_args)
         candidate_created = True
         _docker("start", active)
-        _wait_for_health(health_url, health_timeout)
+        _wait_for_health(
+            health_url,
+            health_timeout,
+            required_fresh_cameras=required_fresh_cameras,
+            required_camera_backends=required_camera_backends,
+        )
     except BaseException:
         _docker("rm", "-f", staging, check=False)
         if candidate_created:
@@ -351,7 +442,12 @@ def promote(
             _docker("rename", rollback, active, check=False)
             _docker("start", active, check=False)
             try:
-                _wait_for_health(health_url, health_timeout)
+                _wait_for_health(
+                    health_url,
+                    health_timeout,
+                    required_fresh_cameras=required_fresh_cameras,
+                    required_camera_backends=required_camera_backends,
+                )
             except SwapError:
                 pass
         raise
@@ -371,6 +467,8 @@ def restore(
     displaced: str,
     health_url: str,
     health_timeout: float,
+    required_fresh_cameras: tuple[str, ...],
+    required_camera_backends: dict[str, str],
     dry_run: bool,
 ) -> dict[str, Any]:
     """Restore a preserved container and retain the displaced candidate."""
@@ -395,7 +493,12 @@ def restore(
         _docker("rename", rollback, active)
         rollback_renamed = True
         _docker("start", active)
-        _wait_for_health(health_url, health_timeout)
+        _wait_for_health(
+            health_url,
+            health_timeout,
+            required_fresh_cameras=required_fresh_cameras,
+            required_camera_backends=required_camera_backends,
+        )
     except BaseException:
         if rollback_renamed:
             _docker("stop", "--time", "20", active, check=False)
@@ -404,7 +507,12 @@ def restore(
             _docker("rename", displaced, active, check=False)
             _docker("start", active, check=False)
             try:
-                _wait_for_health(health_url, health_timeout)
+                _wait_for_health(
+                    health_url,
+                    health_timeout,
+                    required_fresh_cameras=required_fresh_cameras,
+                    required_camera_backends=required_camera_backends,
+                )
             except SwapError:
                 pass
         raise
@@ -435,6 +543,24 @@ def main() -> int:
     parser.add_argument("--health-timeout", type=float, default=60.0)
     parser.add_argument("--set-env", action="append", default=[])
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument(
+        "--runtime",
+        help="Override the cloned OCI runtime, for example nvidia on Jetson.",
+    )
+    parser.add_argument(
+        "--require-camera-fresh",
+        action="append",
+        default=[],
+        metavar="CAMERA_ID",
+        help="Wait for the named SafetyLens camera to report a fresh frame.",
+    )
+    parser.add_argument(
+        "--require-camera-backend",
+        action="append",
+        default=[],
+        metavar="CAMERA_ID=BACKEND",
+        help="Wait for the named camera to report the expected capture backend.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.health_timeout <= 0:
@@ -443,9 +569,11 @@ def main() -> int:
         parser.error("--restore requires --displaced")
     if not args.restore and not args.image:
         parser.error("promotion requires --image")
-    if args.restore and (args.image or args.set_env or args.env_file):
+    if args.restore and (args.image or args.set_env or args.env_file or args.runtime):
         parser.error("--restore cannot be combined with image or environment changes")
     try:
+        required_fresh_cameras = tuple(dict.fromkeys(args.require_camera_fresh))
+        required_camera_backends = _parse_camera_backends(args.require_camera_backend)
         if args.restore:
             result = restore(
                 active=args.active,
@@ -453,6 +581,8 @@ def main() -> int:
                 displaced=args.displaced,
                 health_url=args.health_url,
                 health_timeout=args.health_timeout,
+                required_fresh_cameras=required_fresh_cameras,
+                required_camera_backends=required_camera_backends,
                 dry_run=args.dry_run,
             )
         else:
@@ -464,6 +594,9 @@ def main() -> int:
                 health_url=args.health_url,
                 health_timeout=args.health_timeout,
                 env_overrides=overrides,
+                runtime_override=args.runtime,
+                required_fresh_cameras=required_fresh_cameras,
+                required_camera_backends=required_camera_backends,
                 dry_run=args.dry_run,
             )
     except (OSError, SwapError) as exc:

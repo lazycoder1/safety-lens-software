@@ -1,5 +1,8 @@
 services:
   edge:
+    # NVIDIA env flags and media devices do not provide CUDA driver injection;
+    # without this runtime GStreamer blacklists the Jetson decoder plug-ins.
+    runtime: nvidia
     build:
       context: .
       dockerfile: Dockerfile.edge-jetson
