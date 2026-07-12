@@ -6,8 +6,9 @@ Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
 Do not replace the YOLO26 Small INT8 primary with RT-DETRv4 Small. The
 RT-DETRv4 batch-2 engine sustained 43.792 end-to-end FPS versus 91.349 FPS for
-the current primary. Its freshness-safe engine-only boundary was ten cameras
-at 4 FPS; eleven cameras produced sustained staleness before adding PPE,
+the then-current batch-2 primary and 104.643 FPS for the subsequently promoted
+batch-4 primary. Its freshness-safe engine-only boundary was ten cameras at
+4 FPS; eleven cameras produced sustained staleness before adding PPE,
 transport, or alert processing.
 
 RT-DETRv4-S is useful only as a conditional phone-recall specialist after the
@@ -19,8 +20,10 @@ proved these conservative mixed-load tiers:
 - 16 cameras at 4 FPS plus one aggregate RT-DETRv4 specialist FPS;
 - 15 cameras at 4 FPS plus two aggregate RT-DETRv4 specialist FPS.
 
-The existing 18-camera, 4 FPS tier remains preferable when maximum camera count
-matters more than the extra phone positive. RT-DETRv4 was not deployed.
+The current no-RT-DETR pipeline supports 20 camera-equivalents at 4 FPS. A
+follow-up against that batch-4 pipeline proved 18 cameras at 4 FPS plus one
+device-wide RT-DETRv4 specialist FPS. Nineteen cameras dropped one scheduled
+request in the 60-second cold gate and is rejected. RT-DETRv4 was not deployed.
 
 ## Question
 
@@ -78,13 +81,14 @@ corpus.
 
 ## Current production baseline
 
-The proven tier remains 18 camera-equivalents at 4 AI detection FPS per camera,
-640-pixel YOLO26 Small INT8 primary inference, and 11.1% YOLOE-26S PPE duty.
-That is 72 scheduled primary frame-inferences per second plus about eight PPE
-specialist frame-inferences per second. The 60-second cold admission gate
-recorded zero overloads and zero failures. Four simultaneous real RTSP/NVDEC
-streams have been validated; 18 is the inference-compute tier, not yet an
-18-stream decode claim.
+At the time of the first RT-DETRv4-S comparison, the proven tier was 18
+camera-equivalents at 4 AI detection FPS per camera, 640-pixel YOLO26 Small
+INT8 primary inference, and 11.1% YOLOE-26S PPE duty. The subsequently promoted
+batch-4 route raised that conditional inference tier to 20 camera-equivalents,
+or 80 scheduled primary frame-inferences per second plus about nine PPE
+specialist frame-inferences per second. These are inference-compute tiers, not
+claims that the same number of unique production RTSP sources has been
+validated end to end.
 
 ## Placement gate
 
@@ -199,6 +203,28 @@ same-process scheduler may avoid some context-switch and burst interference.
 Both passing RT-DETR workloads achieved their target FPS with zero stale
 specialist groups. The results support a device-wide specialist budget tied to
 currently actionable contexts, not one RT-DETR invocation per camera.
+
+## Current batch-4 coexistence boundary
+
+After the four-frame primary and PPE routes raised the no-RT-DETR tier to 20
+cameras, the 1 FPS conditional specialist gate was repeated against the exact
+current edge transport. The test used 640-pixel YOLO26 Small INT8 primary at
+4 FPS per camera, 11.1% YOLOE-26S PPE duty, four-camera phases, adaptive
+batch-2/batch-4 routing, four admission slots, and a 125 ms bounded wait.
+RT-DETRv4-S ran in a separate prewarmed TensorRT context for the full camera
+load interval.
+
+| Cameras | RT-DETR aggregate FPS | Duration | Primary successes | Drops / failures | Minimum camera FPS | Primary p95 | RT-DETR stale groups | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 19 | 1 | 60 s | 4,559 / 4,560 | 1 / 0 | 3.983 | 181.751 ms | 0 | reject |
+| 18 | 1 | 60 s | 4,320 / 4,320 | 0 / 0 | 4.000 | 147.968 ms | 0 | pass |
+
+The passing RT-DETR process achieved 1.013 FPS, with 51.094 ms median and
+69.980 ms p95 end-to-end group latency. The result establishes 18 cameras as
+the supported tier when the deployment spends one aggregate RT-DETRv4-S frame
+per second on phone-recall escalation. It does not authorize one RT-DETR pass
+per camera per second; that would request 18 aggregate specialist FPS and
+overload this device.
 
 ## Production restoration
 
