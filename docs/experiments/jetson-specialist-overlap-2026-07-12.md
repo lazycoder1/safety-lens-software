@@ -87,3 +87,32 @@ capacity gate.
 - Real RTSP/NVDEC ingest is still validated only to four simultaneous streams
   at the office site. Eighteen is inference capacity, not an eighteen-decoder
   certification.
+
+## Admission-concurrency follow-up
+
+The concurrent model scheduler changed the queue shape, so edge admission was
+re-swept before attempting a larger TensorRT batch. Increasing admission slots
+did not produce a repeatable freshness-safe tier above eighteen.
+
+| Cameras | Slots / wait | Duration | Completed | Drops | p95 | Maximum | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 19 | 5 / 125 ms | 30 s | 2,278 / 2,280 | 2 | 156.226 ms | 234.233 ms | reject: drops |
+| 20 | 5 / 125 ms | 30 s | 2,400 / 2,400 | 0 | 167.060 ms | 235.707 ms | provisional only |
+| 22 | 5 / 125 ms | 30 s | 2,634 / 2,640 | 6 | 207.502 ms | 267.954 ms | reject: drops and stale tail |
+| 20 | 5 / 125 ms | 60 s cold repeat | 4,800 / 4,800 | 0 | 172.434 ms | 261.926 ms | reject: stale tail |
+| 20 | 5 / 100 ms | 30 s | 2,400 / 2,400 | 0 | 166.991 ms | 247.739 ms | provisional only |
+| 20 | 5 / 100 ms | 60 s cold repeat | 4,798 / 4,800 | 2 | 172.373 ms | 272.980 ms | reject: drops and stale tail |
+| 20 | 6 / 75 ms | 30 s | 2,400 / 2,400 | 0 | 164.450 ms | 277.768 ms | reject: stale tail |
+
+The five-slot 125 ms run demonstrates why request completion alone is not a
+promotion gate: it retained every frame by allowing one request to finish
+11.926 ms after the next frame period began. Shortening the admission wait made
+the short run appear clean, but the cold repeat still dropped a primary pair.
+Six slots increased instantaneous contention and worsened the tail despite
+completing every short-run request.
+
+Production therefore remains at four admission slots, a 125 ms bounded wait,
+and the eighteen-camera supported tier. Raising queue depth would hide overload
+as stale inference rather than create capacity. A higher tier requires more
+aggregate engine throughput, such as a separately accuracy-gated larger
+microbatch, rather than another admission-limit increase.
