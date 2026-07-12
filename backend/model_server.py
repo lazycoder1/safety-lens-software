@@ -43,6 +43,10 @@ _BATCH_INFERENCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="model-batch",
 )
+_SPECIALIST_BATCH_CONCURRENT = os.environ.get(
+    "SAFETYLENS_SPECIALIST_BATCH_CONCURRENT",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 # The model-server process must always use local model runtimes, even if it
 # inherits edge-backend environment variables from a shared shell or container.
 model_manager.force_local_inference()
@@ -385,6 +389,7 @@ def health():
         "role": "model_server",
         "models_ready": len(ready),
         "models_total": len(models),
+        "specialist_batch_concurrent": _SPECIALIST_BATCH_CONCURRENT,
         "anpr_ocr": anpr_ocr,
     }
 
@@ -647,19 +652,38 @@ def infer_raw_specialist_batch2(
 
     first = batch[0]
     try:
-        primary_records = model_manager.predict_coco_record_batch(
-            frames,
-            conf=first.primary_conf,
-            device=first.primary_device,
-            imgsz=first.primary_imgsz,
-        )
-        ppe_records = model_manager.predict_ppe_record_batch(
-            frames,
-            conf=first.ppe_conf,
-            device=first.ppe_device,
-            imgsz=first.ppe_imgsz,
-            classes=first.ppe_classes,
-        )
+        if _SPECIALIST_BATCH_CONCURRENT:
+            primary_future = _BATCH_INFERENCE_EXECUTOR.submit(
+                model_manager.predict_coco_record_batch,
+                frames,
+                conf=first.primary_conf,
+                device=first.primary_device,
+                imgsz=first.primary_imgsz,
+            )
+            ppe_future = _BATCH_INFERENCE_EXECUTOR.submit(
+                model_manager.predict_ppe_record_batch,
+                frames,
+                conf=first.ppe_conf,
+                device=first.ppe_device,
+                imgsz=first.ppe_imgsz,
+                classes=first.ppe_classes,
+            )
+            primary_records = primary_future.result()
+            ppe_records = ppe_future.result()
+        else:
+            primary_records = model_manager.predict_coco_record_batch(
+                frames,
+                conf=first.primary_conf,
+                device=first.primary_device,
+                imgsz=first.primary_imgsz,
+            )
+            ppe_records = model_manager.predict_ppe_record_batch(
+                frames,
+                conf=first.ppe_conf,
+                device=first.ppe_device,
+                imgsz=first.ppe_imgsz,
+                classes=first.ppe_classes,
+            )
         if primary_records is None or ppe_records is None:
             raise HTTPException(
                 status_code=409,

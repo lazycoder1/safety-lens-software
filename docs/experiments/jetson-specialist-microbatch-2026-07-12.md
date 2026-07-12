@@ -7,9 +7,14 @@ requests on the tested Orin NX. Together with the existing Small-only primary
 filter and primary-frame batching, this moves the measured conditional
 inference tier from fifteen to sixteen camera-equivalents at 4 FPS.
 
-Seventeen is rejected because its 254.283 ms maximum request latency exceeds
-the 250 ms frame period. Eighteen is rejected because it dropped eight
-requests. This is an inference-capacity result: the site has separately
+The follow-up concurrent specialist-engine experiment supersedes this capacity
+boundary and promotes eighteen camera-equivalents; see
+`jetson-specialist-overlap-2026-07-12.md`.
+
+In this sequential experiment, seventeen was rejected because its 254.283 ms
+maximum request latency exceeded the 250 ms frame period, and eighteen was
+rejected because it dropped eight requests. This is an inference-capacity
+result: the site has separately
 validated four simultaneous real RTSP/NVDEC streams, not sixteen decoders.
 
 The production path remains Small-only. Nano is not used.

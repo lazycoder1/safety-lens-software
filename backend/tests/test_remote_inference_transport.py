@@ -1318,6 +1318,7 @@ def test_model_server_accepts_two_primary_ppe_raw_frames(monkeypatch):
         return [[{"ppe": "left"}], [{"ppe": "right"}]]
 
     monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(model_server, "_SPECIALIST_BATCH_CONCURRENT", False)
     monkeypatch.setattr(
         model_server.model_manager, "predict_coco_record_batch", fake_primary
     )
@@ -1370,11 +1371,68 @@ def test_model_server_accepts_two_primary_ppe_raw_frames(monkeypatch):
     }
 
 
+def test_model_server_can_overlap_primary_and_ppe_batch_engines(monkeypatch):
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+    started = threading.Barrier(2, timeout=2)
+
+    def fake_primary(frames, *, conf, device, imgsz):
+        started.wait()
+        return [[{"primary": "left"}], [{"primary": "right"}]]
+
+    def fake_ppe(frames, *, conf, device, imgsz, classes):
+        started.wait()
+        return [[{"ppe": "left"}], [{"ppe": "right"}]]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(model_server, "_SPECIALIST_BATCH_CONCURRENT", True)
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_coco_record_batch", fake_primary
+    )
+    monkeypatch.setattr(
+        model_server.model_manager, "predict_ppe_record_batch", fake_ppe
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((4, 5, 3), dtype=np.uint8)
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "primary_conf": 0.15,
+            "primary_device": "cuda",
+            "primary_imgsz": 640,
+            "ppe_conf": 0.2,
+            "ppe_device": "cuda",
+            "ppe_imgsz": 640,
+            "ppe_classes": classes,
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index in range(2)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/specialist-batch2",
+        content=frame.tobytes() * 2,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-Specialist-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"]["frame-0"] == {
+        "coco_primary": [{"primary": "left"}],
+        "ppe_specialist": [{"ppe": "left"}],
+    }
+
+
 def test_model_server_specialist_batch_falls_back_when_runtime_unavailable(
     monkeypatch,
 ):
     classes = ["motorcycle helmet", "rider helmet", "helmet"]
     monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(model_server, "_SPECIALIST_BATCH_CONCURRENT", False)
     monkeypatch.setattr(
         model_server.model_manager,
         "predict_coco_record_batch",
