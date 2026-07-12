@@ -1,9 +1,10 @@
 # Jetson RT-DETRv4 Small placement experiment — 2026-07-12
 
-> **2026-07-13 capacity note:** the no-RT-DETR batch-4 tier is now 21 cameras
-> at 4 FPS after partial-group smoothing. The measured conditional RT-DETRv4-S
-> tier remains 18 cameras plus one device-wide specialist FPS until that mixed
-> workload is re-gated against the new profile.
+> **2026-07-13 capacity note:** the no-RT-DETR batch-4 tier is 21 cameras at
+> 4 FPS after partial-group smoothing. Re-gating RT-DETRv4-S against that
+> profile found an 18-camera throughput boundary at one device-wide specialist
+> FPS, but no repeatably freshness-safe tier while RT-DETR runs in an
+> independent CUDA context. Do not deploy that unsynchronised topology.
 
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
@@ -25,10 +26,12 @@ proved these conservative mixed-load tiers:
 - 16 cameras at 4 FPS plus one aggregate RT-DETRv4 specialist FPS;
 - 15 cameras at 4 FPS plus two aggregate RT-DETRv4 specialist FPS.
 
-The current no-RT-DETR pipeline supports 20 camera-equivalents at 4 FPS. A
-follow-up against that batch-4 pipeline proved 18 cameras at 4 FPS plus one
-device-wide RT-DETRv4 specialist FPS. Nineteen cameras dropped one scheduled
-request in the 60-second cold gate and is rejected. RT-DETRv4 was not deployed.
+The current no-RT-DETR pipeline supports 21 camera-equivalents at 4 FPS. An
+earlier follow-up against the batch-4 pipeline completed 18 cameras at 4 FPS
+plus one device-wide RT-DETRv4 specialist FPS. Re-gating after partial-group
+smoothing confirmed that 18 cameras remains the zero-drop throughput boundary,
+but independent RT-DETR execution causes non-monotonic primary tail-latency
+spikes. RT-DETRv4 was not deployed.
 
 ## Question
 
@@ -89,11 +92,12 @@ corpus.
 At the time of the first RT-DETRv4-S comparison, the proven tier was 18
 camera-equivalents at 4 AI detection FPS per camera, 640-pixel YOLO26 Small
 INT8 primary inference, and 11.1% YOLOE-26S PPE duty. The subsequently promoted
-batch-4 route raised that conditional inference tier to 20 camera-equivalents,
-or 80 scheduled primary frame-inferences per second plus about nine PPE
-specialist frame-inferences per second. These are inference-compute tiers, not
-claims that the same number of unique production RTSP sources has been
-validated end to end.
+batch-4 route first raised that conditional inference tier to 20 camera
+equivalents. Partial-group smoothing then raised the current tier to 21, or 84
+scheduled primary frame-inferences per second plus about 9.3 PPE specialist
+frame-inferences per second. These are inference-compute tiers, not claims that
+the same number of unique production RTSP sources has been validated end to
+end.
 
 ## Placement gate
 
@@ -209,7 +213,7 @@ Both passing RT-DETR workloads achieved their target FPS with zero stale
 specialist groups. The results support a device-wide specialist budget tied to
 currently actionable contexts, not one RT-DETR invocation per camera.
 
-## Current batch-4 coexistence boundary
+## Initial batch-4 coexistence boundary
 
 After the four-frame primary and PPE routes raised the no-RT-DETR tier to 20
 cameras, the 1 FPS conditional specialist gate was repeated against the exact
@@ -226,10 +230,50 @@ load interval.
 
 The passing RT-DETR process achieved 1.013 FPS, with 51.094 ms median and
 69.980 ms p95 end-to-end group latency. The result establishes 18 cameras as
-the supported tier when the deployment spends one aggregate RT-DETRv4-S frame
-per second on phone-recall escalation. It does not authorize one RT-DETR pass
-per camera per second; that would request 18 aggregate specialist FPS and
-overload this device.
+the measured throughput tier when the deployment spends one aggregate
+RT-DETRv4-S frame per second on phone-recall escalation. It does not authorize
+one RT-DETR pass per camera per second; that would request 18 aggregate
+specialist FPS and overload this device.
+
+## Partial-group profile re-gate — 2026-07-13
+
+The conditional load was repeated after the primary/PPE partial-group wait was
+raised to 14 ms and the no-RT-DETR tier reached 21 cameras. The workload kept
+the current 640-pixel YOLO26 Small INT8 primary at 4 FPS per camera, 11.1%
+YOLOE-26S PPE duty, four-camera phases, batch-4 routing, four admission slots,
+and a 125 ms admission bound. RT-DETRv4-S again ran at one aggregate FPS in a
+separate prewarmed TensorRT context.
+
+The freshness gate requires every scheduled request to complete, every camera
+to sustain 4 FPS, and maximum primary latency to remain below the 250 ms camera
+period. Runs that complete every request but exceed 250 ms are useful
+throughput evidence, not production-safe freshness evidence.
+
+| Cameras | Duration | Primary successes | Drops / failures | Minimum camera FPS | Primary p95 | Primary maximum | RT-DETR achieved | RT-DETR stale groups | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 19, no RT control | 30 s | 2,280 / 2,280 | 0 / 0 | 4.000 | 142.897 ms | 226.874 ms | — | — | pass control |
+| 19 + RT | 30 s | 2,272 / 2,280 | 8 / 0 | 3.933 | 197.316 ms | 295.092 ms | 1.022 FPS | 0 | reject |
+| 18 + RT | 60 s | 4,320 / 4,320 | 0 / 0 | 4.000 | 152.799 ms | 261.388 ms | 1.013 FPS | 0 | throughput only |
+| 17 + RT, run 1 | 60 s | 4,080 / 4,080 | 0 / 0 | 4.000 | 155.434 ms | 246.498 ms | 1.013 FPS | 0 | pass |
+| 17 + RT, run 2 | 60 s | 4,080 / 4,080 | 0 / 0 | 4.000 | 155.709 ms | 255.867 ms | 1.013 FPS | 0 | reject tail |
+| 16 + RT, run 1 | 60 s | 3,840 / 3,840 | 0 / 0 | 4.000 | 112.777 ms | 205.805 ms | 1.013 FPS | 0 | pass |
+| 16 + RT, run 2 | 60 s | 3,840 / 3,840 | 0 / 0 | 4.000 | 112.151 ms | 285.131 ms | 1.013 FPS | 0 | reject tail |
+| 15 + RT | 60 s | 3,600 / 3,600 | 0 / 0 | 4.000 | 119.561 ms | 416.198 ms | 1.013 FPS | 0 | reject tail |
+
+Nineteen cameras fails on capacity while 18 cameras completes every scheduled
+primary and PPE request, so 18 cameras plus one device-wide RT-DETR FPS is the
+measured throughput boundary. It is not a supported production tier: reducing
+the camera count did not monotonically remove rare primary latency spikes.
+The Jetson remained in MAXN at approximately 67–69 degrees Celsius, with no
+GPU, OOM, or throttling errors, so thermal pressure does not explain the tail.
+
+The non-monotonic tail is consistent with unsynchronised work from the separate
+TensorRT/CUDA context occasionally colliding with a primary batch. RT-DETRv4-S
+must therefore enter the pipeline as a low-priority conditional phone-recall
+specialist behind shared admission control. The primary scheduler must be able
+to defer an RT-DETR launch when primary or PPE work is queued. Until that
+integration is implemented and re-gated, the supported production capacity
+remains 21 cameras at 4 FPS without RT-DETR.
 
 ## Production restoration
 
