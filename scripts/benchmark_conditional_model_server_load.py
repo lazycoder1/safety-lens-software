@@ -66,6 +66,13 @@ def _specialist_due(sequence: int, duty: float) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8100")
+    parser.add_argument(
+        "--edge-url-override",
+        help=(
+            "Explicit model-server URL for isolated edge-transport benchmarks "
+            "that do not mount the production camera configuration."
+        ),
+    )
     parser.add_argument("--frames", nargs="+", type=Path, required=True)
     parser.add_argument("--cameras", type=int, required=True)
     parser.add_argument("--fps", type=float, default=4.0)
@@ -132,6 +139,16 @@ def main() -> int:
         import model_manager
 
         edge_model_manager = model_manager
+        if args.edge_url_override:
+            override_url = args.edge_url_override.strip().rstrip("/")
+            if not override_url.startswith(("http://", "https://")):
+                parser.error("edge-url-override must be an HTTP(S) URL")
+            edge_model_manager._remote_settings = lambda: {
+                "enabled": True,
+                "url": override_url,
+                "token": token,
+                "timeout_seconds": 30.0,
+            }
         edge_settings = edge_model_manager._remote_settings()
         if not edge_settings.get("url"):
             parser.error("edge transport requires an enabled remote model server")

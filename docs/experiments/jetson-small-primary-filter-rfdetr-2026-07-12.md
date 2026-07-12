@@ -98,3 +98,22 @@ This is not a claim that every mix of fourteen cameras is safe. A workload that
 runs PPE on every person frame, enables pose or other specialists everywhere,
 or uses denser phone rules must be benchmarked separately. The conservative
 all-person planning tier remains lower than the conditional tier.
+
+## Fifteen-camera concurrency follow-up
+
+Increasing the bounded work queue does not prove a fifteenth camera. The direct
+HTTP harness initially made four slots and a 100 ms wait look clean, but the
+exact edge transport exposed the extra session, admission, and transport tail.
+
+| Shape | Completed | Drops | Median | p95 | Maximum |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 3 slots, 75 ms, direct | 1775 / 1800 | 25 | 17.953 ms | 72.247 ms | 92.790 ms |
+| 4 slots, 75 ms, direct | 1788 / 1800 | 12 | 18.109 ms | 92.157 ms | 111.209 ms |
+| 4 slots, 100 ms, direct | 1800 / 1800 | 0 | 18.030 ms | 94.674 ms | 112.322 ms |
+| 4 slots, 100 ms, exact edge | 1799 / 1800 | 1 | 18.398 ms | 127.814 ms | 181.381 ms |
+
+The exact path failed the zero-drop gate and crossed half of the 250 ms frame
+period at p95. Production therefore remains at three slots and 75 ms. The
+benchmark gained `--edge-url-override` so an isolated container can exercise
+`model_manager.predict_record_batches()` without mounting production camera
+configuration or copying its secrets.
