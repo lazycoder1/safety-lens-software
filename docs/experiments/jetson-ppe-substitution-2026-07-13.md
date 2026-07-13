@@ -237,3 +237,28 @@ alert latency without reducing the established 24-camera tier.
 
 Raw confirmation-load evidence is stored under
 `/opt/rakshak-lens/model-server-models/experiments/ppe-confirmation-1fps/`.
+
+### Live rollout
+
+The first edge candidate exposed a worker call-site wiring error during the
+live gate: `confirmation_required` had been passed to the neighboring mobile
+phone planner instead of the PPE cadence planner. Both workers failed fast,
+the edge was immediately rolled back, and the model server stayed online. The
+corrective commit added a structural regression test that verifies the keyword
+is wired only to the PPE planner before a replacement image can be promoted.
+
+The corrected `df9c71e` edge image was then promoted with the previous edge
+container retained for rollback. After one reconnect cycle:
+
+- overall edge health was `ok` with no health reasons;
+- cam1 and cam2 were both running, frame-fresh, and using `gstreamer_nvdec`;
+- the cameras had 263 successful inferences, zero inference failures, and zero
+  overload drops at the observation point;
+- the PPE, RT-DETR, persistence, and delivery paths reported no failures;
+- the alert pipeline and watchdog were active; and
+- the runtime config reported 0.5 scout FPS, 1.0 confirmation FPS, and PPE
+  substitution enabled.
+
+The live confirmation counter was present and zero because neither camera had
+a pending missing-PPE incident. This is the desired idle result: the faster
+cadence consumes no work until a scout observation enters confirmation.
