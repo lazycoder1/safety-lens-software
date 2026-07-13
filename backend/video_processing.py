@@ -3388,10 +3388,6 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                     last_mobile_phone_probe_context_suppressed_at
                                 ),
                                 previous_detections=primary_context_detections,
-                                confirmation_required=_ppe_confirmation_required(
-                                    active_violations,
-                                    violation_window,
-                                ),
                             )
                         )
                         runtime_plan, _rtdetr_phone_selected = (
@@ -3419,6 +3415,10 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                     ttl_seconds=tracker_ttl,
                                 ),
                                 previous_detections=primary_context_detections,
+                                confirmation_required=_ppe_confirmation_required(
+                                    active_violations,
+                                    violation_window,
+                                ),
                             )
                         )
                         try:

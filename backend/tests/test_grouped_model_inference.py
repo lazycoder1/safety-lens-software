@@ -1,3 +1,6 @@
+import ast
+import inspect
+import textwrap
 from types import SimpleNamespace
 
 import numpy as np
@@ -167,6 +170,30 @@ def test_ppe_confirmation_required_only_for_missing_ppe_state():
         )
         is False
     )
+
+
+def test_worker_wires_confirmation_only_to_ppe_cadence_planner():
+    tree = ast.parse(
+        textwrap.dedent(inspect.getsource(video_processing._video_processor_loop))
+    )
+    calls = {
+        node.func.id: {keyword.arg for keyword in node.keywords}
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id
+        in {
+            "_mobile_phone_probe_execution_plan",
+            "_ppe_specialist_cadence_execution_plan",
+        }
+    }
+
+    assert "confirmation_required" not in calls[
+        "_mobile_phone_probe_execution_plan"
+    ]
+    assert "confirmation_required" in calls[
+        "_ppe_specialist_cadence_execution_plan"
+    ]
 
 
 def test_ppe_substitution_stays_additive_with_unvalidated_companion():
