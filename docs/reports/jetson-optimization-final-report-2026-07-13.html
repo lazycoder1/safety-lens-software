@@ -148,7 +148,7 @@
       <div class="eyebrow">Final engineering report · Orin NX</div>
       <h1>What the Jetson can actually support</h1>
       <p class="dek">A candid close-out of the Rakshak Lens detection and alerting optimization work: measured capacity, model placement, test method, rejected ideas, engineering debt, and the reason the UI was stuck on “Connecting to server…”.</p>
-      <p class="stamp">Evidence cut: 13 July 2026 · Code: <code>91f7226</code> on <code>master</code> · Device: NVIDIA Orin NX, JetPack 5.1.3, TensorRT 8.5.2.2</p>
+      <p class="stamp">Evidence cut: 13 July 2026 · Code baseline: <code>0e5e48d</code> on <code>master</code> · Device: NVIDIA Orin NX, JetPack 5.1.3, TensorRT 8.5.2.2</p>
     </div>
   </header>
 
@@ -172,7 +172,7 @@
       <div class="section-head">
         <div class="section-num">01 · Executive verdict</div>
         <div>
-          <h2>25 is a measured device envelope, not yet a 25-camera production certification.</h2>
+          <h2>Four unique live cameras are proven. Eight hybrid sources passed. Ten did not.</h2>
           <p class="lead">The optimization is real, but the labels around the number matter.</p>
         </div>
       </div>
@@ -180,25 +180,25 @@
       <div class="verdict">
         <div>
           <strong class="big">Use YOLO26 Small as the primary. Use RT-DETRv4-S only as a gated phone-recall specialist.</strong>
-          <p>The repeatable combined harness sustained 25 RTSP connections, 4 effective AI decisions per camera per second, worst-case 1 FPS PPE work on every camera, and 1 RT-DETR frame per second across the whole Jetson. Two 60-second runs completed 6,000/6,000 decisions each with no drops or failures.</p>
+          <p>The model and scheduler optimizations remain valid: a short combined harness sustained 25 repeated RTSP connections and production-shaped inference. The later full-application ladder is the stronger deployment test: 6 and 8 total sources passed, while 10 failed after roughly four minutes with connection loss despite zero inference failures, overloads, or queue buildup.</p>
         </div>
         <div class="side">
           <p><span class="tag pass">Recommended now</span></p>
-          <p><strong>Planning cap:</strong> 20 cameras for an initial deployment, keeping roughly 20% device headroom.</p>
-          <p><strong>Lab envelope:</strong> 25 connections under the tested workload.</p>
-          <p><strong>Live unique cameras proven today:</strong> 4, covering every enabled camera found on the Techser camera LAN. A multi-hour, full-stack test with 20–25 distinct feeds is still required before selling that larger number as certified capacity.</p>
+          <p><strong>Deployment claim today:</strong> 4 unique live RTSP cameras.</p>
+          <p><strong>Hybrid application evidence:</strong> 8 total sources for 110 seconds; four were live RTSP and four were file-backed TMEIC clips.</p>
+          <p><strong>Lab envelope:</strong> 25 repeated connections under a short harness. It is not a planning or sales cap.</p>
         </div>
       </div>
 
       <div class="metric-grid">
-        <div class="metric"><span class="value">25</span><span class="label">repeatable lab connections</span></div>
-        <div class="metric"><span class="value">4 FPS</span><span class="label">effective AI cadence / camera</span></div>
-        <div class="metric"><span class="value">100/s</span><span class="label">aggregate effective decisions</span></div>
-        <div class="metric"><span class="value">0</span><span class="label">drops and failures in 2 × 60 s</span></div>
+        <div class="metric"><span class="value">4</span><span class="label">unique live RTSP cameras proven</span></div>
+        <div class="metric"><span class="value">8</span><span class="label">hybrid full-app sources passed</span></div>
+        <div class="metric"><span class="value">20.5/s</span><span class="label">aggregate effective FPS at 8</span></div>
+        <div class="metric"><span class="value">10 ×</span><span class="label">failed late in the full application</span></div>
       </div>
 
       <div class="callout red" style="margin-top:18px">
-        <strong>What 25 does not mean.</strong> It was not 25 distinct office cameras configured through the UI and soaked through alert persistence/delivery for a shift. Only four unique NVR channels were reachable; the capture harness opened those channels round-robin 25 times while the production-shaped inference harness drove the real model server. This validates Jetson decode, memory, transport, batching, and model pressure. It does not validate 25 unique network paths, 25 independent scene distributions, or the entire UI/database/notification stack at that count.
+        <strong>Why the deployment claim stays at four.</strong> The 8-source pass mixed four live RTSP feeds with four looping files, so it did not add independent cameras, network paths, or NVR sessions. At 10 total sources the connection/recovery path failed under hybrid application pressure before the GPU saturated; the run does not isolate whether the first trigger was CPU scheduling, capture contention, or NVR behavior. The 25-session harness remains useful hardware evidence, but the full application has now shown a lower operational boundary.
       </div>
     </section>
 
@@ -302,7 +302,7 @@
 
     <section id="method">
       <div class="section-head">
-        <div class="section-num">05 · How 20 and 25 were tested</div>
+        <div class="section-num">05 · How 4, 8, 10 and 25 were tested</div>
         <div>
           <h2>The tests covered real decode and real inference, but not 25 unique full-stack cameras.</h2>
           <p class="lead">Here is the exact boundary between evidence and extrapolation.</p>
@@ -344,17 +344,34 @@
       <div class="callout blue" style="margin-top:18px">
         <strong>Validation strength:</strong> two consecutive 60-second 25-camera inference runs used one stable set of 25 live decode sessions; both completed 6,000/6,000 effective decisions. Accuracy was separately replayed through the real phone and PPE worker/alert rules at 960 and 640 capture widths. <strong>Validation gap:</strong> a 60-second harness is a boundary benchmark, not an 8–24 hour production soak, and duplicated NVR sessions are not a substitute for 25 distinct feeds.
       </div>
+
+      <div class="card" style="margin-top:18px">
+        <h3>Full-application hybrid ladder</h3>
+        <p>The existing four RTSP cameras stayed configured. Two, four, then six temporary file cameras replayed two 854×640, 8 FPS TMEIC H.264 clips through normal camera workers, primary/specialist execution plans, tracking, rules, stream publication, health, and persistence. Temporary alert thresholds were raised to avoid polluting production alerts.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Total sources</th><th>Composition</th><th>Duration</th><th>Aggregate effective FPS</th><th>New connection failures</th><th>Inference / overload / queue</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td class="num">6</td><td>4 RTSP + 2 files</td><td>110.256 s</td><td class="num">16.407</td><td class="num">0</td><td class="num">0 / 0 / 0</td><td><span class="tag pass">Pass</span></td></tr>
+              <tr><td class="num">8</td><td>4 RTSP + 4 files</td><td>110.269 s</td><td class="num">20.513</td><td class="num">0</td><td class="num">0 / 0 / 0</td><td><span class="tag pass">Pass</span></td></tr>
+              <tr><td class="num">10</td><td>4 RTSP + 6 files</td><td>291.099 s</td><td class="num">25.203</td><td class="num">14</td><td class="num">0 / 0 / 0</td><td><span class="tag reject">Fail after ~4 min</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The 10-source stage had 24 healthy samples, then six bad full-stack samples. Live frame age reached 4.8 seconds, NVDEC activity collapsed, and file workers also transiently missed freshness checks. Device telemetry was not saturated: mean GPU utilization was 18.59%, p95 66%, maximum temperature 69°C, and mean input power 10.09 W.</p>
+      </div>
     </section>
 
     <section id="results">
       <div class="section-head">
         <div class="section-num">06 · Measured results</div>
         <div>
-          <h2>25 repeated. 26 did not repeat cleanly. 27 failed.</h2>
-          <p class="lead">The selected boundary is based on exact workload completion and tail latency, not average FPS.</p>
+          <h2>The harness reached 25; the full application passed 8 and failed 10.</h2>
+          <p class="lead">The full-application result supersedes the harness as the current deployment boundary.</p>
         </div>
       </div>
 
+      <h3>Short hardware/inference harness</h3>
       <div class="table-wrap">
         <table>
           <thead><tr><th class="num">Connections</th><th>Capture profile</th><th>Duration</th><th class="num">Effective decisions</th><th class="num">Drops / failures</th><th class="num">Primary max</th><th class="num">PPE max</th><th>Decision</th></tr></thead>
@@ -383,8 +400,8 @@
         </div>
       </div>
 
-      <div class="callout green" style="margin-top:18px">
-        <strong>Current live state after LAN expansion:</strong> the Jetson serves the UI on port 3030 and the API on port 8000; <code>/api/ping</code> returns HTTP 200 with browser-compatible CORS. The edge still runs the hash-matched <code>36b2cfc</code> image with NVIDIA runtime and ten materialized mounts. All four distinct LAN camera scenes remained fresh on NVDEC across a 600-second full-application soak, with 273/273 health samples reporting <code>ok</code> and zero inference, route, persistence, delivery, or queue failures.
+      <div class="callout red" style="margin-top:18px">
+        <strong>Post-test recovery is part of the result:</strong> all six temporary cameras and their copied media were removed, leaving exactly the original four configurations. Cameras 1, 3 and 4 recovered promptly; camera 2 ignored ordinary restarts and a 30-second cooldown, then recovered fresh on NVDEC only after its worker was paused for 90 seconds. All four finished fresh on NVDEC and inference/alert queues were empty. Requiring manual extended cooldown still makes the 10-source tier an operational failure.
       </div>
     </section>
 
@@ -483,8 +500,11 @@
             <tr><td><span class="tag warn">Medium</span></td><td>Capture ran at 8 FPS for a 4 FPS AI loop.</td><td>Moved twice the useful frames and pushed PPE tail over 250 ms at 25 cameras.</td><td>6 FPS selected; never allowed below AI cadence.</td></tr>
             <tr><td><span class="tag warn">Medium</span></td><td>Benchmarks initially used one duplicated source and omitted RSS.</td><td>Could hide source and unified-memory limits.</td><td>Harness now distributes channels, staggers opens, and records peak RSS.</td></tr>
             <tr><td><span class="tag warn">Medium</span></td><td>A PPE confirmation setting was wired to the neighboring phone planner.</td><td>A benchmark/runtime mismatch could have invalidated specialist cadence.</td><td>Fixed and guarded by worker-semantics tests.</td></tr>
+            <tr><td><span class="tag reject">High</span></td><td>“Missing rider helmet” treats absence of a specialist helmet detection as positive evidence.</td><td>Alert confidence is inherited from the person/vehicle boxes, so a high-confidence rider plus a missed helmet becomes a high-confidence false alert. The operator reports every such live alert as false, while stored records still say <code>falsePositive=false</code>.</td><td>Open accuracy blocker. Run this rule in shadow or disable it until site-labelled rider/helmet evidence passes; do not count these alerts as accuracy successes.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>Health could transiently report <code>ok</code> while a restarted camera was still <code>starting</code>.</td><td>Readiness can look green immediately before the same camera returns to <code>reconnecting</code>.</td><td>Open. Overall health must require every enabled worker to be fresh and stable across a hold period.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>The live grid paginates without an explicit “showing X of Y” camera count.</td><td>At 3×3 it shows nine tiles on page 1 and camera 10 on page 2; during the six-source stage, six visible tiles looked like a hard capacity cap.</td><td>Behavior is correct but unclear. Add configured/visible counts and make pagination prominent during load tests.</td></tr>
             <tr><td><span class="tag info">Open</span></td><td>Only four unique office channels were reachable.</td><td>25-session results do not include 25 independent source/network/scene distributions.</td><td>Unresolved evidence gap; requires a distinct-camera soak.</td></tr>
-            <tr><td><span class="tag info">Open</span></td><td>60-second capacity tests are short.</td><td>Do not expose thermal soak, long-run leaks, NVR reconnect churn, alert queue buildup, or day/night scene shifts.</td><td>Use 20 as planning cap until an 8–24 hour full-stack soak passes.</td></tr>
+            <tr><td><span class="tag reject">High</span></td><td>60-second capacity tests were used to justify a 20-camera planning cap.</td><td>The 10-source full application remained healthy for about four minutes before connection/recovery failure, proving the short soak could miss the dominant fault.</td><td>20 is withdrawn as a deployment cap. Keep the claim at four unique live cameras until longer distinct-source stages pass.</td></tr>
           </tbody>
         </table>
       </div>
@@ -522,6 +542,7 @@
       </div>
 
       <div class="callout green" style="margin-top:18px"><strong>Outcome:</strong> the login status now has the network contract it needs to show “Server ready.” If a browser still displays the old text, reload the page once to clear an already-open failed polling cycle; the server endpoint itself is now reachable.</div>
+      <div class="callout blue" style="margin-top:18px"><strong>Browser verification on this evidence cut:</strong> Browser Use reached <code>http://&lt;Jetson host&gt;:3030/login</code> and rendered “Server ready.” The saved/default admin password was no longer valid, so the authenticated camera-grid test could not be completed without an operator sign-in. Source review confirms 2×2 and 3×3 modes: four or nine visible tiles per page, with pagination for overflow.</div>
     </section>
 
     <section id="conclusion">
@@ -539,14 +560,14 @@
           <p>Keep 4 effective AI FPS per camera, 6 FPS capture, direct 640 NVDEC, batch-4 primary/PPE, a 0.70 remainder phase, and one aggregate RT-DETR frame per second. Do not switch the primary to RT-DETR. Do not switch to Nano without a site-labelled accuracy and alert-parity gate.</p>
         </div>
         <div class="side">
-          <p><strong>Sell/plan today:</strong> 20-camera initial cap with headroom, explicitly pending site validation.</p>
-          <p><strong>Engineering envelope:</strong> 25 connections under the measured workload.</p>
-          <p><strong>Next gate:</strong> 20–25 distinct cameras, 8–24 hours, full application workers, real zones/rules, alert persistence/delivery, reconnects, and thermal telemetry.</p>
+          <p><strong>Sell/plan today:</strong> 4 unique live cameras on this Jetson/site combination.</p>
+          <p><strong>Provisional application evidence:</strong> 8 hybrid sources for 110 seconds. Do not convert that into eight live cameras.</p>
+          <p><strong>Next gate:</strong> 6 then 8 distinct RTSP cameras, at least two hours each, full application workers, real zones/rules, alert persistence/delivery, reconnects, UI rendering, and thermal telemetry.</p>
         </div>
       </div>
 
       <div class="callout red" style="margin-top:18px">
-        <strong>Do not claim “25 production cameras supported” yet.</strong> Claim “25-session Jetson resource envelope; 20-camera conservative planning cap pending distinct-feed full-stack soak.” That statement matches the evidence and will survive scrutiny.
+        <strong>Do not claim 20 or 25 production cameras.</strong> Claim “4 unique live cameras proven; 8 hybrid sources passed briefly; 10 hybrid sources failed late; 25 is a short repeated-session hardware envelope.” That statement matches every retained result.
       </div>
     </section>
 
@@ -558,6 +579,7 @@
       <div class="card">
         <p><strong>Primary report sources</strong></p>
         <ul class="source-list">
+          <li><a href="../experiments/jetson-hybrid-full-app-ladder-2026-07-13.md">Hybrid full-application 6/8/10 ladder</a></li>
           <li><a href="../experiments/jetson-physical-camera-capacity-2026-07-13.md">Physical camera capacity</a></li>
           <li><a href="../experiments/jetson-four-unique-lan-cameras-2026-07-13.md">Four unique LAN cameras</a></li>
           <li><a href="../experiments/jetson-rtdetrv4-small-placement-2026-07-12.md">RT-DETRv4-S placement</a></li>
@@ -570,6 +592,7 @@
         </ul>
         <p><strong>Raw Jetson artifacts</strong> (device-local, credential-free results):</p>
         <ul>
+          <li><code>/opt/rakshak-lens/model-server-models/experiments/full-app-tmeic-ladder-2026-07-13/</code></li>
           <li><code>/opt/rakshak-lens/model-server-models/experiments/physical-25-dual-inference/</code></li>
           <li><code>/opt/rakshak-lens/model-server-models/experiments/physical-combined-cases/</code></li>
           <li><code>/opt/rakshak-lens/model-server-models/experiments/nvdec-physical-sweep/</code></li>
