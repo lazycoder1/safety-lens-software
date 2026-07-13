@@ -138,6 +138,28 @@ RT-DETR phone budget.
   `/opt/rakshak-lens/model-server-models/experiments/ppe-substitution/`.
 
 The checked-in substitution default remains off for conservative upgrades.
-The Jetson can enable it explicitly after installing the hash-matched candidate
-images and should expose cadence, substitution, and PPE-batch counters in the
-health response.
+
+## Live promotion
+
+Commit `fd79647` was pushed directly to `master`. The hash-matched edge and
+model-server candidate images were then promoted on the Jetson, while the prior
+containers were retained as stopped rollback artifacts. The device config now
+sets `ppe_specialist_target_fps` to `0.5` and explicitly enables substitution.
+
+After promotion:
+
+- the model server reported all primary/PPE batch-2 and batch-4 engines warmed,
+  plus both RT-DETR phone engines warmed;
+- the edge health response exposed primary, PPE-only, specialist, RT-DETR, and
+  substitution counters with zero route or admission failures;
+- cam2 remained fresh on `gstreamer_nvdec` with zero inference overloads or
+  failures;
+- cam1 remained in its pre-existing source outage and CPU fallback state;
+- the model watchdog timer was active.
+
+Cam2 has the rider-helmet capability, but the observed scene had no current
+rider-vehicle context. The context gate correctly emitted no PPE work instead
+of spending specialist inference on an unactionable empty scene. Existing
+phone-person context did exercise seven RT-DETR batch-1 frames without failure,
+showing that the previously promoted phone route remained intact after the
+container swap.
