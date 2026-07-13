@@ -1536,6 +1536,7 @@ def _ppe_specialist_cadence_execution_plan(
     now: float,
     stable_person_track: bool,
     previous_detections: list[dict] | None = None,
+    confirmation_required: bool = False,
 ) -> tuple[dict, bool, bool]:
     """Bound PPE duty and replace a primary slot when tracked context is safe."""
     if not execution_plan.get("run_ppe_specialist") or not isinstance(cfg, dict):
@@ -1566,6 +1567,7 @@ def _ppe_specialist_cadence_execution_plan(
             and stable_person_track
             and not unsupported_companion
         ),
+        confirmation_required=confirmation_required,
     )
     if not due:
         suppressed = deepcopy(execution_plan)
@@ -1606,6 +1608,18 @@ def _ppe_specialist_cadence_execution_plan(
         in {"person", "motorcycle", "motorbike", "scooter"}
     ]
     return substituted, True, True
+
+
+def _ppe_confirmation_required(
+    active_violations: set[str],
+    violation_window: dict[str, list[bool]],
+) -> bool:
+    """Accelerate PPE only while a missing-PPE incident confirms or clears."""
+    return any(
+        rule.startswith("Missing ")
+        and (rule in active_violations or any(violation_window.get(rule) or []))
+        for rule in set(active_violations) | set(violation_window)
+    )
 
 
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
@@ -3374,6 +3388,10 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                     last_mobile_phone_probe_context_suppressed_at
                                 ),
                                 previous_detections=primary_context_detections,
+                                confirmation_required=_ppe_confirmation_required(
+                                    active_violations,
+                                    violation_window,
+                                ),
                             )
                         )
                         runtime_plan, _rtdetr_phone_selected = (

@@ -221,6 +221,7 @@ def test_health():
         "tracked_cameras",
         "cadence_suppressed_frames",
         "selected_frames",
+        "confirmation_selected_frames",
         "substituted_frames",
         "additive_frames",
     } <= set(data["inferenceTransport"]["ppeSubstitution"])
@@ -764,6 +765,7 @@ def test_update_global_partial(mock_restart):
             "coco_inference_width": 640,
             "ppe_inference_width": 640,
             "ppe_specialist_target_fps": 0.5,
+            "ppe_specialist_confirmation_fps": 1.0,
             "ppe_specialist_substitution_enabled": True,
             "mobile_phone_inference_width": 960,
             "mobile_phone_probe_interval_seconds": 1.0,
@@ -779,6 +781,7 @@ def test_update_global_partial(mock_restart):
     assert data["coco_inference_width"] == 640
     assert data["ppe_inference_width"] == 640
     assert data["ppe_specialist_target_fps"] == 0.5
+    assert data["ppe_specialist_confirmation_fps"] == 1.0
     assert data["ppe_specialist_substitution_enabled"] is True
     assert data["mobile_phone_inference_width"] == 960
     assert data["mobile_phone_probe_interval_seconds"] == 1.0

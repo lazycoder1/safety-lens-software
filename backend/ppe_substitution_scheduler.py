@@ -16,12 +16,13 @@ class PPESubstitutionScheduler:
         self._counters = {
             "cadence_suppressed_frames": 0,
             "selected_frames": 0,
+            "confirmation_selected_frames": 0,
             "substituted_frames": 0,
             "additive_frames": 0,
         }
 
     @staticmethod
-    def settings(cfg: dict) -> tuple[float, bool]:
+    def settings(cfg: dict) -> tuple[float, float, bool]:
         global_config = cfg.get("global") or {}
         try:
             target_fps = float(global_config.get("ppe_specialist_target_fps", 0.5))
@@ -29,10 +30,19 @@ class PPESubstitutionScheduler:
             target_fps = 0.5
         if not math.isfinite(target_fps) or not 0.1 <= target_fps <= 2.0:
             target_fps = 0.5
+        try:
+            confirmation_fps = float(
+                global_config.get("ppe_specialist_confirmation_fps", 1.0)
+            )
+        except (TypeError, ValueError):
+            confirmation_fps = 1.0
+        if not math.isfinite(confirmation_fps) or not 0.1 <= confirmation_fps <= 2.0:
+            confirmation_fps = 1.0
+        confirmation_fps = max(target_fps, confirmation_fps)
         substitution_enabled = (
             global_config.get("ppe_specialist_substitution_enabled") is True
         )
-        return target_fps, substitution_enabled
+        return target_fps, confirmation_fps, substitution_enabled
 
     def consider(
         self,
@@ -41,9 +51,12 @@ class PPESubstitutionScheduler:
         *,
         now: float,
         substitution_eligible: bool,
+        confirmation_required: bool = False,
     ) -> tuple[bool, bool]:
         """Return ``(due, substitute)`` for an otherwise actionable PPE pass."""
-        target_fps, substitution_enabled = self.settings(cfg)
+        target_fps, confirmation_fps, substitution_enabled = self.settings(cfg)
+        if confirmation_required:
+            target_fps = confirmation_fps
         interval = 1.0 / target_fps
         with self._lock:
             last_selected = self._last_selected_at.get(camera_id)
@@ -53,6 +66,9 @@ class PPESubstitutionScheduler:
             self._last_selected_at[camera_id] = now
             substitute = substitution_enabled and substitution_eligible
             self._counters["selected_frames"] += 1
+            self._counters["confirmation_selected_frames"] += int(
+                confirmation_required
+            )
             self._counters[
                 "substituted_frames" if substitute else "additive_frames"
             ] += 1

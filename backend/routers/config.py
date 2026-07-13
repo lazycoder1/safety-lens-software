@@ -36,6 +36,7 @@ class GlobalConfigUpdate(BaseModel):
     coco_inference_width: Optional[int] = Field(None, ge=160, le=1920)
     ppe_inference_width: Optional[int] = Field(None, ge=160, le=1920)
     ppe_specialist_target_fps: Optional[float] = Field(None, ge=0.1, le=2.0)
+    ppe_specialist_confirmation_fps: Optional[float] = Field(None, ge=0.1, le=2.0)
     ppe_specialist_substitution_enabled: Optional[bool] = None
     mobile_phone_inference_width: Optional[int] = Field(None, ge=160, le=1920)
     mobile_phone_probe_interval_seconds: Optional[float] = Field(None, ge=0.1, le=3600)

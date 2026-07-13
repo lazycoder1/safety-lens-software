@@ -19,6 +19,7 @@ def _ppe_substitution_config(*, enabled=True):
     return {
         "global": {
             "ppe_specialist_target_fps": 0.5,
+            "ppe_specialist_confirmation_fps": 1.0,
             "ppe_specialist_substitution_enabled": enabled,
         }
     }
@@ -101,6 +102,71 @@ def test_ppe_due_slot_replaces_primary_with_stable_cached_context():
         "person",
         "motorcycle",
     ]
+
+
+def test_ppe_confirmation_plan_uses_accelerated_cadence():
+    video_processing.PPE_SUBSTITUTION_SCHEDULER.reset()
+    plan = _rider_plan()
+    context = [
+        {
+            "class": "person",
+            "confidence": 0.9,
+            "bbox": [40, 10, 100, 155],
+            "model_family": "coco_primary",
+        }
+    ]
+
+    first, first_due, _first_substituted = (
+        video_processing._ppe_specialist_cadence_execution_plan(
+            "cam1",
+            plan,
+            _ppe_substitution_config(),
+            now=20.0,
+            stable_person_track=True,
+            previous_detections=context,
+        )
+    )
+    accelerated, accelerated_due, accelerated_substituted = (
+        video_processing._ppe_specialist_cadence_execution_plan(
+            "cam1",
+            plan,
+            _ppe_substitution_config(),
+            now=21.0,
+            stable_person_track=True,
+            previous_detections=context,
+            confirmation_required=True,
+        )
+    )
+
+    assert first_due is True
+    assert first["run_ppe_substitution"] is True
+    assert (accelerated_due, accelerated_substituted) == (True, True)
+    assert accelerated["run_ppe_substitution"] is True
+
+
+def test_ppe_confirmation_required_only_for_missing_ppe_state():
+    assert video_processing._ppe_confirmation_required(set(), {}) is False
+    assert (
+        video_processing._ppe_confirmation_required(
+            set(),
+            {"Missing rider helmet": [True, False]},
+        )
+        is True
+    )
+    assert (
+        video_processing._ppe_confirmation_required(
+            {"Missing helmet"},
+            {"Missing helmet": []},
+        )
+        is True
+    )
+    assert (
+        video_processing._ppe_confirmation_required(
+            {"Animal Intrusion"},
+            {"Mobile Phone Usage": [True]},
+        )
+        is False
+    )
 
 
 def test_ppe_substitution_stays_additive_with_unvalidated_companion():

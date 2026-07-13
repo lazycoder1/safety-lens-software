@@ -200,3 +200,40 @@ Raw combined evidence is stored under
 After the sweep, cam2 returned fresh on `gstreamer_nvdec`, the edge and model
 server reported zero inference failures or overloads, and the watchdog was
 active. Cam1 remained in its pre-existing source outage.
+
+## Confirmation-time cadence acceleration
+
+The 0.5 FPS scout cadence bounds idle and non-violating PPE load, but a
+five-vote rider-helmet rule otherwise needs about ten seconds after its first
+observation. The worker now supports a separate
+`ppe_specialist_confirmation_fps`, defaulting to 1.0 FPS. It accelerates only
+while a `Missing ...` rule has a pending positive vote or is active. Animal,
+phone, vehicle, zone, and other incident state cannot trigger this faster PPE
+cadence.
+
+At the configured rates, a rider violation requires at most about six seconds
+to confirm: up to two seconds for the 0.5 FPS scout to find the first violation,
+then four more votes at one-second intervals. A generic ten-vote PPE rule has
+an approximately eleven-second upper bound instead of twenty seconds. The
+confirmation rate is clamped to never be slower than the scout rate.
+
+Before changing the worker, the worst case was load-gated: all 24 cameras ran
+PPE at the one-FPS confirmation rate simultaneously, while the device retained
+one aggregate RT-DETR phone FPS. This is deliberately stricter than the normal
+case where only cameras with pending PPE incidents accelerate.
+
+| Cameras | Duration | Effective decisions | PPE frames | RT frames | Drops / failures | Primary maximum | PPE maximum | RT maximum | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 24 | 30 s | 2,880 / 2,880 | 720 | 30 | 0 / 0 | 87.258 ms | 157.558 ms | 105.129 ms | pass |
+| 23 | 30 s | 2,760 / 2,760 | 690 | 30 | 0 / 0 | 104.237 ms | 177.830 ms | 108.299 ms | pass |
+| 22 | 30 s | 2,640 / 2,640 | 660 | 30 | 0 / 0 | 64.612 ms | 139.079 ms | 59.045 ms | pass |
+| 24, run 1 | 60 s | 5,760 / 5,760 | 1,440 | 60 | 0 / 0 | 91.562 ms | 158.951 ms | 104.857 ms | pass |
+| 24, run 2 | 60 s | 5,760 / 5,760 | 1,440 | 60 | 0 / 0 | 91.444 ms | 156.211 ms | 104.891 ms | pass |
+
+Both sustained 24-camera runs used exactly 360 PPE batch-4 calls and 30
+RT-DETR batch-2 calls. They recorded no singleton, timeout, fallback,
+admission, or model failures. Confirmation acceleration therefore improves
+alert latency without reducing the established 24-camera tier.
+
+Raw confirmation-load evidence is stored under
+`/opt/rakshak-lens/model-server-models/experiments/ppe-confirmation-1fps/`.
