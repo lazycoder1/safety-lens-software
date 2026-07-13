@@ -9,6 +9,36 @@
 
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
+## Requested Small/Nano recheck — 2026-07-13
+
+The candidate in this report is the official **RT-DETRv4-S**, not the earlier
+RT-DETR Large experiment. The upstream RT-DETRv4 release has S, M, L, and X
+checkpoints; it does not publish an RT-DETRv4-N/Nano checkpoint. Small is
+therefore the authentic smallest-family comparison. RF-DETR Nano is a separate
+model family and must not be relabelled as RT-DETRv4-N.
+
+The deployed Small engine and production worker path were rechecked after the
+current batch-4 primary optimizations:
+
+- the engine identity remained the pinned 10.4M-parameter official Small
+  checkpoint and both fixed TensorRT runtimes were warmed;
+- worker-path alert replay remained 5/6 actionable phone positives and 0/4
+  actionable negatives, while the YOLO26 Small primary remained 4/6 and 0/4;
+- 20 camera-equivalents at 4 effective FPS completed 4,800/4,800 decisions,
+  including 520 PPE passes and 60/60 RT-DETR substitutions, with zero overloads
+  or failures; primary maximum latency was 234.404 ms and RT-DETR maximum
+  latency was 150.848 ms;
+- the 21-camera probe completed all decisions but reached 265.279 ms primary
+  latency, exceeding the 250 ms camera-period freshness limit and confirming
+  that 20 cameras remains the supported RT-DETR tier.
+
+The placement decision is unchanged. RT-DETRv4-S is slower than the existing
+YOLO26 Small INT8 primary, so it is neither a cheaper pre-filter nor a viable
+universal primary on this Jetson. It remains a track- and zone-gated phone
+specialist that substitutes a scheduled primary slot. The primary still runs
+at 4 effective decision FPS per camera; the RT budget is one aggregate frame
+per second across the device, not one RT frame per camera per second.
+
 ## Decision
 
 Do not replace the YOLO26 Small INT8 primary with RT-DETRv4 Small. The
