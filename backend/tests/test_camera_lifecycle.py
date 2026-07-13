@@ -324,6 +324,41 @@ def test_deferred_startup_isolates_one_camera_failure(monkeypatch):
     assert failed == ["cam-1"]
 
 
+def test_deferred_startup_staggers_successful_camera_starts(monkeypatch):
+    import server
+
+    starts = []
+    sleeps = []
+    monkeypatch.setenv("SAFETYLENS_CAMERA_STARTUP_STAGGER_SECONDS", "0.1")
+    monkeypatch.setattr(server, "start_camera", lambda cam_id: starts.append(cam_id) or True)
+    monkeypatch.setattr(server, "camera_lifecycle_shutting_down", lambda: False)
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+
+    failed = server._start_configured_cameras(
+        {"cameras": {"cam-1": {}, "cam-2": {}, "cam-3": {}}}
+    )
+
+    assert failed == []
+    assert starts == ["cam-1", "cam-2", "cam-3"]
+    assert sleeps == [0.1, 0.1]
+
+
+@pytest.mark.parametrize("value", ["invalid", "nan", "-1", "3"])
+def test_deferred_startup_stagger_is_bounded(monkeypatch, value):
+    import server
+
+    sleeps = []
+    monkeypatch.setenv("SAFETYLENS_CAMERA_STARTUP_STAGGER_SECONDS", value)
+    monkeypatch.setattr(server, "start_camera", lambda _cam_id: True)
+    monkeypatch.setattr(server, "camera_lifecycle_shutting_down", lambda: False)
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+
+    server._start_configured_cameras({"cameras": {"cam-1": {}, "cam-2": {}}})
+
+    expected = [2.0] if value == "3" else []
+    assert sleeps == expected
+
+
 def test_old_camera_and_vlm_exits_cannot_remove_new_owners(
     monkeypatch,
     lifecycle_state,

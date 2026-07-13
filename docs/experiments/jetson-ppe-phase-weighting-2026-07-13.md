@@ -2,6 +2,11 @@
 
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
+> **Physical-capacity note:** the 27-camera result below is an inference-only
+> camera-equivalent tier. Combined RTSP/NVDEC and inference testing later
+> established 25 as the repeatably validated physical tier. See
+> `jetson-physical-camera-capacity-2026-07-13.md`.
+
 ## Decision
 
 Use a 0.70 final-phase weight for the Jetson batch-4 scheduler. A partial last

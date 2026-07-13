@@ -82,6 +82,22 @@ def test_redact_video_source_removes_credentials_and_query_values():
     assert "secret" not in redacted
 
 
+def test_rtsp_capture_fps_cap_preserves_inference_cadence(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_FPS_CAP", "6")
+
+    assert video_processing._effective_capture_fps(8, 4, "rtsp") == 6
+    assert video_processing._effective_capture_fps(8, 7, "rtsp") == 7
+    assert video_processing._effective_capture_fps(3, 4, "rtsp") == 3
+    assert video_processing._effective_capture_fps(8, 4, "file") == 8
+
+
+@pytest.mark.parametrize("value", ["", "invalid", "nan", "-1", "0"])
+def test_invalid_rtsp_capture_fps_cap_keeps_configured_rate(monkeypatch, value):
+    monkeypatch.setenv("SAFETYLENS_RTSP_CAPTURE_FPS_CAP", value)
+
+    assert video_processing._effective_capture_fps(8, 4, "rtsp") == 8
+
+
 def test_open_rtsp_capture_forces_ffmpeg_and_bounded_timeouts(monkeypatch):
     class FakeCapture:
         def __init__(self):

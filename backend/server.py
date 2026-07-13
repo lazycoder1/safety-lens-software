@@ -8,6 +8,8 @@ Rakshak Lens Demo Backend
 
 import asyncio
 import logging
+import math
+import os
 import time
 from uuid import uuid4
 
@@ -278,17 +280,35 @@ async def _deferred_model_startup():
 def _start_configured_cameras(cfg: dict) -> list[str]:
     """Start every configured camera without one failure aborting the pass."""
     failed_cameras: list[str] = []
-    for cam_id in cfg.get("cameras", {}):
+    try:
+        startup_stagger_seconds = float(
+            os.environ.get("SAFETYLENS_CAMERA_STARTUP_STAGGER_SECONDS", "0")
+        )
+    except (TypeError, ValueError):
+        startup_stagger_seconds = 0.0
+    if not math.isfinite(startup_stagger_seconds):
+        startup_stagger_seconds = 0.0
+    startup_stagger_seconds = min(2.0, max(0.0, startup_stagger_seconds))
+    camera_ids = list(cfg.get("cameras", {}))
+    for index, cam_id in enumerate(camera_ids):
         if camera_lifecycle_shutting_down():
             break
+        started = False
         try:
-            start_camera(cam_id)
+            started = start_camera(cam_id)
         except Exception:
             failed_cameras.append(cam_id)
             logger.exception(
                 "Camera failed during deferred startup; continuing with later cameras",
                 extra={"camera_id": cam_id},
             )
+        if (
+            started
+            and startup_stagger_seconds > 0
+            and index + 1 < len(camera_ids)
+            and not camera_lifecycle_shutting_down()
+        ):
+            time.sleep(startup_stagger_seconds)
     return failed_cameras
 
 

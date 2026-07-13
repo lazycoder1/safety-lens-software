@@ -48,3 +48,28 @@ def test_summarize_readings_keeps_distinct_dimensions():
     )
 
     assert summary["dimensions"] == [(352, 288), (960, 540)]
+
+
+def test_channel_replacement_preserves_other_query_fields_and_credentials():
+    benchmark = _load_benchmark()
+
+    result = benchmark._replace_numeric_query_parameter(
+        "rtsp://user:password@camera.test/cam/realmonitor?channel=1&subtype=0",
+        "channel",
+        4,
+    )
+
+    assert result == (
+        "rtsp://user:password@camera.test/cam/realmonitor?channel=4&subtype=0"
+    )
+
+
+def test_channel_replacement_rejects_incompatible_rtsp_shape():
+    benchmark = _load_benchmark()
+
+    with pytest.raises(ValueError, match="channel"):
+        benchmark._replace_numeric_query_parameter(
+            "rtsp://camera.test/Streaming/Channels/101",
+            "channel",
+            2,
+        )

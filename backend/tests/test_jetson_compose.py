@@ -47,6 +47,8 @@ def test_jetson_edge_uses_measured_inference_admission_defaults():
     compose = yaml.safe_load((ROOT / "docker-compose.jetson.yml").read_text())
     environment = compose["services"]["edge"]["environment"]
 
+    assert environment["SAFETYLENS_RTSP_MAX_DIMENSION"].endswith(":-640}")
+    assert environment["SAFETYLENS_RTSP_CAPTURE_FPS_CAP"].endswith(":-6}")
     assert environment["SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT"] == (
         "${SAFETYLENS_REMOTE_INFERENCE_MAX_INFLIGHT:-4}"
     )
@@ -66,6 +68,9 @@ def test_jetson_edge_uses_measured_inference_admission_defaults():
     assert environment["SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE"].endswith(":-4}")
     assert environment["SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT"].endswith(
         ":-0.70}"
+    )
+    assert environment["SAFETYLENS_CAMERA_STARTUP_STAGGER_SECONDS"].endswith(
+        ":-0.10}"
     )
     assert environment["SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS"] == (
         "${SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS:-0.014}"

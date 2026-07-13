@@ -2577,6 +2577,26 @@ def _coerce_fps(value, default: float) -> float:
     return max(0.1, fps)
 
 
+def _effective_capture_fps(
+    configured_fps: float,
+    inference_fps: float,
+    stream_type: str,
+) -> float:
+    """Cap non-inference RTSP frames without starving the AI cadence."""
+    target = _positive_fps(configured_fps, 1.0)
+    if stream_type != "rtsp":
+        return target
+    try:
+        cap = float(os.environ.get("SAFETYLENS_RTSP_CAPTURE_FPS_CAP", "0"))
+    except (TypeError, ValueError):
+        cap = 0.0
+    if not math.isfinite(cap) or cap <= 0:
+        return target
+    cap = min(60.0, cap)
+    minimum_for_inference = min(target, _positive_fps(inference_fps, target))
+    return max(minimum_for_inference, min(target, cap))
+
+
 def _open_video_capture(
     video_source: str,
     stream_type: str,
@@ -3015,12 +3035,23 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
     video_source = build_rtsp_url(cam, include_credentials=True) if stream_type == "rtsp" else str(VIDEO_DIR / cam["video"])
     execution_plan = cam.get("execution_plan") or build_execution_plan(cam, cfg)
     g = cfg["global"]
-    target_fps = cam.get("fps", g["target_fps"])
-    frame_interval = 1.0 / target_fps
-    inference_fps = _positive_fps(
-        cam.get("inference_fps", g.get("inference_fps", max(1.0, target_fps / 3))),
-        max(1.0, target_fps / 3),
+    configured_target_fps = _positive_fps(
+        cam.get("fps", g["target_fps"]),
+        _positive_fps(g["target_fps"], 1.0),
     )
+    inference_fps = _positive_fps(
+        cam.get(
+            "inference_fps",
+            g.get("inference_fps", max(1.0, configured_target_fps / 3)),
+        ),
+        max(1.0, configured_target_fps / 3),
+    )
+    target_fps = _effective_capture_fps(
+        configured_target_fps,
+        inference_fps,
+        stream_type,
+    )
+    frame_interval = 1.0 / target_fps
     inference_interval = 1.0 / inference_fps
     next_inference_at = inference_scheduler.next_inference_slot(
         camera_id,
@@ -3174,15 +3205,32 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                 execution_plan = current_cam.get("execution_plan") or build_execution_plan(current_cam, current_cfg)
                 schedule_state = _capability_schedule_state(current_cam, current_cfg, execution_plan)
                 scheduled_plan = _scheduled_execution_plan(execution_plan, schedule_state)
-                target_fps = _coerce_fps(current_cam.get("fps", current_g.get("target_fps", target_fps)), target_fps)
+                configured_target_fps = _coerce_fps(
+                    current_cam.get(
+                        "fps",
+                        current_g.get("target_fps", configured_target_fps),
+                    ),
+                    configured_target_fps,
+                )
+                current_inference_fps = _coerce_fps(
+                    current_cam.get(
+                        "inference_fps",
+                        current_g.get(
+                            "inference_fps",
+                            max(1.0, configured_target_fps / 3),
+                        ),
+                    ),
+                    max(1.0, configured_target_fps / 3),
+                )
+                target_fps = _effective_capture_fps(
+                    configured_target_fps,
+                    current_inference_fps,
+                    stream_type,
+                )
                 frame_interval = 1.0 / target_fps
                 update_capture_fps = getattr(cap, "set_max_fps", None)
                 if callable(update_capture_fps):
                     update_capture_fps(target_fps)
-                current_inference_fps = _coerce_fps(
-                    current_cam.get("inference_fps", current_g.get("inference_fps", max(1.0, target_fps / 3))),
-                    max(1.0, target_fps / 3),
-                )
                 current_inference_interval = 1.0 / current_inference_fps
                 if current_inference_interval != inference_interval:
                     inference_fps = current_inference_fps

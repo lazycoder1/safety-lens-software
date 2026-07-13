@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import resource
 import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +52,30 @@ def _camera(camera_id: str) -> dict:
     return camera
 
 
+def _replace_numeric_query_parameter(source: str, name: str, value: int) -> str:
+    """Return a changed source without ever rendering it to benchmark output."""
+    parsed = urlsplit(source)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    replaced = False
+    updated: list[tuple[str, str]] = []
+    for key, current in query:
+        if key.lower() == name.lower():
+            current = str(value)
+            replaced = True
+        updated.append((key, current))
+    if not replaced:
+        raise ValueError(f"RTSP source has no {name!r} query parameter")
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(updated), parsed.fragment)
+    )
+
+
+def _maximum_resident_memory_mb() -> float:
+    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    bytes_used = maximum if sys.platform == "darwin" else maximum * 1024
+    return bytes_used / (1024 * 1024)
+
+
 def main() -> int:
     from camera_connection import build_rtsp_url
     from gstreamer_capture import GStreamerCapture
@@ -61,20 +87,54 @@ def main() -> int:
     parser.add_argument("--drop-interval", type=int, default=0)
     parser.add_argument("--max-dimension", type=int, default=960)
     parser.add_argument("--copies", type=int, default=1)
+    parser.add_argument(
+        "--open-stagger-seconds",
+        type=float,
+        default=0.0,
+        help="Delay successive capture opens to model bounded worker startup.",
+    )
+    parser.add_argument(
+        "--channels",
+        nargs="+",
+        type=int,
+        help=(
+            "Distribute copies over numeric NVR channel query values; full "
+            "credential-bearing sources are never emitted."
+        ),
+    )
     args = parser.parse_args()
     if args.copies < 1 or args.copies > 32:
         parser.error("copies must be between 1 and 32")
+    if not 0.0 <= args.open_stagger_seconds <= 2.0:
+        parser.error("open-stagger-seconds must be between 0 and 2")
+    if args.channels and (
+        len(set(args.channels)) != len(args.channels)
+        or any(channel < 1 or channel > 256 for channel in args.channels)
+    ):
+        parser.error("channels must be unique values between 1 and 256")
 
     source = os.environ.get("SAFETYLENS_BENCHMARK_RTSP_URL", "").strip()
     if not source:
         camera = _camera(args.camera_id)
         source = build_rtsp_url(camera, include_credentials=True)
+    try:
+        sources = (
+            [
+                _replace_numeric_query_parameter(source, "channel", channel)
+                for channel in args.channels
+            ]
+            if args.channels
+            else [source]
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    capture_sources = [sources[index % len(sources)] for index in range(args.copies)]
     open_started = time.monotonic()
 
-    def open_capture():
+    def open_capture(capture_source: str):
         try:
             capture = GStreamerCapture(
-                source,
+                capture_source,
                 open_timeout_ms=5_000,
                 read_timeout_ms=5_000,
                 max_dimension=args.max_dimension,
@@ -86,7 +146,15 @@ def main() -> int:
         return capture if capture.isOpened() else None
 
     with ThreadPoolExecutor(max_workers=args.copies) as pool:
-        captures = list(pool.map(lambda _index: open_capture(), range(args.copies)))
+        if args.open_stagger_seconds > 0:
+            futures = []
+            for index, capture_source in enumerate(capture_sources):
+                futures.append(pool.submit(open_capture, capture_source))
+                if index + 1 < len(capture_sources):
+                    time.sleep(args.open_stagger_seconds)
+            captures = [future.result() for future in futures]
+        else:
+            captures = list(pool.map(open_capture, capture_sources))
     open_seconds = time.monotonic() - open_started
     opened_captures = [capture for capture in captures if capture is not None]
     if len(opened_captures) != args.copies:
@@ -99,6 +167,8 @@ def main() -> int:
                     "opened": False,
                     "copies_requested": args.copies,
                     "copies_opened": len(opened_captures),
+                    "source_count": len(sources),
+                    "open_stagger_seconds": args.open_stagger_seconds,
                     "open_seconds": round(open_seconds, 3),
                 },
                 sort_keys=True,
@@ -141,6 +211,8 @@ def main() -> int:
         "opened": True,
         "copies_requested": args.copies,
         "copies_opened": len(opened_captures),
+        "source_count": len(sources),
+        "open_stagger_seconds": args.open_stagger_seconds,
         "drop_interval": args.drop_interval,
         "drop_applied_count": sum(
             bool(capture._decoder_drop_applied) for capture in opened_captures
@@ -161,6 +233,7 @@ def main() -> int:
         },
         "process_cpu_seconds": round(cpu_seconds, 3),
         "process_cpu_percent": round(100.0 * cpu_seconds / elapsed, 2),
+        "maximum_resident_memory_mb": round(_maximum_resident_memory_mb(), 3),
         "dimensions": [
             {"width": width, "height": height} for width, height in dimensions
         ],

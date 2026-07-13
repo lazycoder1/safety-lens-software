@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import cv2
@@ -16,6 +17,7 @@ import video_processing
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames", type=Path, nargs="+", required=True)
+    parser.add_argument("--max-dimension", type=int, default=0)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
@@ -67,6 +69,16 @@ def main() -> int:
         frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if frame is None:
             parser.error(f"could not decode frame: {path}")
+        if args.max_dimension > 0 and max(frame.shape[:2]) > args.max_dimension:
+            scale = args.max_dimension / max(frame.shape[:2])
+            frame = cv2.resize(
+                frame,
+                (
+                    max(1, math.floor(frame.shape[1] * scale)),
+                    max(1, math.floor(frame.shape[0] * scale)),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
         _annotated, detections, _pose, invocations = (
             video_processing._run_grouped_inference(
                 "semantic-check",
@@ -109,6 +121,7 @@ def main() -> int:
     )
     report = {
         "labelled": labelled,
+        "max_dimension": args.max_dimension,
         "actionable_positive": sum(positive.values()),
         "positive_total": len(positive),
         "actionable_negative": sum(negative.values()),

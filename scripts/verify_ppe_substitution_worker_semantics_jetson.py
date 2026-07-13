@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,7 @@ def _run_group(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames", nargs="+", type=Path, required=True)
+    parser.add_argument("--max-dimension", type=int, default=0)
     parser.add_argument(
         "--edge-url-override",
         help="Use an isolated model-server URL without mutating camera config.",
@@ -145,6 +147,16 @@ def main() -> int:
         frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if frame is None:
             parser.error(f"could not decode frame: {path}")
+        if args.max_dimension > 0 and max(frame.shape[:2]) > args.max_dimension:
+            scale = args.max_dimension / max(frame.shape[:2])
+            frame = cv2.resize(
+                frame,
+                (
+                    max(1, math.floor(frame.shape[1] * scale)),
+                    max(1, math.floor(frame.shape[0] * scale)),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
         loaded.append((path, frame))
 
     cfg = {
@@ -276,6 +288,7 @@ def main() -> int:
         "ok": not errors,
         "errors": errors,
         "frames": len(loaded),
+        "max_dimension": args.max_dimension,
         "detection_parity_frames": sum(
             item["detection_parity"] for item in per_frame
         ),
