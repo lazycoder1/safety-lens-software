@@ -151,6 +151,15 @@ def main() -> int:
         help="Fraction of primary slots replaced on --substitute-cameras",
     )
     parser.add_argument(
+        "--substitute-sequence-offset",
+        type=int,
+        default=0,
+        help=(
+            "Shift the deterministic substitution cadence by this many camera "
+            "sequences; use a positive offset to model deferred specialist work."
+        ),
+    )
+    parser.add_argument(
         "--substitution-source",
         choices=("external", "rtdetr"),
         default="external",
@@ -208,6 +217,8 @@ def main() -> int:
         parser.error("start-at-monotonic must be non-negative")
     if not 0 <= args.substitute_duty <= 1:
         parser.error("substitute-duty must be between 0 and 1")
+    if not 0 <= args.substitute_sequence_offset <= 10_000:
+        parser.error("substitute-sequence-offset must be between 0 and 10000")
     if len(set(args.substitute_cameras)) != len(args.substitute_cameras) or any(
         camera < 0 or camera >= args.cameras for camera in args.substitute_cameras
     ):
@@ -472,7 +483,10 @@ def main() -> int:
                 continue
             substitute_primary = (
                 camera_index in substitution_cameras
-                and _specialist_due(sequence, args.substitute_duty)
+                and _specialist_due(
+                    sequence + args.substitute_sequence_offset,
+                    args.substitute_duty,
+                )
             )
             if substitute_primary:
                 # The external detector supplies this primary decision. Keep
@@ -600,6 +614,7 @@ def main() -> int:
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
         "substitute_cameras": sorted(substitution_cameras),
         "substitute_duty_target": args.substitute_duty,
+        "substitute_sequence_offset": args.substitute_sequence_offset,
         "substitution_source": args.substitution_source,
         "substitution_attempts": sum(
             report["substitution_attempts"] for report in reports

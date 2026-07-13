@@ -163,3 +163,40 @@ of spending specialist inference on an unactionable empty scene. Existing
 phone-person context did exercise seven RT-DETR batch-1 frames without failure,
 showing that the previously promoted phone route remained intact after the
 container swap.
+
+## Combined PPE plus RT-DETR capacity follow-up
+
+Cam2 requires both rider-helmet and mobile-phone capabilities, so the PPE and
+RT-DETR maxima cannot be treated as independent deployment choices. The load
+harness now accepts a deterministic substitution sequence offset. At one-eighth
+duty, an offset of one schedules the two selected RT-DETR frames one camera
+period before their PPE frames. This models the live worker order, where an RT
+selection defers an otherwise due PPE pass to the next primary slot, without
+allowing the two specialists to collapse into one benchmark event.
+
+The combined workload kept PPE substitution at 0.5 FPS on every camera and
+added exactly one aggregate RT-DETR phone frame per second across the device.
+The two RT-qualified cameras therefore received 3.0 full primary, 0.5 PPE, and
+0.5 RT observations per second. Other PPE cameras received 3.5 primary and 0.5
+PPE observations per second.
+
+| Cameras | Duration | Effective decisions | PPE frames | RT frames | Drops / failures | Primary maximum | PPE maximum | RT maximum | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 24 | 30 s | 2,880 / 2,880 | 360 | 30 | 0 / 0 | 124.236 ms | 246.475 ms | 104.135 ms | provisional |
+| 23 | 30 s | 2,760 / 2,760 | 345 | 30 | 0 / 0 | 139.676 ms | 219.598 ms | 144.282 ms | pass |
+| 22 | 30 s | 2,640 / 2,640 | 330 | 30 | 0 / 0 | 69.873 ms | 142.136 ms | 73.923 ms | pass |
+| 24, run 1 | 60 s | 5,760 / 5,760 | 720 | 60 | 0 / 0 | 91.062 ms | 158.819 ms | 105.026 ms | pass |
+| 24, run 2 | 60 s | 5,760 / 5,760 | 720 | 60 | 0 / 0 | 92.889 ms | 161.364 ms | 108.593 ms | pass |
+
+Every sustained 24-camera request used the intended PPE batch-4 or RT-DETR
+batch-2 route, with no singleton, timeout, route-fallback, admission, or model
+failure. Twenty-five cameras was not repeated with the extra RT load because
+the strictly cheaper PPE-only profile had already violated the 250 ms limit.
+Therefore 24 cameras is also the repeatably safe combined maximum for the
+deployed rider-helmet plus one-FPS device-wide phone-recall profile.
+
+Raw combined evidence is stored under
+`/opt/rakshak-lens/model-server-models/experiments/ppe-rtdetr-combined/`.
+After the sweep, cam2 returned fresh on `gstreamer_nvdec`, the edge and model
+server reported zero inference failures or overloads, and the watchdog was
+active. Cam1 remained in its pre-existing source outage.

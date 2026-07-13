@@ -77,3 +77,22 @@ def test_substitution_and_ppe_collisions_are_bounded_and_deferable():
     }
 
     assert substitutions & ppe == {63, 135, 207}
+
+
+def test_sequence_offset_places_rt_work_beside_ppe_without_collision():
+    benchmark = _load_benchmark()
+    ppe = {
+        sequence
+        for sequence in range(240)
+        if benchmark._specialist_due(sequence, 0.125)
+    }
+    shifted_rt = {
+        sequence
+        for sequence in range(240)
+        if benchmark._specialist_due(sequence + 1, 0.125)
+    }
+
+    assert len(ppe) == 30
+    assert len(shifted_rt) == 30
+    assert ppe.isdisjoint(shifted_rt)
+    assert all(rt + 1 in ppe for rt in shifted_rt)
