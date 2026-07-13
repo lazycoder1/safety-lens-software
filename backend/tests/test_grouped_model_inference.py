@@ -1366,7 +1366,11 @@ def test_bbox_only_grouped_inference_skips_full_resolution_rendering(monkeypatch
             "confidence": 0.82,
             "bbox": [5, 6, 20, 25],
             "model_family": "ppe_specialist",
-            "capability_keys": ["rider_helmet_required"],
+            "capability_keys": [
+                "helmet_required",
+                "helmet_color_compliance",
+                "rider_helmet_required",
+            ],
         },
     ]
 

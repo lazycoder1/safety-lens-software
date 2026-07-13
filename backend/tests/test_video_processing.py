@@ -453,6 +453,55 @@ def test_detection_window_suppresses_model_paths_outside_window():
     assert scheduled_plan["ppe_prompt_terms"] == []
 
 
+def test_shared_helmet_prompts_stay_active_when_colour_window_is_suppressed():
+    helmet_prompts = ["motorcycle helmet", "rider helmet", "helmet"]
+    plan = {
+        **_apron_plan(),
+        "capabilities": ["helmet_required", "helmet_color_compliance"],
+        "ppe_prompt_terms": helmet_prompts,
+    }
+    schedule = {"suppressedCapabilities": ["helmet_color_compliance"]}
+
+    scheduled_plan = video_processing._scheduled_execution_plan(plan, schedule)
+
+    assert scheduled_plan["capabilities"] == ["helmet_required"]
+    assert scheduled_plan["run_ppe_specialist"] is True
+    assert scheduled_plan["ppe_prompt_terms"] == helmet_prompts
+
+
+def test_shared_helmet_prompts_stay_active_when_presence_window_is_suppressed():
+    helmet_prompts = ["motorcycle helmet", "rider helmet", "helmet"]
+    plan = {
+        **_apron_plan(),
+        "capabilities": ["helmet_required", "helmet_color_compliance"],
+        "ppe_prompt_terms": helmet_prompts,
+    }
+    schedule = {"suppressedCapabilities": ["helmet_required"]}
+
+    scheduled_plan = video_processing._scheduled_execution_plan(plan, schedule)
+
+    assert scheduled_plan["capabilities"] == ["helmet_color_compliance"]
+    assert scheduled_plan["run_ppe_specialist"] is True
+    assert scheduled_plan["ppe_prompt_terms"] == helmet_prompts
+
+
+def test_shared_helmet_prompts_stop_when_both_capabilities_are_suppressed():
+    plan = {
+        **_apron_plan(),
+        "capabilities": ["helmet_required", "helmet_color_compliance"],
+        "ppe_prompt_terms": ["motorcycle helmet", "rider helmet", "helmet"],
+    }
+    schedule = {
+        "suppressedCapabilities": ["helmet_required", "helmet_color_compliance"]
+    }
+
+    scheduled_plan = video_processing._scheduled_execution_plan(plan, schedule)
+
+    assert scheduled_plan["capabilities"] == []
+    assert scheduled_plan["run_ppe_specialist"] is False
+    assert scheduled_plan["ppe_prompt_terms"] == []
+
+
 def test_detection_window_preserves_closed_set_candidate_override_inside_window():
     cfg = {"site": {"timezone": "Asia/Kolkata"}}
     schedule = video_processing._capability_schedule_state(
@@ -686,6 +735,27 @@ def test_violation_window_preserves_ppe_votes_when_specialist_is_deferred():
     )
 
     assert windows["Missing gloves"] == [True, True]
+
+
+def test_violation_window_preserves_helmet_colour_votes_when_specialist_is_deferred():
+    windows = {"Helmet colour mismatch": [True, True]}
+    video_processing._advance_violation_window(
+        windows,
+        {},
+        window_size=15,
+        fresh_detection_evaluated=True,
+        fresh_fall_evaluated=False,
+        fresh_ppe_evaluated=False,
+    )
+
+    assert windows["Helmet colour mismatch"] == [True, True]
+
+
+def test_helmet_colour_mismatch_accelerates_ppe_confirmation():
+    assert video_processing._ppe_confirmation_required(
+        set(),
+        {"Helmet colour mismatch": [True]},
+    ) is True
 
 
 def test_empty_violation_observation_does_not_clear_on_stale_display_frame():

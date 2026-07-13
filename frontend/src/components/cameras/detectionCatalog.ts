@@ -132,6 +132,15 @@ const DETECTION_CATALOG: CameraDetectionDefinition[] = [
     profileHints: ["work_zone_ppe"],
   },
   {
+    key: "helmet_color_compliance",
+    label: "Helmet Colour",
+    description: "Identify helmet colour and optionally alert when it is not allowed for this camera.",
+    group: "PPE",
+    preferredRuleIds: [],
+    matchTerms: ["helmet colour", "helmet color", "hard hat colour", "hard hat color"],
+    profileHints: ["work_zone_ppe"],
+  },
+  {
     key: "rider_helmet_required",
     label: "Rider Helmet",
     description: "Check helmets only for people riding motorcycles or site vehicles.",

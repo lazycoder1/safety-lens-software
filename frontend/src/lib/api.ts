@@ -12,7 +12,7 @@ export const WS_BASE =
   (import.meta.env.DEV ? `ws://${DEV_API_HOST}:8000` : `ws://${window.location.hostname}:8000`)
 
 import { reportError } from "@/lib/errorReporter"
-import type { AlertOutput, Zone } from "@/types"
+import type { AlertOutput, Camera, Zone } from "@/types"
 
 const TOKEN_KEY = "rakshak_lens_token"
 
@@ -443,6 +443,7 @@ export async function addCamera(camera: {
   discovery_fingerprint?: string
   safety_rule_ids?: string[]
   safety_rule_overrides?: Record<string, { confidence?: number; threshold?: number }>
+  helmet_colour_policy?: Camera["helmet_colour_policy"]
   custom_long_tail_terms?: string[]
   capability_model_overrides?: Record<string, string>
   capability_windows?: Array<Record<string, any>>
@@ -672,6 +673,7 @@ export async function previewCameraPlan(payload: {
   discovery_fingerprint?: string
   safety_rule_ids?: string[]
   safety_rule_overrides?: Record<string, { confidence?: number; threshold?: number }>
+  helmet_colour_policy?: Camera["helmet_colour_policy"]
   yoloe_classes?: string[]
   custom_long_tail_terms?: string[]
   capability_model_overrides?: Record<string, string>

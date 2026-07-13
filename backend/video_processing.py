@@ -25,6 +25,7 @@ import alert_delivery_worker
 import alert_store
 import face_analyzer
 import face_store
+import helmet_colour
 import plate_store
 import inference_scheduler
 import licensing
@@ -50,7 +51,11 @@ from camera_capture import (
 from alert_pipeline import AlertPipeline, DeliveryOutcome
 from camera_connection import build_rtsp_url
 from camera_planner import build_execution_plan, required_model_keys_for_capabilities
-from capability_registry import CAPABILITY_REGISTRY, CLASS_TERM_TO_CAPABILITY, RULE_ID_TO_CAPABILITY
+from capability_registry import (
+    CAPABILITY_REGISTRY,
+    CLASS_TERM_TO_CAPABILITIES,
+    RULE_ID_TO_CAPABILITY,
+)
 from config_manager import get_config, get_config_snapshot
 from constants import (
     COCO_NAMES,
@@ -313,11 +318,14 @@ def _scale_stream_detection_records(
 
 
 def _stream_visible_detection_records(detections: list[dict]) -> list[dict]:
-    """Preserve the existing COCO-only live overlay while retaining all analytics records."""
+    """Show COCO records plus confident helmet-colour evidence in live video."""
     return [
         detection
         for detection in detections
-        if detection.get("model_family") in {None, "coco_primary"}
+        if (
+            detection.get("model_family") in {None, "coco_primary"}
+            or detection.get("helmet_colour") not in {None, "unknown"}
+        )
         and isinstance(detection.get("bbox"), (list, tuple))
         and len(detection["bbox"]) == 4
     ]
@@ -951,11 +959,11 @@ def _advance_violation_window(
         else:
             if not fresh_detection_evaluated:
                 continue
-            if rule_key.startswith("Missing ") and not fresh_ppe_evaluated:
+            if _is_ppe_violation_rule(rule_key) and not fresh_ppe_evaluated:
                 continue
             if (
                 fresh_detection_rule_keys is not None
-                and not rule_key.startswith("Missing ")
+                and not _is_ppe_violation_rule(rule_key)
                 and rule_key not in fresh_detection_rule_keys
             ):
                 continue
@@ -978,11 +986,15 @@ def _record_empty_violation_observation(
         if rule_key == "Fall Detected":
             if not fresh_fall_evaluated:
                 continue
-        elif rule_key.startswith("Missing ") and not fresh_ppe_evaluated:
+        elif _is_ppe_violation_rule(rule_key) and not fresh_ppe_evaluated:
             continue
         elif not fresh_detection_evaluated:
             continue
-        elif fresh_detection_rule_keys is not None and rule_key not in fresh_detection_rule_keys:
+        elif (
+            fresh_detection_rule_keys is not None
+            and not _is_ppe_violation_rule(rule_key)
+            and rule_key not in fresh_detection_rule_keys
+        ):
             continue
         violation_window[rule_key].append(False)
         if len(violation_window[rule_key]) > window_size:
@@ -1008,9 +1020,10 @@ def _normalize_detection_batch(detections: list[dict], model_family: str) -> lis
         class_name = detection["class"]
         capability_keys = _COCO_CLASS_TO_CAPABILITIES.get(class_name, [])
         if not capability_keys:
-            mapped = CLASS_TERM_TO_CAPABILITY.get(_normalize_text(class_name))
-            if mapped:
-                capability_keys = [mapped]
+            capability_keys = CLASS_TERM_TO_CAPABILITIES.get(
+                _normalize_text(class_name),
+                [],
+            )
         normalized.append({
             **detection,
             "model_family": model_family,
@@ -1271,11 +1284,25 @@ def _capability_schedule_state(
     }
 
 
-def _filter_prompt_terms_for_schedule(terms: list[str], suppressed_capabilities: set[str]) -> list[str]:
+def _filter_prompt_terms_for_schedule(
+    terms: list[str],
+    suppressed_capabilities: set[str],
+    configured_capabilities: set[str] | None = None,
+) -> list[str]:
     filtered: list[str] = []
     for term in terms:
-        mapped = CLASS_TERM_TO_CAPABILITY.get(_normalize_text(term))
-        if mapped and mapped in suppressed_capabilities:
+        mapped_capabilities = set(
+            CLASS_TERM_TO_CAPABILITIES.get(_normalize_text(term), [])
+        )
+        relevant_capabilities = (
+            mapped_capabilities & configured_capabilities
+            if configured_capabilities is not None
+            else mapped_capabilities
+        )
+        if (
+            relevant_capabilities
+            and relevant_capabilities <= suppressed_capabilities
+        ):
             continue
         filtered.append(term)
     return filtered
@@ -1313,10 +1340,12 @@ def _scheduled_execution_plan(execution_plan: dict, schedule_state: dict) -> dic
     scheduled["ppe_prompt_terms"] = _filter_prompt_terms_for_schedule(
         scheduled.get("ppe_prompt_terms", []),
         suppressed_capabilities,
+        set(execution_plan.get("capabilities") or []),
     ) if scheduled["run_ppe_specialist"] else []
     scheduled["yoloe_prompt_terms"] = _filter_prompt_terms_for_schedule(
         scheduled.get("yoloe_prompt_terms", []),
         suppressed_capabilities,
+        set(execution_plan.get("capabilities") or []),
     ) if scheduled["run_yoloe_long_tail"] else []
     scheduled["schedule_state"] = schedule_state
     return scheduled
@@ -1616,10 +1645,14 @@ def _ppe_confirmation_required(
 ) -> bool:
     """Accelerate PPE only while a missing-PPE incident confirms or clears."""
     return any(
-        rule.startswith("Missing ")
+        _is_ppe_violation_rule(rule)
         and (rule in active_violations or any(violation_window.get(rule) or []))
         for rule in set(active_violations) | set(violation_window)
     )
+
+
+def _is_ppe_violation_rule(rule: str) -> bool:
+    return rule.startswith("Missing ") or rule == "Helmet colour mismatch"
 
 
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
@@ -2720,6 +2753,7 @@ def _run_detection_job(
         cfg=current_cfg,
         frame_batch_size_hint=frame_batch_size_hint,
     )
+    helmet_colour.annotate_helmet_colours(frame, detections, current_cam)
     effective_plan = scheduled_plan
     if model_invocations.get("rtdetr_phone_fallback"):
         effective_plan = deepcopy(scheduled_plan)
@@ -2903,7 +2937,11 @@ def _process_detection_observation(
         )
 
         for rule_key in list(active_violations):
-            if fresh_detection_rule_keys is not None and rule_key not in fresh_detection_rule_keys:
+            if (
+                fresh_detection_rule_keys is not None
+                and not _is_ppe_violation_rule(rule_key)
+                and rule_key not in fresh_detection_rule_keys
+            ):
                 continue
             if sum(violation_window.get(rule_key, [])[-window_size:]) < 2:
                 active_violations.discard(rule_key)
@@ -2999,7 +3037,11 @@ def _process_detection_observation(
                 )
 
         for rule_key in list(violation_window):
-            if fresh_detection_rule_keys is not None and rule_key not in fresh_detection_rule_keys:
+            if (
+                fresh_detection_rule_keys is not None
+                and not _is_ppe_violation_rule(rule_key)
+                and rule_key not in fresh_detection_rule_keys
+            ):
                 continue
             if len(violation_window[rule_key]) >= window_size and sum(violation_window[rule_key]) == 0:
                 violation_window.pop(rule_key, None)

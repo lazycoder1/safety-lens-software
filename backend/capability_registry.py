@@ -27,6 +27,7 @@ CapabilityKey = Literal[
     "mobile_phone",
     "zone_intrusion",
     "helmet_required",
+    "helmet_color_compliance",
     "rider_helmet_required",
     "vest_required",
     "gloves_required",
@@ -57,6 +58,16 @@ class CapabilityDefinition(TypedDict, total=False):
     requires_association: bool
     prompt_terms: list[str]
     safety_rule_ids: list[str]
+
+
+# Keep worker and rider helmet capabilities on the same fixed-prompt TensorRT
+# profile.  The generic ``helmet`` prompt detects industrial hard hats in the
+# validated TMEIC corpus, while the synonyms retain rider-camera coverage.
+HELMET_DETECTOR_PROMPT_TERMS = [
+    "motorcycle helmet",
+    "rider helmet",
+    "helmet",
+]
 
 
 CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
@@ -189,8 +200,20 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_tracking": True,
         "requires_zones": False,
         "requires_association": True,
-        "prompt_terms": ["hard hat", "safety helmet"],
+        "prompt_terms": list(HELMET_DETECTOR_PROMPT_TERMS),
         "safety_rule_ids": ["ppe_helmet"],
+    },
+    "helmet_color_compliance": {
+        "key": "helmet_color_compliance",
+        "label": "Helmet Colour",
+        "group": "PPE",
+        "model_family": "ppe_specialist",
+        "input_scope": "full_frame",
+        "requires_tracking": True,
+        "requires_zones": False,
+        "requires_association": True,
+        "prompt_terms": list(HELMET_DETECTOR_PROMPT_TERMS),
+        "safety_rule_ids": [],
     },
     "rider_helmet_required": {
         "key": "rider_helmet_required",
@@ -201,7 +224,7 @@ CAPABILITY_REGISTRY: dict[CapabilityKey, CapabilityDefinition] = {
         "requires_tracking": True,
         "requires_zones": False,
         "requires_association": True,
-        "prompt_terms": ["motorcycle helmet", "rider helmet", "helmet"],
+        "prompt_terms": list(HELMET_DETECTOR_PROMPT_TERMS),
         "safety_rule_ids": ["ppe_rider_helmet"],
     },
     "vest_required": {
@@ -383,13 +406,18 @@ PROFILE_DEFAULT_CAPABILITIES: dict[CameraProfile, list[CapabilityKey]] = {
 
 RULE_ID_TO_CAPABILITY: dict[str, CapabilityKey] = {}
 CLASS_TERM_TO_CAPABILITY: dict[str, CapabilityKey] = {}
+CLASS_TERM_TO_CAPABILITIES: dict[str, list[CapabilityKey]] = {}
 ALL_PPE_PROMPT_TERMS: list[str] = []
 
 for key, definition in CAPABILITY_REGISTRY.items():
     for rule_id in definition.get("safety_rule_ids", []):
         RULE_ID_TO_CAPABILITY[rule_id] = key
     for prompt in definition.get("prompt_terms", []):
-        CLASS_TERM_TO_CAPABILITY[prompt.lower().replace("_", " ").replace("-", " ").strip()] = key
+        normalized_prompt = prompt.lower().replace("_", " ").replace("-", " ").strip()
+        CLASS_TERM_TO_CAPABILITY.setdefault(normalized_prompt, key)
+        prompt_capabilities = CLASS_TERM_TO_CAPABILITIES.setdefault(normalized_prompt, [])
+        if key not in prompt_capabilities:
+            prompt_capabilities.append(key)
     if definition["model_family"] == "ppe_specialist":
         for prompt in definition.get("prompt_terms", []):
             if prompt not in ALL_PPE_PROMPT_TERMS:

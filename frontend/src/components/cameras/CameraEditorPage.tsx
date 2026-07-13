@@ -58,6 +58,7 @@ import {
   buildCapabilityEditorOptions,
   buildCapabilityModelOverridesPayload,
   buildCapabilityWindowsPayload,
+  buildHelmetColourPolicyPayload,
   buildSafetyRuleOverridesPayload,
   CameraCapabilityConfigPanel,
   capabilityConfigDraftsFromCamera,
@@ -298,6 +299,10 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     () => buildSafetyRuleOverridesPayload(capabilityOptions, capabilityDrafts),
     [capabilityOptions, capabilityDrafts]
   )
+  const helmetColourPolicyPayload = useMemo(
+    () => buildHelmetColourPolicyPayload(capabilityOptions, capabilityDrafts),
+    [capabilityOptions, capabilityDrafts]
+  )
   const customDetectionPolicyCount = useMemo(
     () => capabilityOptions.filter((option) => detectionPolicyDrafts[option.key]?.enabled).length,
     [capabilityOptions, detectionPolicyDrafts]
@@ -347,6 +352,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
           password: shouldSendCredentialUpdate ? rtspPassword : undefined,
           safety_rule_ids: [...selectedRuleIds, ...preservedRuleIds],
           safety_rule_overrides: safetyRuleOverridesPayload,
+          helmet_colour_policy: helmetColourPolicyPayload,
           custom_long_tail_terms: usesCustomDetection ? customDetectionTerms : [],
           capability_windows: capabilityWindowsPayload,
           capability_model_overrides: capabilityModelOverridesPayload,
@@ -388,6 +394,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
     selectedDetections,
     capabilityWindowsPayload,
     safetyRuleOverridesPayload,
+    helmetColourPolicyPayload,
     capabilityModelOverridesPayload,
     usesCustomDetection,
     customDetectionTerms,
@@ -613,6 +620,7 @@ export function CameraEditorPage({ mode }: CameraEditorPageProps) {
       password: shouldSendCredentialUpdate ? rtspPassword : undefined,
       safety_rule_ids: [...selectedRuleIds, ...preservedRuleIds],
       safety_rule_overrides: safetyRuleOverridesPayload,
+      helmet_colour_policy: helmetColourPolicyPayload,
       custom_long_tail_terms: usesCustomDetection ? customDetectionTerms : [],
       capability_windows: capabilityWindowsPayload,
       capability_model_overrides: capabilityModelOverridesPayload,

@@ -1377,6 +1377,40 @@ def test_add_camera_persists_explicit_stream_and_inference_cadence(mock_start):
 
 
 @mock.patch("routers.cameras.start_camera")
+def test_add_camera_preserves_helmet_colour_policy(mock_start):
+    resp = api_post("/api/cameras", json={
+        "name": "Helmet Colour Cam",
+        "video": "test.mp4",
+        "zone": "Factory PPE",
+        "profile": "work_zone_ppe",
+        "capabilities": ["helmet_color_compliance"],
+        "helmet_colour_policy": {
+            "allowed_colors": ["amber", "white", "invalid"],
+            "min_confidence": 0.52,
+            "confirmation_threshold": 4,
+        },
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["capabilities"] == ["helmet_color_compliance"]
+    assert data["execution_plan"]["required_model_keys"] == ["coco_primary", "ppe_specialist"]
+    assert data["execution_plan"]["ppe_prompt_terms"] == [
+        "motorcycle helmet",
+        "rider helmet",
+        "helmet",
+    ]
+    assert data["helmet_colour_policy"] == {
+        "enabled": True,
+        "allowed_colours": ["orange", "white"],
+        "min_confidence": 0.52,
+        "confirmation_threshold": 4,
+        "severity": "P2",
+    }
+    mock_start.assert_called_once()
+
+
+@mock.patch("routers.cameras.start_camera")
 def test_add_camera_rejects_inference_cadence_above_stream_cadence(mock_start):
     resp = api_post("/api/cameras", json={
         "name": "Invalid Cadence Cam",

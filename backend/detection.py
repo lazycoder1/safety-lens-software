@@ -11,6 +11,11 @@ import numpy as np
 from capability_registry import RULE_ID_TO_CAPABILITY
 from config_manager import get_config
 from constants import COCO_NAMES, CLASS_COLORS
+from helmet_colour import (
+    HELMET_COLOUR_CAPABILITY,
+    HELMET_CLASS_TERMS,
+    normalize_helmet_colour_policy,
+)
 
 logger = logging.getLogger("rakshak_lens")
 
@@ -110,7 +115,13 @@ def draw_detection_records(
 
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness, cv2.LINE_AA)
 
-        label = f"{cls_name} {conf:.0%}"
+        helmet_colour = record.get("helmet_colour")
+        colour_suffix = (
+            f" · {str(helmet_colour).title()}"
+            if helmet_colour not in {None, "unknown"}
+            else ""
+        )
+        label = f"{cls_name}{colour_suffix} {conf:.0%}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
         cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
         cv2.putText(annotated, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
@@ -552,6 +563,7 @@ def draw_pose_detections(frame: np.ndarray, results, fall_only: bool = False, ca
 
 RIDER_HELMET_RULE_ID = "ppe_rider_helmet"
 RIDER_HELMET_GROUP = "rider helmet"
+HELMET_COLOUR_MISMATCH_RULE = "Helmet colour mismatch"
 RIDER_VEHICLE_CLASSES = {"motorcycle", "motorbike", "scooter"}
 RIDER_MIN_PERSON_CONFIDENCE = 0.65
 RIDER_MIN_VEHICLE_CONFIDENCE = 0.70
@@ -697,6 +709,108 @@ def _ppe_present_for_person(person_bbox: list, ppe_dets: list) -> bool:
         if _ppe_matches_person(person_bbox, p["bbox"]):
             return True
     return False
+
+
+def _check_helmet_colour_violations(
+    detections: list[dict],
+    camera_id: str,
+    cam: dict,
+    persons: list[dict],
+) -> list[dict]:
+    """Emit a candidate only for confident, associated, disallowed colours."""
+
+    capabilities = set(cam.get("capabilities") or [])
+    policy = normalize_helmet_colour_policy(
+        cam.get("helmet_colour_policy") or cam.get("helmet_color_policy"),
+        enabled=HELMET_COLOUR_CAPABILITY in capabilities,
+    )
+    allowed_colours = set(policy["allowed_colours"])
+    if not policy["enabled"] or not allowed_colours:
+        return []
+
+    helmet_detections = [
+        detection
+        for detection in detections
+        if _detection_class(detection.get("class")) in HELMET_CLASS_TERMS
+        and detection.get("bbox")
+    ]
+    evaluable = [
+        detection
+        for detection in helmet_detections
+        if detection.get("helmet_colour") not in {None, "unknown"}
+        and float(detection.get("helmet_colour_confidence") or 0.0)
+        >= float(policy["min_confidence"])
+        and any(
+            _ppe_matches_person(person["bbox"], detection["bbox"])
+            for person in persons
+        )
+    ]
+    mismatches = [
+        detection
+        for detection in evaluable
+        if detection.get("helmet_colour") not in allowed_colours
+    ]
+    if not mismatches:
+        return []
+
+    observed_colours = sorted(
+        {str(detection["helmet_colour"]) for detection in mismatches}
+    )
+    confidence = max(
+        min(
+            float(detection.get("confidence") or 0.0),
+            float(detection.get("helmet_colour_confidence") or 0.0),
+        )
+        for detection in mismatches
+    )
+    return [{
+        "camera_id": camera_id,
+        "rule": HELMET_COLOUR_MISMATCH_RULE,
+        "severity": policy["severity"],
+        "confidence": confidence,
+        "count": len(mismatches),
+        "classes": [
+            "helmet colour",
+            "wrong helmet colour",
+            *sorted(allowed_colours),
+            *observed_colours,
+        ],
+        "description": (
+            f"{len(mismatches)} worker helmet(s) have disallowed colour "
+            f"{', '.join(observed_colours)}; allowed: {', '.join(sorted(allowed_colours))}"
+        ),
+        "source": "PPE Specialist + Helmet Colour Classifier",
+        "threshold": policy["confirmation_threshold"],
+        "metadata": {
+            "capability": HELMET_COLOUR_CAPABILITY,
+            "allowedHelmetColours": sorted(allowed_colours),
+            "observedHelmetColours": observed_colours,
+            "helmetDetectionCount": len(helmet_detections),
+            "evaluableHelmetColourCount": len(evaluable),
+            "mismatchedHelmetColourCount": len(mismatches),
+            "unknownHelmetColourCount": sum(
+                1
+                for detection in helmet_detections
+                if detection.get("helmet_colour") in {None, "unknown"}
+            ),
+            "helmetColourMinConfidence": policy["min_confidence"],
+            "helmetColourConfirmationThreshold": policy["confirmation_threshold"],
+            "helmetColourDetections": [
+                {
+                    "class": detection.get("class"),
+                    "detectorConfidence": round(float(detection.get("confidence") or 0.0), 4),
+                    "colour": detection.get("helmet_colour"),
+                    "colourConfidence": round(
+                        float(detection.get("helmet_colour_confidence") or 0.0),
+                        4,
+                    ),
+                    "bbox": _round_bbox(detection["bbox"]),
+                    "compliant": detection.get("helmet_colour_compliant"),
+                }
+                for detection in helmet_detections
+            ],
+        },
+    }]
 
 
 def _person_evaluable_for_ppe(person_bbox: list, frame_w: int | None = None, frame_h: int | None = None) -> bool:
@@ -1156,7 +1270,17 @@ def check_yoloe_violations(
     # Per-person check
     for group_name in checked_groups:
         group_classes = ppe_groups[group_name]
-        ppe_dets = [d for d in detections if d["class"] in group_classes]
+        if group_name == "helmet":
+            # The fixed Jetson profile reports industrial hard hats through
+            # the generic ``helmet`` prompt.  Retain the legacy hard-hat names
+            # as aliases so stored/custom safety rules remain compatible.
+            ppe_dets = [
+                detection
+                for detection in detections
+                if _detection_class(detection.get("class")) in HELMET_CLASS_TERMS
+            ]
+        else:
+            ppe_dets = [d for d in detections if d["class"] in group_classes]
         violating_persons = [p for p in persons if not _ppe_present_for_person(p["bbox"], ppe_dets)]
 
         if violating_persons:
@@ -1202,6 +1326,20 @@ def check_yoloe_violations(
                     "personDiagnostics": person_diagnostics,
                 },
             })
+
+    if (
+        HELMET_COLOUR_CAPABILITY in set(cam.get("capabilities") or [])
+        and (
+            capability_filter is None
+            or HELMET_COLOUR_CAPABILITY in capability_filter
+        )
+    ):
+        candidates.extend(_check_helmet_colour_violations(
+            detections,
+            camera_id,
+            cam,
+            persons,
+        ))
 
     rider_helmet_rule = _rider_helmet_rule_for_camera(cam, cfg)
     if rider_helmet_rule and (
@@ -1402,6 +1540,27 @@ def extract_violation_bboxes(rule: str, detections: list, frame_w: int, frame_h:
                 "label": "Missing Rider Helmet",
                 "bbox": normalize(person["bbox"]),
                 "confidence": round(person["confidence"], 2),
+            })
+        return results
+
+    if rule == HELMET_COLOUR_MISMATCH_RULE:
+        for detection in detections:
+            if detection.get("helmet_colour_compliant") is not False:
+                continue
+            bbox = detection.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            colour = str(detection.get("helmet_colour") or "unknown").title()
+            results.append({
+                "label": f"Wrong Helmet Colour — {colour}",
+                "bbox": normalize(bbox),
+                "confidence": round(
+                    min(
+                        float(detection.get("confidence") or 0.0),
+                        float(detection.get("helmet_colour_confidence") or 0.0),
+                    ),
+                    2,
+                ),
             })
         return results
 

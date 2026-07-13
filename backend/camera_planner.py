@@ -19,6 +19,7 @@ from capability_registry import (
     infer_profile_from_capabilities,
     normalize_capability_key,
 )
+from helmet_colour import HELMET_COLOUR_CAPABILITY, normalize_helmet_colour_policy
 
 ALLOWED_CAPABILITY_MODEL_OVERRIDES: dict[CapabilityKey, set[ModelKey]] = {
     "apron_required": {"ppe_closed_set_candidate"},
@@ -179,6 +180,12 @@ def _append_ppe_rule_prompt_terms(
     for rule_id in _ensure_list(camera.get("safety_rule_ids")):
         capability = RULE_ID_TO_CAPABILITY.get(rule_id)
         if capability and _model_key_for_capability(capability, capability_model_overrides) != "ppe_specialist":
+            continue
+        # Worker-helmet rules historically name ``hard hat`` and
+        # ``safety helmet``.  The Jetson fixed engine uses the shared generic
+        # helmet profile from the capability registry, so adding the legacy
+        # rule terms here would force a slow PyTorch fallback.
+        if capability == "helmet_required":
             continue
         rule = rule_map.get(rule_id)
         if not rule or rule.get("type") != "ppe" or not rule.get("enabled", True):
@@ -393,6 +400,10 @@ def normalize_camera_record(camera: dict, cfg: dict | None = None) -> tuple[dict
     capabilities = execution_plan["capabilities"]
     profile = execution_plan["profile"]
     custom_long_tail_terms = derive_custom_long_tail_terms(updated, cfg)
+    helmet_colour_policy = normalize_helmet_colour_policy(
+        updated.get("helmet_colour_policy") or updated.get("helmet_color_policy"),
+        enabled=HELMET_COLOUR_CAPABILITY in capabilities,
+    )
     if not _ensure_list(updated.get("safety_rule_ids")) and capabilities:
         updated["safety_rule_ids"] = default_rule_ids_for_capabilities(capabilities)
         changed = True
@@ -406,6 +417,7 @@ def normalize_camera_record(camera: dict, cfg: dict | None = None) -> tuple[dict
         "profile": profile,
         "capabilities": capabilities,
         "custom_long_tail_terms": custom_long_tail_terms,
+        "helmet_colour_policy": helmet_colour_policy,
         "execution_plan": execution_plan,
         "demo": execution_plan["derived_demo"],
     }

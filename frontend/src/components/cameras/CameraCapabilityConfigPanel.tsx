@@ -19,12 +19,23 @@ export interface CameraCapabilityConfigDraft {
   confidence: string
   threshold: string
   modelKey: "default" | "ppe_closed_set_candidate"
+  allowedHelmetColours: string[]
 }
 
 export type CameraCapabilityConfigDrafts = Partial<Record<CapabilityKey, CameraCapabilityConfigDraft>>
 
 const inputClasses =
   "w-full rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-white px-3 py-2 text-sm focus:outline-2 focus:outline-[var(--color-info)] focus:outline-offset-0 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-tertiary)]"
+
+const HELMET_COLOURS = [
+  { key: "white", label: "White", swatch: "#f8fafc" },
+  { key: "yellow", label: "Yellow", swatch: "#facc15" },
+  { key: "orange", label: "Orange", swatch: "#f97316" },
+  { key: "red", label: "Red", swatch: "#dc2626" },
+  { key: "blue", label: "Blue", swatch: "#2563eb" },
+  { key: "green", label: "Green", swatch: "#16a34a" },
+  { key: "black", label: "Black", swatch: "#111827" },
+]
 
 export function buildCapabilityEditorOptions(
   selected: CapabilityKey[],
@@ -47,13 +58,15 @@ export function buildCapabilityEditorOptions(
     })
 }
 
-export function defaultCapabilityConfigDraft(): CameraCapabilityConfigDraft {
+export function defaultCapabilityConfigDraft(capability?: CapabilityKey): CameraCapabilityConfigDraft {
+  const helmetColour = capability === "helmet_color_compliance"
   return {
     limitRuntime: false,
     windows: [defaultScheduleWindow()],
-    confidence: "",
-    threshold: "",
+    confidence: helmetColour ? "0.45" : "",
+    threshold: helmetColour ? "3" : "",
     modelKey: "default",
+    allowedHelmetColours: [],
   }
 }
 
@@ -73,16 +86,19 @@ export function capabilityConfigDraftsFromCamera(
 
   const overrides = camera?.safety_rule_overrides || {}
   const modelOverrides = camera?.capability_model_overrides || camera?.execution_plan?.capability_model_overrides || {}
+  const helmetColourPolicy = camera?.helmet_colour_policy
   const drafts: CameraCapabilityConfigDrafts = {}
   for (const option of options) {
     const window = windowsByCapability.get(option.key)
     const ruleOverride = option.ruleId ? overrides[option.ruleId] : null
+    const isHelmetColour = option.key === "helmet_color_compliance"
     drafts[option.key] = {
       limitRuntime: Boolean(window?.windows?.length),
       windows: window?.windows?.length ? window.windows : [defaultScheduleWindow()],
-      confidence: numberString(ruleOverride?.confidence),
-      threshold: numberString(ruleOverride?.threshold),
+      confidence: isHelmetColour ? numberString(helmetColourPolicy?.min_confidence ?? 0.45) : numberString(ruleOverride?.confidence),
+      threshold: isHelmetColour ? numberString(helmetColourPolicy?.confirmation_threshold ?? 3) : numberString(ruleOverride?.threshold),
       modelKey: modelOverrides[option.key] === "ppe_closed_set_candidate" ? "ppe_closed_set_candidate" : "default",
+      allowedHelmetColours: isHelmetColour ? [...(helmetColourPolicy?.allowed_colours || [])] : [],
     }
   }
   return drafts
@@ -94,7 +110,7 @@ export function reconcileCapabilityConfigDrafts(
 ): CameraCapabilityConfigDrafts {
   const next: CameraCapabilityConfigDrafts = {}
   for (const option of options) {
-    next[option.key] = current[option.key] || defaultCapabilityConfigDraft()
+    next[option.key] = current[option.key] || defaultCapabilityConfigDraft(option.key)
   }
   return next
 }
@@ -172,6 +188,27 @@ export function buildCapabilityModelOverridesPayload(
   return payload
 }
 
+export function buildHelmetColourPolicyPayload(
+  options: CameraCapabilityEditorOption[],
+  drafts: CameraCapabilityConfigDrafts
+): {
+  enabled: boolean
+  allowed_colours: string[]
+  min_confidence: number
+  confirmation_threshold: number
+  severity: "P2"
+} {
+  const option = options.find((item) => item.key === "helmet_color_compliance")
+  const draft = option ? drafts[option.key] : null
+  return {
+    enabled: Boolean(option && draft),
+    allowed_colours: draft?.allowedHelmetColours || [],
+    min_confidence: optionalNumber(draft?.confidence || "") ?? 0.45,
+    confirmation_threshold: Math.round(optionalNumber(draft?.threshold || "") ?? 3),
+    severity: "P2",
+  }
+}
+
 export function CameraCapabilityConfigPanel({
   options,
   drafts,
@@ -185,7 +222,7 @@ export function CameraCapabilityConfigPanel({
     onChange({
       ...drafts,
       [capability]: {
-        ...defaultCapabilityConfigDraft(),
+        ...defaultCapabilityConfigDraft(capability),
         ...drafts[capability],
         ...updates,
       },
@@ -213,7 +250,8 @@ export function CameraCapabilityConfigPanel({
       ) : (
         <div className="space-y-3">
           {options.map((option) => {
-            const draft = drafts[option.key] || defaultCapabilityConfigDraft()
+            const draft = drafts[option.key] || defaultCapabilityConfigDraft(option.key)
+            const isHelmetColour = option.key === "helmet_color_compliance"
             return (
               <details
                 key={option.key}
@@ -229,6 +267,9 @@ export function CameraCapabilityConfigPanel({
                     )}
                     {draft.confidence && <Badge variant="default">conf {draft.confidence}</Badge>}
                     {draft.threshold && <Badge variant="default">{draft.threshold} hits</Badge>}
+                    {isHelmetColour && draft.allowedHelmetColours.length > 0 && (
+                      <Badge variant="info">Allow {draft.allowedHelmetColours.join(", ")}</Badge>
+                    )}
                     {draft.modelKey === "ppe_closed_set_candidate" && <Badge variant="info">Trained detector</Badge>}
                   </div>
                   <span className="text-xs text-[var(--color-text-secondary)]">Configure</span>
@@ -252,9 +293,54 @@ export function CameraCapabilityConfigPanel({
                     />
                   )}
 
+                  {isHelmetColour && (
+                    <div className="space-y-2 rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-[var(--color-bg-tertiary)] p-3">
+                      <div>
+                        <p className="text-sm font-medium text-[var(--color-text-primary)]">Allowed helmet colours</p>
+                        <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                          Select accepted colours to alert on a mismatch. Leave all unchecked to label colours without creating colour-compliance alerts.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {HELMET_COLOURS.map((colour) => {
+                          const selected = draft.allowedHelmetColours.includes(colour.key)
+                          return (
+                            <label
+                              key={colour.key}
+                              className={cn(
+                                "inline-flex cursor-pointer items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium",
+                                selected
+                                  ? "border-[var(--color-info)] bg-[var(--color-info-bg)] text-[var(--color-text-primary)]"
+                                  : "border-[var(--color-border-default)] bg-white text-[var(--color-text-secondary)]"
+                              )}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() => patch(option.key, {
+                                  allowedHelmetColours: selected
+                                    ? draft.allowedHelmetColours.filter((item) => item !== colour.key)
+                                    : [...draft.allowedHelmetColours, colour.key],
+                                })}
+                                className="sr-only"
+                              />
+                              <span
+                                className="h-3 w-3 rounded-full border border-black/15"
+                                style={{ backgroundColor: colour.swatch }}
+                              />
+                              {colour.label}
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="grid gap-3 md:grid-cols-3">
                     <label className="space-y-1.5">
-                      <span className="text-xs font-medium text-[var(--color-text-secondary)]">Minimum confidence</span>
+                      <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+                        {isHelmetColour ? "Minimum colour confidence" : "Minimum confidence"}
+                      </span>
                       <input
                         type="number"
                         min="0"
@@ -262,19 +348,21 @@ export function CameraCapabilityConfigPanel({
                         step="0.05"
                         value={draft.confidence}
                         onChange={(event) => patch(option.key, { confidence: event.target.value })}
-                        placeholder="Rule default"
+                        placeholder={isHelmetColour ? "0.45" : "Rule default"}
                         className={inputClasses}
                       />
                     </label>
                     <label className="space-y-1.5">
-                      <span className="text-xs font-medium text-[var(--color-text-secondary)]">Confirmation hits</span>
+                      <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+                        {isHelmetColour ? "Mismatch confirmation hits" : "Confirmation hits"}
+                      </span>
                       <input
                         type="number"
                         min="1"
                         step="1"
                         value={draft.threshold}
                         onChange={(event) => patch(option.key, { threshold: event.target.value })}
-                        placeholder="Rule default"
+                        placeholder={isHelmetColour ? "3" : "Rule default"}
                         className={inputClasses}
                       />
                     </label>
@@ -294,7 +382,13 @@ export function CameraCapabilityConfigPanel({
 
                   <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-secondary)]">
                     <Cpu className="h-3.5 w-3.5" />
-                    <span>{option.ruleId ? `YAML rule override: ${option.ruleId}` : "No safety rule is mapped for threshold overrides."}</span>
+                    <span>
+                      {isHelmetColour
+                        ? "Reuses the gated helmet detector; colour classification runs only inside fresh helmet boxes."
+                        : option.ruleId
+                          ? `YAML rule override: ${option.ruleId}`
+                          : "No safety rule is mapped for threshold overrides."}
+                    </span>
                     {option.classes.length > 0 && <span>Classes: {option.classes.join(", ")}</span>}
                   </div>
                 </div>

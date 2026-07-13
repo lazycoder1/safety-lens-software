@@ -16,6 +16,7 @@ export type CapabilityKey =
   | "mobile_phone"
   | "zone_intrusion"
   | "helmet_required"
+  | "helmet_color_compliance"
   | "rider_helmet_required"
   | "vest_required"
   | "gloves_required"
@@ -226,6 +227,14 @@ export interface Camera {
   ppe_rule_ids?: string[] | null
   safety_rule_ids?: string[] | null
   safety_rule_overrides?: Record<string, { confidence?: number | null; threshold?: number | null }> | null
+  helmet_colour_policy?: {
+    enabled: boolean
+    allowed_colours: string[]
+    min_confidence: number
+    confirmation_threshold: number
+    severity?: Severity
+  } | null
+  helmetColourCounts?: Record<string, number>
   custom_long_tail_terms?: string[] | null
   capability_windows?: CapabilityWindow[] | null
   scheduleTelemetry?: CameraScheduleTelemetry

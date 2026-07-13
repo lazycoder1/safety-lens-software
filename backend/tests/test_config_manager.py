@@ -237,7 +237,11 @@ def test_load_config_rebuilds_capabilities_from_safety_rule_ids_when_stale():
     assert "helmet_required" in camera["capabilities"]
     assert "hard hat" in camera["yoloe_classes"]
     assert "safety helmet" in camera["yoloe_classes"]
-    assert "hard hat" in camera["execution_plan"]["ppe_prompt_terms"]
+    assert camera["execution_plan"]["ppe_prompt_terms"][:3] == [
+        "motorcycle helmet",
+        "rider helmet",
+        "helmet",
+    ]
     assert camera["execution_plan"]["run_ppe_specialist"] is True
 
 

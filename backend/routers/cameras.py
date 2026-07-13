@@ -112,10 +112,14 @@ def _camera_public_payload(
     ] or cam.get("rules", [])
     detections = state.camera_detections.get(cam_id, [])
     detection_class_counts: dict[str, int] = {}
+    helmet_colour_counts: dict[str, int] = {}
     for detection in detections:
         class_name = detection.get("class")
         if class_name:
             detection_class_counts[class_name] = detection_class_counts.get(class_name, 0) + 1
+        helmet_colour = detection.get("helmet_colour")
+        if helmet_colour and helmet_colour != "unknown":
+            helmet_colour_counts[helmet_colour] = helmet_colour_counts.get(helmet_colour, 0) + 1
     detection_history = state.camera_detection_history.get(cam_id, [])
     recent_detection_history = detection_history[-30:]
     inference_fps_override = cam.get("inference_fps")
@@ -146,6 +150,7 @@ def _camera_public_payload(
         "ppe_rule_ids": cam.get("ppe_rule_ids", []),
         "safety_rule_ids": cam.get("safety_rule_ids", []),
         "safety_rule_overrides": cam.get("safety_rule_overrides", {}),
+        "helmet_colour_policy": cam.get("helmet_colour_policy", {}),
         "custom_long_tail_terms": cam.get("custom_long_tail_terms", []),
         "capability_model_overrides": cam.get("capability_model_overrides", {}),
         "fall_detection": cam.get("fall_detection", {}),
@@ -156,6 +161,7 @@ def _camera_public_payload(
         "status": "online" if runtime_status == "running" else "offline",
         "detectionsCount": len(detections),
         "detectionClassCounts": detection_class_counts,
+        "helmetColourCounts": helmet_colour_counts,
         "recentDetectionHistory": recent_detection_history,
         "recentDetectionClassCountsMax": _recent_detection_class_counts_max(recent_detection_history),
         "scheduleTelemetry": state.camera_schedule_telemetry.get(cam_id, {}),
@@ -373,6 +379,7 @@ class CameraPlanPreviewRequest(BaseModel):
     discovery_fingerprint: str = ""
     safety_rule_ids: list[str] = Field(default_factory=list)
     safety_rule_overrides: dict[str, Any] = Field(default_factory=dict)
+    helmet_colour_policy: dict[str, Any] = Field(default_factory=dict)
     yoloe_classes: list[str] = Field(default_factory=list)
     custom_long_tail_terms: list[str] = Field(default_factory=list)
     capability_model_overrides: dict[str, Any] = Field(default_factory=dict)
@@ -406,6 +413,7 @@ class CameraCreate(BaseModel):
     ppe_rule_ids: list[str] = Field(default_factory=list)
     safety_rule_ids: list[str] = Field(default_factory=list)
     safety_rule_overrides: dict[str, Any] = Field(default_factory=dict)
+    helmet_colour_policy: dict[str, Any] = Field(default_factory=dict)
     custom_long_tail_terms: list[str] = Field(default_factory=list)
     capability_model_overrides: dict[str, Any] = Field(default_factory=dict)
     capability_windows: list[dict[str, Any]] = Field(default_factory=list)
@@ -438,6 +446,7 @@ class CameraUpdate(BaseModel):
     ppe_rule_ids: Optional[list[str]] = None
     safety_rule_ids: Optional[list[str]] = None
     safety_rule_overrides: Optional[dict[str, Any]] = None
+    helmet_colour_policy: Optional[dict[str, Any]] = None
     custom_long_tail_terms: Optional[list[str]] = None
     capability_model_overrides: Optional[dict[str, Any]] = None
     capability_windows: Optional[list[dict[str, Any]]] = None
