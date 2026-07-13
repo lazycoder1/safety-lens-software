@@ -186,7 +186,7 @@
           <p><span class="tag pass">Recommended now</span></p>
           <p><strong>Planning cap:</strong> 20 cameras for an initial deployment, keeping roughly 20% device headroom.</p>
           <p><strong>Lab envelope:</strong> 25 connections under the tested workload.</p>
-          <p><strong>Live unique cameras proven today:</strong> 2. A multi-hour, full-stack test with 20–25 distinct feeds is still required before selling that number as certified capacity.</p>
+          <p><strong>Live unique cameras proven today:</strong> 4, covering every enabled camera found on the Techser camera LAN. A multi-hour, full-stack test with 20–25 distinct feeds is still required before selling that larger number as certified capacity.</p>
         </div>
       </div>
 
@@ -215,8 +215,8 @@
         <table>
           <thead><tr><th>Dimension</th><th>Starting point</th><th>Current measured state</th><th>Meaning</th></tr></thead>
           <tbody>
-            <tr><td>Live configuration</td><td>2 × roughly 960p feeds</td><td>2 live cameras, both fresh on NVDEC</td><td>The actual production configuration still has two cameras.</td></tr>
-            <tr><td>Detection cadence</td><td>about 1–2 FPS per camera</td><td>4 effective AI decisions/s per camera</td><td>2–4× higher per-camera decision cadence.</td></tr>
+            <tr><td>Live configuration</td><td>2 × roughly 960p feeds</td><td>4 distinct camera scenes, all fresh on NVDEC</td><td>Three publish at 640×360; the existing FRONT substream publishes at 352×288.</td></tr>
+            <tr><td>Detection cadence</td><td>about 1–2 FPS per camera</td><td>4 FPS configured ceiling; 1.228–2.943 FPS observed live</td><td>Motion-adaptive inference intentionally reduces unchanged scenes to a one-FPS heartbeat and runs faster when the scene changes.</td></tr>
             <tr><td>Aggregate scheduled work</td><td>about 2–4 decisions/s</td><td>100 effective decisions/s in the 25-connection test</td><td>About 25–50× aggregate scheduler throughput, under the exact tested rule mix.</td></tr>
             <tr><td>Capture path</td><td>960-wide frames moved farther than needed</td><td>NVDEC/VIC emits 640×360 directly; capture capped at 6 FPS</td><td>Less memory traffic and redundant resizing while the model still receives its native 640 input.</td></tr>
             <tr><td>Primary execution</td><td>small/single requests and bursty admission</td><td>YOLO26 Small INT8 batch-4 with 14 ms partial-group rendezvous</td><td>104.643 FPS isolated primary throughput and smoother remainder groups.</td></tr>
@@ -384,7 +384,7 @@
       </div>
 
       <div class="callout green" style="margin-top:18px">
-        <strong>Current live state after final cleanup:</strong> the Jetson serves the UI on port 3030 and the API on port 8000; <code>/api/ping</code> returns HTTP 200 with browser-compatible CORS. The edge still runs the hash-matched <code>36b2cfc</code> image with NVIDIA runtime, ten materialized mounts, and both configured cameras fresh on NVDEC.
+        <strong>Current live state after LAN expansion:</strong> the Jetson serves the UI on port 3030 and the API on port 8000; <code>/api/ping</code> returns HTTP 200 with browser-compatible CORS. The edge still runs the hash-matched <code>36b2cfc</code> image with NVIDIA runtime and ten materialized mounts. All four distinct LAN camera scenes remained fresh on NVDEC across a 600-second full-application soak, with 273/273 health samples reporting <code>ok</code> and zero inference, route, persistence, delivery, or queue failures.
       </div>
     </section>
 
@@ -558,6 +558,7 @@
         <p><strong>Primary report sources</strong></p>
         <ul class="source-list">
           <li><a href="../experiments/jetson-physical-camera-capacity-2026-07-13.md">Physical camera capacity</a></li>
+          <li><a href="../experiments/jetson-four-unique-lan-cameras-2026-07-13.md">Four unique LAN cameras</a></li>
           <li><a href="../experiments/jetson-rtdetrv4-small-placement-2026-07-12.md">RT-DETRv4-S placement</a></li>
           <li><a href="../experiments/jetson-ppe-substitution-2026-07-13.md">Tracked PPE substitution</a></li>
           <li><a href="../experiments/jetson-ppe-phase-weighting-2026-07-13.md">PPE phase weighting</a></li>
