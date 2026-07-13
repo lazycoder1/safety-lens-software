@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Rakshak Lens Jetson Optimization — Final Engineering Report</title>
+  <style>
+    :root {
+      --ink: #15221d;
+      --muted: #5b6863;
+      --paper: #f4f1e9;
+      --card: #fffdf8;
+      --line: #d9d5c9;
+      --green: #16654b;
+      --green-soft: #e1f0e8;
+      --amber: #9a5b0b;
+      --amber-soft: #fff0cf;
+      --red: #a3372d;
+      --red-soft: #f9e4df;
+      --blue: #245a73;
+      --blue-soft: #e2eff4;
+      --shadow: 0 16px 40px rgba(21, 34, 29, .08);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; overflow-x: hidden; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(36, 90, 115, .10), transparent 28rem),
+        linear-gradient(180deg, #ece8dc 0, var(--paper) 24rem);
+      color: var(--ink);
+      font: 15px/1.62 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow-x: hidden;
+    }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+    .shell, main, section, .section-head > *, .verdict > *, .split > *, .pipe-step { min-width: 0; }
+    .hero { padding: 68px 0 42px; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      margin-bottom: 18px; color: var(--green); font-size: 12px;
+      font-weight: 800; letter-spacing: .13em; text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 28px; height: 2px; background: currentColor; }
+    h1 { max-width: 900px; margin: 0; font-size: clamp(38px, 6vw, 72px); line-height: .98; letter-spacing: -.05em; overflow-wrap: anywhere; }
+    .dek { max-width: 800px; margin: 24px 0 0; color: var(--muted); font-size: 19px; line-height: 1.5; }
+    .stamp { margin-top: 22px; color: var(--muted); font-size: 13px; }
+    nav {
+      position: sticky; top: 0; z-index: 20; border-top: 1px solid rgba(217, 213, 201, .8);
+      border-bottom: 1px solid rgba(217, 213, 201, .9); background: rgba(244, 241, 233, .92);
+      backdrop-filter: blur(12px);
+    }
+    nav .shell { display: flex; gap: 22px; overflow-x: auto; padding: 12px 0; scrollbar-width: none; }
+    nav a { flex: 0 0 auto; color: var(--muted); font-size: 13px; font-weight: 700; text-decoration: none; }
+    nav a:hover { color: var(--ink); }
+    main { padding: 24px 0 80px; }
+    section { scroll-margin-top: 72px; margin: 34px 0; }
+    .section-head { display: grid; grid-template-columns: 220px 1fr; gap: 32px; align-items: start; margin-bottom: 18px; }
+    .section-num { color: var(--green); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    h2 { margin: 0; font-size: clamp(27px, 4vw, 42px); line-height: 1.12; letter-spacing: -.035em; overflow-wrap: anywhere; }
+    h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.015em; }
+    p { margin: 0 0 14px; }
+    .lead { color: var(--muted); font-size: 18px; }
+    .card {
+      border: 1px solid var(--line); border-radius: 18px; background: rgba(255, 253, 248, .92);
+      box-shadow: var(--shadow); padding: 24px;
+    }
+    .verdict {
+      display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px;
+      border: 1px solid #9abdae; border-radius: 22px; background: linear-gradient(135deg, #f8fff9, #e4f1eb);
+      padding: 28px; box-shadow: var(--shadow);
+    }
+    .verdict strong.big { display: block; margin-bottom: 10px; font-size: clamp(26px, 4vw, 43px); line-height: 1.08; letter-spacing: -.035em; overflow-wrap: anywhere; }
+    .verdict .side { border-left: 1px solid #aecabb; padding-left: 24px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 18px; }
+    .metric { border: 1px solid var(--line); border-radius: 16px; background: var(--card); padding: 18px; }
+    .metric .value { display: block; font-size: 30px; font-weight: 850; line-height: 1; letter-spacing: -.04em; }
+    .metric .label { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .callout { border-left: 4px solid var(--amber); border-radius: 0 14px 14px 0; background: var(--amber-soft); padding: 18px 20px; }
+    .callout.red { border-color: var(--red); background: var(--red-soft); }
+    .callout.blue { border-color: var(--blue); background: var(--blue-soft); }
+    .callout.green { border-color: var(--green); background: var(--green-soft); }
+    .tag { display: inline-block; border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+    .pass { color: var(--green); background: var(--green-soft); }
+    .warn { color: var(--amber); background: var(--amber-soft); }
+    .reject { color: var(--red); background: var(--red-soft); }
+    .info { color: var(--blue); background: var(--blue-soft); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #eeeadf; color: #3e4b46; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 18px 0; }
+    .pipe-step { position: relative; min-height: 142px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); padding: 18px; }
+    .pipe-step:not(:last-child)::after { content: "→"; position: absolute; right: -12px; top: 52px; z-index: 2; color: var(--green); font-size: 20px; font-weight: 900; }
+    .pipe-step b { display: block; margin-bottom: 7px; }
+    .pipe-step small { color: var(--muted); }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .timeline { display: grid; gap: 2px; }
+    .timeline-row { display: grid; grid-template-columns: 130px 1fr; gap: 18px; border-left: 3px solid var(--line); padding: 0 0 24px 20px; }
+    .timeline-row:last-child { padding-bottom: 0; }
+    .timeline-row .when { color: var(--green); font-weight: 850; }
+    .bar { height: 9px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #ded9cd; }
+    .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+    .ledger { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    details { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 0 16px; }
+    summary { cursor: pointer; padding: 14px 0; font-weight: 800; }
+    details p, details ul { color: var(--muted); }
+    ul, ol { padding-left: 20px; }
+    li { margin-bottom: 8px; }
+    code { border-radius: 5px; background: #eae6dc; padding: 2px 5px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .source-list { columns: 2; column-gap: 28px; }
+    .source-list li { break-inside: avoid; }
+    footer { border-top: 1px solid var(--line); padding: 28px 0 48px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 850px) {
+      .section-head, .verdict, .split { grid-template-columns: 1fr; }
+      .verdict .side { border-left: 0; border-top: 1px solid #aecabb; padding: 20px 0 0; }
+      .metric-grid { grid-template-columns: 1fr 1fr; }
+      .pipeline { grid-template-columns: 1fr; }
+      .pipe-step { min-height: 0; }
+      .pipe-step:not(:last-child)::after { content: "↓"; right: auto; left: 24px; top: auto; bottom: -19px; }
+      .ledger { grid-template-columns: 1fr; }
+      .source-list { columns: 1; }
+    }
+    @media (max-width: 520px) {
+      .shell { width: min(calc(100% - 22px), 1180px); }
+      .hero { padding-top: 42px; }
+      .metric-grid { grid-template-columns: 1fr; }
+      .card, .verdict { padding: 20px; }
+      .timeline-row { grid-template-columns: 1fr; gap: 4px; }
+    }
+    @media print {
+      body { background: white; }
+      nav { display: none; }
+      .shell { width: 100%; }
+      .hero { padding-top: 20px; }
+      .card, .verdict, .metric, details { box-shadow: none; break-inside: avoid; }
+      section { break-before: auto; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="shell">
+      <div class="eyebrow">Final engineering report · Orin NX</div>
+      <h1>What the Jetson can actually support</h1>
+      <p class="dek">A candid close-out of the Rakshak Lens detection and alerting optimization work: measured capacity, model placement, test method, rejected ideas, engineering debt, and the reason the UI was stuck on “Connecting to server…”.</p>
+      <p class="stamp">Evidence cut: 13 July 2026 · Code: <code>91f7226</code> on <code>master</code> · Device: NVIDIA Orin NX, JetPack 5.1.3, TensorRT 8.5.2.2</p>
+    </div>
+  </header>
+
+  <nav aria-label="Report sections">
+    <div class="shell">
+      <a href="#verdict">Verdict</a>
+      <a href="#progress">Progress</a>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#models">RT-DETR vs YOLO</a>
+      <a href="#method">Test method</a>
+      <a href="#results">Results</a>
+      <a href="#experiments">Experiment ledger</a>
+      <a href="#bottlenecks">Bottlenecks</a>
+      <a href="#ui">UI incident</a>
+      <a href="#conclusion">Conclusion</a>
+    </div>
+  </nav>
+
+  <main class="shell">
+    <section id="verdict">
+      <div class="section-head">
+        <div class="section-num">01 · Executive verdict</div>
+        <div>
+          <h2>25 is a measured device envelope, not yet a 25-camera production certification.</h2>
+          <p class="lead">The optimization is real, but the labels around the number matter.</p>
+        </div>
+      </div>
+
+      <div class="verdict">
+        <div>
+          <strong class="big">Use YOLO26 Small as the primary. Use RT-DETRv4-S only as a gated phone-recall specialist.</strong>
+          <p>The repeatable combined harness sustained 25 RTSP connections, 4 effective AI decisions per camera per second, worst-case 1 FPS PPE work on every camera, and 1 RT-DETR frame per second across the whole Jetson. Two 60-second runs completed 6,000/6,000 decisions each with no drops or failures.</p>
+        </div>
+        <div class="side">
+          <p><span class="tag pass">Recommended now</span></p>
+          <p><strong>Planning cap:</strong> 20 cameras for an initial deployment, keeping roughly 20% device headroom.</p>
+          <p><strong>Lab envelope:</strong> 25 connections under the tested workload.</p>
+          <p><strong>Live unique cameras proven today:</strong> 2. A multi-hour, full-stack test with 20–25 distinct feeds is still required before selling that number as certified capacity.</p>
+        </div>
+      </div>
+
+      <div class="metric-grid">
+        <div class="metric"><span class="value">25</span><span class="label">repeatable lab connections</span></div>
+        <div class="metric"><span class="value">4 FPS</span><span class="label">effective AI cadence / camera</span></div>
+        <div class="metric"><span class="value">100/s</span><span class="label">aggregate effective decisions</span></div>
+        <div class="metric"><span class="value">0</span><span class="label">drops and failures in 2 × 60 s</span></div>
+      </div>
+
+      <div class="callout red" style="margin-top:18px">
+        <strong>What 25 does not mean.</strong> It was not 25 distinct office cameras configured through the UI and soaked through alert persistence/delivery for a shift. Only four unique NVR channels were reachable; the capture harness opened those channels round-robin 25 times while the production-shaped inference harness drove the real model server. This validates Jetson decode, memory, transport, batching, and model pressure. It does not validate 25 unique network paths, 25 independent scene distributions, or the entire UI/database/notification stack at that count.
+      </div>
+    </section>
+
+    <section id="progress">
+      <div class="section-head">
+        <div class="section-num">02 · Where the gain came from</div>
+        <div>
+          <h2>From a fragile two-camera demo to a measured multi-camera scheduler.</h2>
+          <p class="lead">The gain is a stack of smaller changes, not one faster model.</p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Dimension</th><th>Starting point</th><th>Current measured state</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td>Live configuration</td><td>2 × roughly 960p feeds</td><td>2 live cameras, both fresh on NVDEC</td><td>The actual production configuration still has two cameras.</td></tr>
+            <tr><td>Detection cadence</td><td>about 1–2 FPS per camera</td><td>4 effective AI decisions/s per camera</td><td>2–4× higher per-camera decision cadence.</td></tr>
+            <tr><td>Aggregate scheduled work</td><td>about 2–4 decisions/s</td><td>100 effective decisions/s in the 25-connection test</td><td>About 25–50× aggregate scheduler throughput, under the exact tested rule mix.</td></tr>
+            <tr><td>Capture path</td><td>960-wide frames moved farther than needed</td><td>NVDEC/VIC emits 640×360 directly; capture capped at 6 FPS</td><td>Less memory traffic and redundant resizing while the model still receives its native 640 input.</td></tr>
+            <tr><td>Primary execution</td><td>small/single requests and bursty admission</td><td>YOLO26 Small INT8 batch-4 with 14 ms partial-group rendezvous</td><td>104.643 FPS isolated primary throughput and smoother remainder groups.</td></tr>
+            <tr><td>Specialists</td><td>periodic/additive expensive work</td><td>rule, person, track, zone, and schedule gated; PPE/RT substitute a primary slot</td><td>Specialist accuracy is retained without blindly adding work on every frame.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="timeline" style="margin-top:22px">
+        <div class="timeline-row"><div class="when">Baseline</div><div><strong>2 cameras at 1–2 FPS.</strong> Full-frame work, avoidable copies, high-resolution phone probing, and weak separation between capture capacity and inference capacity.</div></div>
+        <div class="timeline-row"><div class="when">Transport</div><div><strong>Raw local BGR and memoryview.</strong> Removed JPEG encode/decode from the local edge-to-model hop and avoided another full-frame byte copy.</div></div>
+        <div class="timeline-row"><div class="when">Batching</div><div><strong>Batch-4 plus partial-group smoothing.</strong> Matched cross-camera scheduling to the TensorRT engine; rejected batch-8 and server-side queues when their tails were worse.</div></div>
+        <div class="timeline-row"><div class="when">Pipeline</div><div><strong>Context-gated specialists and slot substitution.</strong> The scheduler spends expensive inference only where the rule can produce an actionable alert.</div></div>
+        <div class="timeline-row"><div class="when">Physical</div><div><strong>Direct 640 capture, 6 FPS cap, 100 ms startup stagger.</strong> The final combined boundary became 25 repeatable connections; 26 stayed provisional and 27 failed.</div></div>
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <div class="section-head">
+        <div class="section-num">03 · Final pipeline</div>
+        <div>
+          <h2>Cheap decisions first; expensive models only when an alert remains possible.</h2>
+          <p class="lead">This is the right conceptual pipeline for this Jetson.</p>
+        </div>
+      </div>
+
+      <div class="pipeline" aria-label="Detection pipeline">
+        <div class="pipe-step"><b>1 · Capture</b><small>NVDEC, direct 640-wide output, 6 FPS cap, staggered connection startup.</small></div>
+        <div class="pipe-step"><b>2 · Primary</b><small>YOLO26 Small INT8 at 4 effective FPS. Person, vehicle, animal, and coarse phone context.</small></div>
+        <div class="pipe-step"><b>3 · Context</b><small>Fresh-result reuse, person geometry, tracking context, configured zones, schedules, and rule compilation.</small></div>
+        <div class="pipe-step"><b>4 · Specialist</b><small>PPE or RT-DETR only when needed. The specialist replaces a scheduled primary slot instead of becoming additive load.</small></div>
+        <div class="pipe-step"><b>5 · Alert</b><small>Association, confidence, zone policy, persistence, delivery queue, retry, and health telemetry.</small></div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <h3>Why not a separate “COCO pre-filter”?</h3>
+          <p>YOLO26 Small already is the COCO primary/filter. Adding another detector before it would duplicate decode, preprocessing, model execution, and postprocessing. The useful filter is the current primary result plus cheap geometry, track freshness, zones, schedules, and rule state.</p>
+        </div>
+        <div class="card">
+          <h3>Why substitution matters</h3>
+          <p>Running PPE or RT-DETR on top of all four primary frames increases aggregate GPU demand. Replacing one due primary slot preserves a four-decision-per-second control loop while spending that slot on higher-value specialist evidence.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="models">
+      <div class="section-head">
+        <div class="section-num">04 · Model decision</div>
+        <div>
+          <h2>RT-DETRv4-S improves phone recall, but it is the wrong universal primary.</h2>
+          <p class="lead">YOLO Nano is likely cheaper, but it was not tested and cannot inherit Small’s accuracy result.</p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Candidate</th><th class="num">Measured throughput</th><th>Phone alert set</th><th>Best placement</th><th>Verdict</th></tr></thead>
+          <tbody>
+            <tr><td><strong>YOLO26 Small INT8, batch-4</strong></td><td class="num">104.643 FPS</td><td>4/6 positives, 0/4 negatives</td><td>Full-frame primary and cheap filter</td><td><span class="tag pass">Keep</span></td></tr>
+            <tr><td><strong>RT-DETRv4-S FP16, batch-2</strong><br><small>10.4M parameters</small></td><td class="num">43.792 FPS</td><td>5/6 positives, 0/4 actionable negatives after person geometry</td><td>Track/person/zone-gated phone specialist</td><td><span class="tag info">Conditional</span></td></tr>
+            <tr><td><strong>YOLO26 Nano</strong></td><td class="num">Not measured</td><td>Not measured on the labelled set</td><td>Possible future primary only after parity testing</td><td><span class="tag warn">Unproven</span></td></tr>
+            <tr><td><strong>RF-DETR Small FP16</strong></td><td class="num">31.05 FPS</td><td>5/6 positives, 1/4 actionable negatives</td><td>None on this 8 GB target</td><td><span class="tag reject">Reject</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="split" style="margin-top:18px">
+        <div class="card">
+          <h3>If forced to choose RT-DETR-S or YOLO Nano as the primary</h3>
+          <p><strong>Nano is computationally more plausible;</strong> RT-DETR-S is less than half the measured throughput of the current Small primary and has an engine-only freshness ceiling of 10 cameras at 4 FPS before PPE or transport. But there is no accuracy evidence here that Nano catches the required small/distant people, phones, vehicles, or PPE context. It should not be promoted on a speed assumption.</p>
+        </div>
+        <div class="card">
+          <h3>The actual choice</h3>
+          <p><strong>Neither replaces the current Small primary.</strong> Small has the measured accuracy/capacity contract. RT-DETR-S earns one device-wide frame per second only for phone-recall escalation. Nano remains a future experiment, not a conclusion.</p>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:18px">
+        <strong>Why Nano was not used.</strong> The stated product constraint was “Small, not Nano,” and the goal included acceptable accuracy, not camera count at any cost. Small-object recall is exactly where a Nano model is most likely to trade quality for speed. At the 25-camera boundary, capture/memory traffic and the FP16 PPE latency tail were material bottlenecks, so a faster primary alone would not automatically turn 25 into a safe production tier.
+      </div>
+    </section>
+
+    <section id="method">
+      <div class="section-head">
+        <div class="section-num">05 · How 20 and 25 were tested</div>
+        <div>
+          <h2>The tests covered real decode and real inference, but not 25 unique full-stack cameras.</h2>
+          <p class="lead">Here is the exact boundary between evidence and extrapolation.</p>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <h3>Physical capture load</h3>
+          <ol>
+            <li>Inventory found four reachable office NVR channels. Channels 5–16 were unavailable.</li>
+            <li>The harness opened the four real main streams round-robin to reach 20–29 simultaneous RTSP sessions.</li>
+            <li>Every connection used the real GStreamer/NVDEC path. Frame counts, minimum and aggregate FPS, open time, CPU time, and peak RSS were recorded.</li>
+            <li>The final profile emitted 640×360, targeted 6 FPS, and staggered opens to avoid a connection storm.</li>
+          </ol>
+        </div>
+        <div class="card">
+          <h3>Inference and specialist load</h3>
+          <ol>
+            <li>The exact Jetson model server handled YOLO26 Small INT8 primary, YOLOE-26S FP16 PPE, and RT-DETRv4-S FP16.</li>
+            <li>Every camera was scheduled for four effective decisions per second.</li>
+            <li>The strict case forced one PPE FPS on every camera, not only the observed live duty, plus one RT-DETR FPS across the device.</li>
+            <li>Requests went through the edge inference transport, admission limits, batch routes, and substitution scheduler.</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:18px">
+        <h3>Pass/fail gate</h3>
+        <div class="metric-grid">
+          <div class="metric"><span class="value">100%</span><span class="label">scheduled decisions complete</span></div>
+          <div class="metric"><span class="value">4.000</span><span class="label">minimum effective FPS</span></div>
+          <div class="metric"><span class="value">&lt;250 ms</span><span class="label">maximum freshness tail</span></div>
+          <div class="metric"><span class="value">0</span><span class="label">overloads and failures</span></div>
+        </div>
+        <p style="margin-top:16px">A case was rejected even when every request completed if its worst latency crossed the 250 ms camera period. This is why 25 cameras at 960/8 and 640/8 were rejected, and why 640/6 became the selected profile.</p>
+      </div>
+
+      <div class="callout blue" style="margin-top:18px">
+        <strong>Validation strength:</strong> two consecutive 60-second 25-camera inference runs used one stable set of 25 live decode sessions; both completed 6,000/6,000 effective decisions. Accuracy was separately replayed through the real phone and PPE worker/alert rules at 960 and 640 capture widths. <strong>Validation gap:</strong> a 60-second harness is a boundary benchmark, not an 8–24 hour production soak, and duplicated NVR sessions are not a substitute for 25 distinct feeds.
+      </div>
+    </section>
+
+    <section id="results">
+      <div class="section-head">
+        <div class="section-num">06 · Measured results</div>
+        <div>
+          <h2>25 repeated. 26 did not repeat cleanly. 27 failed.</h2>
+          <p class="lead">The selected boundary is based on exact workload completion and tail latency, not average FPS.</p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th class="num">Connections</th><th>Capture profile</th><th>Duration</th><th class="num">Effective decisions</th><th class="num">Drops / failures</th><th class="num">Primary max</th><th class="num">PPE max</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td class="num">20</td><td>960 / 8 FPS</td><td>30 s</td><td class="num">2,400 / 2,400</td><td class="num">0 / 0</td><td class="num">60.944 ms</td><td class="num">96.283 ms</td><td><span class="tag pass">Pass</span></td></tr>
+            <tr><td class="num">24</td><td>960 / 8 FPS</td><td>30 s</td><td class="num">2,880 / 2,880</td><td class="num">0 / 0</td><td class="num">132.988 ms</td><td class="num">199.690 ms</td><td><span class="tag pass">Pass</span></td></tr>
+            <tr><td class="num">25</td><td>960 / 8 FPS</td><td>30 s</td><td class="num">3,000 / 3,000</td><td class="num">0 / 0</td><td class="num">169.652 ms</td><td class="num">258.456 ms</td><td><span class="tag reject">Reject tail</span></td></tr>
+            <tr><td class="num">25</td><td>640 / 8 FPS</td><td>60 s</td><td class="num">6,000 / 6,000</td><td class="num">0 / 0</td><td class="num">143.432 ms</td><td class="num">253.534 ms</td><td><span class="tag reject">Reject tail</span></td></tr>
+            <tr><td class="num">25</td><td>640 / 6 FPS</td><td>60 s</td><td class="num">6,000 / 6,000</td><td class="num">0 / 0</td><td class="num">141.232 ms</td><td class="num">222.257 ms</td><td><span class="tag pass">Pass run 1</span></td></tr>
+            <tr><td class="num">25</td><td>640 / 6 FPS</td><td>60 s</td><td class="num">6,000 / 6,000</td><td class="num">0 / 0</td><td class="num">152.734 ms</td><td class="num">231.331 ms</td><td><span class="tag pass">Pass run 2</span></td></tr>
+            <tr><td class="num">26</td><td>640 / 6 FPS</td><td>60 s</td><td class="num">6,240 / 6,240</td><td class="num">0 / 0</td><td class="num">166.410 ms</td><td class="num">230.636 ms</td><td><span class="tag warn">Provisional</span></td></tr>
+            <tr><td class="num">27</td><td>640 / 4 FPS</td><td>30 s</td><td class="num">3,156 / 3,240</td><td class="num">84 / 0</td><td class="num">267.093 ms</td><td class="num">340.290 ms</td><td><span class="tag reject">Reject</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="split" style="margin-top:18px">
+        <div class="card">
+          <h3>25-session capture result</h3>
+          <p><strong>25/25 opened</strong>, minimum 5.942 FPS, 149.339 aggregate capture FPS, 72.33% of one CPU core, and 448.973 MB peak process RSS. Direct capture dimensions were 640×360.</p>
+          <div class="bar" title="149.339 of 150 target FPS"><span style="width:99.6%"></span></div>
+        </div>
+        <div class="card">
+          <h3>Accuracy preservation at direct 640 capture</h3>
+          <p>RT-DETR phone outcomes stayed 5/6 positives and 0/4 negatives with identical actionable per-image outcomes. All 18 PPE frames and all 18 PPE violation-rule outcomes matched the prior 960 capture path.</p>
+        </div>
+      </div>
+
+      <div class="callout green" style="margin-top:18px">
+        <strong>Current live state after final cleanup:</strong> the Jetson serves the UI on port 3030 and the API on port 8000; <code>/api/ping</code> returns HTTP 200 with browser-compatible CORS. The edge still runs the hash-matched <code>36b2cfc</code> image with NVIDIA runtime, ten materialized mounts, and both configured cameras fresh on NVDEC.
+      </div>
+    </section>
+
+    <section id="experiments">
+      <div class="section-head">
+        <div class="section-num">07 · Experiment ledger</div>
+        <div>
+          <h2>What was tried, promoted, and rejected.</h2>
+          <p class="lead">Rejected experiments are part of the result: they prevented attractive averages from becoming bad production changes.</p>
+        </div>
+      </div>
+
+      <div class="ledger">
+        <details open><summary>Primary model and resolution</summary><ul>
+          <li><strong>YOLO26 Small INT8 640:</strong> promoted as the only universal COCO primary.</li>
+          <li><strong>512 primary:</strong> rejected; lost person context needed for downstream gates.</li>
+          <li><strong>608 primary:</strong> rejected; fixed-engine routing did not create a safe gain.</li>
+          <li><strong>960/832 phone probes:</strong> 832 was faster but did not improve actionable alert outcomes; periodic high-resolution YOLO probing was retired.</li>
+          <li><strong>Person crop:</strong> rejected; doubled work, did not improve phone recall, and created a negative.</li>
+          <li><strong>YOLO Nano:</strong> intentionally not used or benchmarked; no parity evidence.</li>
+        </ul></details>
+
+        <details open><summary>RT-DETR and phone recall</summary><ul>
+          <li><strong>RT-DETR Large:</strong> rejected after Jetson unified-memory failures.</li>
+          <li><strong>RT-DETRv4-S:</strong> exported, parity checked, built as FP16 batch-1/batch-2, and benchmarked; rejected as primary, promoted conceptually as one-FPS device-wide gated specialist.</li>
+          <li><strong>RF-DETR Small:</strong> built at opset 16 but rejected for latency, false positive, memory, and integration cost.</li>
+          <li><strong>RT substitution:</strong> selected over additive RT work; keeps four effective decisions per camera.</li>
+          <li><strong>Phone association geometry:</strong> widened horizontally to recover handheld-phone placement without enabling raw RT false positives.</li>
+          <li><strong>One-second context hold:</strong> rejected; increased specialist duty without recovering an extra helmet event.</li>
+        </ul></details>
+
+        <details><summary>Batching and scheduling</summary><ul>
+          <li><strong>Edge-side microbatch:</strong> promoted; batching before HTTP avoids model-server queue ambiguity.</li>
+          <li><strong>Batch-2 and batch-4:</strong> promoted; batch-4 raised isolated primary throughput to 104.643 FPS.</li>
+          <li><strong>Batch-8:</strong> rejected; throughput/tail behavior did not beat batch-4 safely.</li>
+          <li><strong>Adaptive 2/4 routing:</strong> promoted with a 6 ms early flush for exact pairs.</li>
+          <li><strong>14 ms partial-group rendezvous:</strong> promoted; reduced expensive singleton remainder work.</li>
+          <li><strong>Direct singleton bypass:</strong> rejected; worse p95 and maximum latency.</li>
+          <li><strong>Model-server cross-camera batching:</strong> rejected; timeout, ownership, and tail behavior were worse.</li>
+          <li><strong>Work-weighted camera phase spacing:</strong> rejected; shifted bursts without a reliable boundary gain.</li>
+          <li><strong>0.70 partial-phase weight:</strong> promoted for the final remainder group.</li>
+          <li><strong>3 FPS primary:</strong> rejected; reduced cadence without producing a defensible capacity gain.</li>
+        </ul></details>
+
+        <details><summary>Specialist control</summary><ul>
+          <li><strong>Rule/context gating:</strong> promoted; specialists run only when their rule can become actionable.</li>
+          <li><strong>Tracked PPE substitution:</strong> promoted with 0.5 FPS scout and 1 FPS confirmation cadence.</li>
+          <li><strong>Primary/PPE overlap:</strong> concurrent independent execution retained; forced serialization increased queue occupancy.</li>
+          <li><strong>Specialist microbatch:</strong> promoted for compatible primary/PPE pairs.</li>
+          <li><strong>PPE INT8:</strong> rejected despite 24% mean speed gain; detections collapsed from 13 to 4 on the 18-image corpus.</li>
+          <li><strong>YOLOE boxes-only postprocess:</strong> rejected; did not improve the supported boundary.</li>
+          <li><strong>ByteTrack as a boolean filter:</strong> rejected; added tail and sparse IDs at low FPS. Tracking remains useful when dwell/identity features require it.</li>
+        </ul></details>
+
+        <details><summary>Frames and transport</summary><ul>
+          <li><strong>Immutable captured inference frame:</strong> promoted; stopped an asynchronous path from copying/mutating the wrong frame.</li>
+          <li><strong>Raw local BGR transport:</strong> promoted; avoided local JPEG encode/decode.</li>
+          <li><strong>Byte-cast memoryview:</strong> promoted; avoided a full 960×540 BGR copy, measured about 249× cheaper than <code>tobytes()</code>.</li>
+          <li><strong>Bounded admission:</strong> retained; excess work drops visibly instead of building an unbounded stale queue.</li>
+          <li><strong>Metadata caching/breaker:</strong> retained to avoid repeated control-plane model metadata calls during failure.</li>
+        </ul></details>
+
+        <details><summary>Capture and deployment</summary><ul>
+          <li><strong>NVDEC output dropping:</strong> used to align 25 FPS source streams to the useful capture rate.</li>
+          <li><strong>Direct 640 NVDEC/VIC output:</strong> promoted after phone/PPE alert parity replay.</li>
+          <li><strong>6 FPS capture cap:</strong> promoted; 8 FPS crossed the PPE tail at 25, while 6 preserved 4 FPS AI plus live-view headroom.</li>
+          <li><strong>100 ms startup stagger:</strong> promoted; concurrent 29-session open was unreliable, while 50–250 ms stagger opened all 29.</li>
+          <li><strong>Docker NVIDIA runtime preservation:</strong> repaired after an earlier recreation silently fell back to CPU decode.</li>
+          <li><strong>Physical combined boundary:</strong> 25 pass, 26 provisional, 27 reject.</li>
+          <li><strong>UI/API port mapping:</strong> restored in final cleanup after a portless swap broke browser connectivity.</li>
+        </ul></details>
+      </div>
+    </section>
+
+    <section id="bottlenecks">
+      <div class="section-head">
+        <div class="section-num">08 · Bottlenecks and engineering debt</div>
+        <div>
+          <h2>The biggest problems were orchestration and evidence quality, not just model FLOPS.</h2>
+          <p class="lead">These are the practices that most distorted capacity or made changes unsafe.</p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Severity</th><th>Finding</th><th>Impact</th><th>Current state</th></tr></thead>
+          <tbody>
+            <tr><td><span class="tag reject">High</span></td><td>Inference-only “camera equivalents” were discussed as physical camera support.</td><td>Excluded RTSP decode, memory movement, NVR startup, and live frame pressure; 27 passed inference alone but failed combined load.</td><td>Corrected. Physical and inference-only tiers are now separate.</td></tr>
+            <tr><td><span class="tag reject">High</span></td><td>Container swaps eventually dropped the public API port, then cloned that broken state.</td><td>UI stayed on “Connecting to server…” even while inference ran internally.</td><td>Port restored; browser ping now returns 200. Promotion process still needs a required-port invariant.</td></tr>
+            <tr><td><span class="tag reject">High</span></td><td>Ad-hoc container recreation used <code>volumes-from</code> against exited rollback containers.</td><td>Production silently depended on rollback lifecycle and bypassed the safe swap tool’s topology guard.</td><td>Removed from the live container during final cleanup; ten mounts are materialized directly.</td></tr>
+            <tr><td><span class="tag reject">High</span></td><td>Docker OCI runtime was once not preserved.</td><td>NVIDIA plugins were blacklisted and capture silently fell back to CPU.</td><td>Repair and runtime-cloning tests exist; live runtime is <code>nvidia</code>.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>Specialist work was additive or periodic instead of actionability-driven.</td><td>High-resolution phone/PPE bursts consumed capacity even when no alert was possible.</td><td>Replaced by rule/context gating and slot substitution.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>All RTSP workers opened concurrently.</td><td>NVR/NVDEC allocation storms made 29 starts unreliable.</td><td>100 ms startup stagger promoted.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>Capture generated 960-wide frames for fixed 640-input engines.</td><td>Redundant VIC/host resize and memory traffic.</td><td>Direct 640 output promoted with alert parity evidence.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>Capture ran at 8 FPS for a 4 FPS AI loop.</td><td>Moved twice the useful frames and pushed PPE tail over 250 ms at 25 cameras.</td><td>6 FPS selected; never allowed below AI cadence.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>Benchmarks initially used one duplicated source and omitted RSS.</td><td>Could hide source and unified-memory limits.</td><td>Harness now distributes channels, staggers opens, and records peak RSS.</td></tr>
+            <tr><td><span class="tag warn">Medium</span></td><td>A PPE confirmation setting was wired to the neighboring phone planner.</td><td>A benchmark/runtime mismatch could have invalidated specialist cadence.</td><td>Fixed and guarded by worker-semantics tests.</td></tr>
+            <tr><td><span class="tag info">Open</span></td><td>Only four unique office channels were reachable.</td><td>25-session results do not include 25 independent source/network/scene distributions.</td><td>Unresolved evidence gap; requires a distinct-camera soak.</td></tr>
+            <tr><td><span class="tag info">Open</span></td><td>60-second capacity tests are short.</td><td>Do not expose thermal soak, long-run leaks, NVR reconnect churn, alert queue buildup, or day/night scene shifts.</td><td>Use 20 as planning cap until an 8–24 hour full-stack soak passes.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="ui">
+      <div class="section-head">
+        <div class="section-num">09 · “Connecting to server…”</div>
+        <div>
+          <h2>The UI was correct: its API endpoint was unreachable from the browser.</h2>
+          <p class="lead">This was not GPU overload and not evidence that the 25-session model test had failed.</p>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <h3>Root cause</h3>
+          <p>The login page polls <code>http://&lt;Jetson host&gt;:8000/api/ping</code> every three seconds. The frontend was reachable on port 3030, but the edge container had <strong>no host binding for port 8000</strong>. Host and remote-browser curls both returned connection refused. The frontend Nginx configuration served static files only and had no API proxy; the frontend and edge containers were also on different Docker networks.</p>
+        </div>
+        <div class="card">
+          <h3>Why it coexisted with “25-camera support”</h3>
+          <p>The load harness called the model server/edge path inside the Jetson’s Docker network, where inference was healthy. The UI runs in a user’s browser and needs the host-published port. Compute-plane success and browser control-plane reachability are separate contracts; only the first had been checked after the portless swaps.</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:18px">
+        <h3>Timeline and cleanup</h3>
+        <ul>
+          <li>All preserved production edge containers before 12 July 2026 22:52 exposed <code>8000:8000</code>.</li>
+          <li>The first portless production replacement appeared at that time; later swaps cloned its empty port set.</li>
+          <li>On 13 July, the current hash-identical image was recreated with all inspected environment, mounts, devices, NVIDIA runtime, restart policy, and network preserved; only <code>8000:8000</code> was restored.</li>
+          <li>The temporary <code>volumes-from</code> dependency was removed by materializing the same ten mounts directly. The prior container remains as rollback.</li>
+          <li>Acceptance: external <code>/api/ping</code> HTTP 200, <code>Access-Control-Allow-Origin: *</code>, both cameras fresh, and both on <code>gstreamer_nvdec</code>.</li>
+        </ul>
+      </div>
+
+      <div class="callout green" style="margin-top:18px"><strong>Outcome:</strong> the login status now has the network contract it needs to show “Server ready.” If a browser still displays the old text, reload the page once to clear an already-open failed polling cycle; the server endpoint itself is now reachable.</div>
+    </section>
+
+    <section id="conclusion">
+      <div class="section-head">
+        <div class="section-num">10 · Close-out</div>
+        <div>
+          <h2>This chapter is complete. Stop tuning and validate the deployment claim.</h2>
+          <p class="lead">The remaining work is evidence collection, not another model or scheduler tweak.</p>
+        </div>
+      </div>
+
+      <div class="verdict">
+        <div>
+          <strong class="big">Final architecture: YOLO26 Small primary + context/zone rules + conditional PPE and RT-DETR specialists.</strong>
+          <p>Keep 4 effective AI FPS per camera, 6 FPS capture, direct 640 NVDEC, batch-4 primary/PPE, a 0.70 remainder phase, and one aggregate RT-DETR frame per second. Do not switch the primary to RT-DETR. Do not switch to Nano without a site-labelled accuracy and alert-parity gate.</p>
+        </div>
+        <div class="side">
+          <p><strong>Sell/plan today:</strong> 20-camera initial cap with headroom, explicitly pending site validation.</p>
+          <p><strong>Engineering envelope:</strong> 25 connections under the measured workload.</p>
+          <p><strong>Next gate:</strong> 20–25 distinct cameras, 8–24 hours, full application workers, real zones/rules, alert persistence/delivery, reconnects, and thermal telemetry.</p>
+        </div>
+      </div>
+
+      <div class="callout red" style="margin-top:18px">
+        <strong>Do not claim “25 production cameras supported” yet.</strong> Claim “25-session Jetson resource envelope; 20-camera conservative planning cap pending distinct-feed full-stack soak.” That statement matches the evidence and will survive scrutiny.
+      </div>
+    </section>
+
+    <section id="sources">
+      <div class="section-head">
+        <div class="section-num">Appendix · Evidence</div>
+        <div><h2>Repository and raw-device evidence</h2></div>
+      </div>
+      <div class="card">
+        <p><strong>Primary report sources</strong></p>
+        <ul class="source-list">
+          <li><a href="../experiments/jetson-physical-camera-capacity-2026-07-13.md">Physical camera capacity</a></li>
+          <li><a href="../experiments/jetson-rtdetrv4-small-placement-2026-07-12.md">RT-DETRv4-S placement</a></li>
+          <li><a href="../experiments/jetson-ppe-substitution-2026-07-13.md">Tracked PPE substitution</a></li>
+          <li><a href="../experiments/jetson-ppe-phase-weighting-2026-07-13.md">PPE phase weighting</a></li>
+          <li><a href="../experiments/jetson-four-frame-microbatch-2026-07-12.md">Batch-4 microbatch</a></li>
+          <li><a href="../experiments/jetson-partial-group-smoothing-2026-07-13.md">Partial-group smoothing</a></li>
+          <li><a href="../experiments/jetson-small-primary-filter-rfdetr-2026-07-12.md">Small primary and RF-DETR</a></li>
+          <li><a href="../operations/jetson-container-swap.md">Container promotion and rollback</a></li>
+        </ul>
+        <p><strong>Raw Jetson artifacts</strong> (device-local, credential-free results):</p>
+        <ul>
+          <li><code>/opt/rakshak-lens/model-server-models/experiments/physical-25-dual-inference/</code></li>
+          <li><code>/opt/rakshak-lens/model-server-models/experiments/physical-combined-cases/</code></li>
+          <li><code>/opt/rakshak-lens/model-server-models/experiments/nvdec-physical-sweep/</code></li>
+          <li><code>/opt/rakshak-lens/model-server-models/experiments/capture-resize-parity/</code></li>
+        </ul>
+        <p>Raw run 1: 6,000/6,000 effective decisions, zero failures/overloads, primary max 141.232 ms, PPE max 222.257 ms, RT max 87.926 ms. Raw run 2: 6,000/6,000, zero failures/overloads, primary max 152.734 ms, PPE max 231.331 ms, RT max 88.718 ms.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">Rakshak Lens · Jetson optimization close-out · Generated from committed experiment notes and retained raw Jetson artifacts. No camera URLs, credentials, or tokens are included.</div>
+  </footer>
+</body>
+</html>
