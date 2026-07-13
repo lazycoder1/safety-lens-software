@@ -12,6 +12,12 @@ existing NVR. A 600-second full-application soak sampled health 273 times. All
 overload drops, inference-route failures, alert persistence failures, alert
 delivery failures, or queue buildup.
 
+A focused follow-up moved FRONT/cam2 from the NVR's 352×288 substream to its
+main stream while retaining direct NVDEC/VIC output at 640×360. All four live
+MJPEG endpoints now publish 640×360. The post-restart acceptance run kept all
+four workers fresh on hardware decode with zero connection failures, inference
+failures, or overload drops.
+
 This raises the unique-camera evidence from two to four. It does **not** turn
 the earlier 25-connection resource envelope into a 25-distinct-camera
 certification. Four is the number of unique enabled cameras available on this
@@ -55,14 +61,46 @@ the import.
 | Camera ID | Scene | Source shape published | AI target | Selected rules |
 | --- | --- | ---: | ---: | --- |
 | cam1 | GGS / NVR channel 1 | 640×360 | 4 FPS ceiling | person, phone, animal |
-| cam2 | FRONT / NVR channel 2 | 352×288 substream | 4 FPS ceiling | phone, animal, rider helmet |
+| cam2 | FRONT / NVR channel 2 | 640×360 main stream | 4 FPS ceiling | phone, animal, rider helmet |
 | cam3 | STORE / NVR channel 3 | 640×360 | 4 FPS ceiling | person, phone, animal |
 | cam4 | BIKE PARKING / NVR channel 4 | 640×360 | 4 FPS ceiling | phone, animal, rider helmet |
 
-All four MJPEG endpoints rendered. One captured frame from each stream was
-reduced to the same perceptual difference hash. Every pair was distinct, with
-Hamming distances from 23 to 38; this rejects accidental duplicate-channel
-configuration.
+All four current MJPEG endpoints rendered at 640×360. A fresh frame from each
+was reduced to the same 32×18 grayscale representation; all four checksums
+were unique. The earlier perceptual-hash validation also found every pair
+distinct, with Hamming distances from 23 to 38. Together these reject an
+accidental duplicate-channel configuration before and after the source change.
+
+## Uniform 640 rollout follow-up
+
+The earlier FRONT animal alert exposed how little object detail remained in the
+352×288 substream. The authenticated camera-update API changed only cam2's
+NVR path to channel 2 main and its preferred profile to `main`; its three safety
+rules and credentials were preserved. A private mode-0600 runtime-config backup
+was created before the update, and the normal camera restart path applied the
+change.
+
+The runtime still caps capture output at 640 pixels wide, so the application is
+not moving the NVR main-stream resolution through the rest of the pipeline. It
+decodes and scales once in the NVDEC/VIC path, publishes 640×360, and feeds the
+models at their native 640 input. This removes the preventable loss of source
+detail without increasing model tensor size.
+
+The focused acceptance sampled `/api/health` 30 times at ten-second intervals.
+All 30 samples were `ok`; all four cameras were frame-fresh, worker-alive,
+`gstreamer_nvdec`, and hardware-acceleration-active. Total camera failures,
+inference failures, and overload drops remained zero. FRONT completed 795
+additional inference passes between the first and last samples, or about 2.74
+effective FPS under the same four-FPS motion-adaptive ceiling. Primary, PPE,
+specialist, and RT-DETR admission/route failure deltas were all zero. Persistence
+accepted four alerts during the wider 353-second comparison window with zero
+persistence or delivery failures and zero queue depth. Their semantic accuracy
+was not judged in this focused infrastructure soak.
+
+This is a source-quality fix, not proof that animal false positives are
+eliminated. The same pose did not recur during the acceptance window. A
+site-labelled replay remains the correct gate for any animal confidence or
+edge-truncation rule change.
 
 ## Ten-minute full-application soak
 

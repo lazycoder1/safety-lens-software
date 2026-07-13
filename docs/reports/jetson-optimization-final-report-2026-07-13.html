@@ -215,7 +215,7 @@
         <table>
           <thead><tr><th>Dimension</th><th>Starting point</th><th>Current measured state</th><th>Meaning</th></tr></thead>
           <tbody>
-            <tr><td>Live configuration</td><td>2 × roughly 960p feeds</td><td>4 distinct camera scenes, all fresh on NVDEC</td><td>Three publish at 640×360; the existing FRONT substream publishes at 352×288.</td></tr>
+            <tr><td>Live configuration</td><td>2 × roughly 960p feeds</td><td>4 distinct camera scenes, all fresh on NVDEC</td><td>All four now publish at 640×360; FRONT was moved from its 352×288 NVR substream to channel 2 main.</td></tr>
             <tr><td>Detection cadence</td><td>about 1–2 FPS per camera</td><td>4 FPS configured ceiling; 1.228–2.943 FPS observed live</td><td>Motion-adaptive inference intentionally reduces unchanged scenes to a one-FPS heartbeat and runs faster when the scene changes.</td></tr>
             <tr><td>Aggregate scheduled work</td><td>about 2–4 decisions/s</td><td>100 effective decisions/s in the 25-connection test</td><td>About 25–50× aggregate scheduler throughput, under the exact tested rule mix.</td></tr>
             <tr><td>Capture path</td><td>960-wide frames moved farther than needed</td><td>NVDEC/VIC emits 640×360 directly; capture capped at 6 FPS</td><td>Less memory traffic and redundant resizing while the model still receives its native 640 input.</td></tr>
@@ -450,6 +450,7 @@
         <details><summary>Capture and deployment</summary><ul>
           <li><strong>NVDEC output dropping:</strong> used to align 25 FPS source streams to the useful capture rate.</li>
           <li><strong>Direct 640 NVDEC/VIC output:</strong> promoted after phone/PPE alert parity replay.</li>
+          <li><strong>Uniform live 640 output:</strong> FRONT/cam2 was moved from its 352×288 NVR substream to channel 2 main. A 30-sample post-restart soak kept all four feeds fresh on NVDEC with zero connection failures, inference failures, or overload drops; FRONT sustained about 2.74 effective AI FPS.</li>
           <li><strong>6 FPS capture cap:</strong> promoted; 8 FPS crossed the PPE tail at 25, while 6 preserved 4 FPS AI plus live-view headroom.</li>
           <li><strong>100 ms startup stagger:</strong> promoted; concurrent 29-session open was unreliable, while 50–250 ms stagger opened all 29.</li>
           <li><strong>Docker NVIDIA runtime preservation:</strong> repaired after an earlier recreation silently fell back to CPU decode.</li>
