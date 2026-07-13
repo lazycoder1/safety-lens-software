@@ -64,6 +64,9 @@ def test_jetson_edge_uses_measured_inference_admission_defaults():
         ":-0.006}"
     )
     assert environment["SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE"].endswith(":-4}")
+    assert environment["SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT"].endswith(
+        ":-0.70}"
+    )
     assert environment["SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS"] == (
         "${SAFETYLENS_REMOTE_RTDETR_PHONE_BATCH_WAIT_SECONDS:-0.014}"
     )

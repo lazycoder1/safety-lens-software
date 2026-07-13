@@ -18,6 +18,18 @@ def _phase_group_size() -> int:
     return min(4, max(1, value))
 
 
+def _phase_remainder_weight() -> float:
+    try:
+        value = float(
+            os.environ.get("SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT", "1.0")
+        )
+    except (TypeError, ValueError):
+        value = 1.0
+    if not math.isfinite(value):
+        value = 1.0
+    return min(1.0, max(0.1, value))
+
+
 def camera_phase_groups(cfg: dict) -> list[list[str]]:
     """Return the stable camera groups that share one inference phase."""
     camera_ids = sorted(
@@ -50,7 +62,12 @@ def camera_phase_offset(camera_id: str, cfg: dict, interval_seconds: float) -> f
     group_index = next(
         index for index, group in enumerate(groups) if camera_id in group
     )
-    return group_index * interval_seconds / group_count
+    remainder = len(camera_ids) % _phase_group_size()
+    remainder_weight = _phase_remainder_weight()
+    if not remainder or remainder_weight == 1.0:
+        return group_index * interval_seconds / group_count
+    weighted_group_count = group_count - 1 + remainder_weight
+    return group_index * interval_seconds / weighted_group_count
 
 
 def next_inference_slot(

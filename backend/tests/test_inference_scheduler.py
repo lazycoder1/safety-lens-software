@@ -14,6 +14,7 @@ def _config(camera_count=5):
 
 def test_camera_phases_are_evenly_spaced_across_interval(monkeypatch):
     monkeypatch.delenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", raising=False)
+    monkeypatch.delenv("SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT", raising=False)
     cfg = _config(5)
 
     offsets = [camera_phase_offset(f"cam{index + 1}", cfg, 1.0 / 3.0) for index in range(5)]
@@ -23,11 +24,42 @@ def test_camera_phases_are_evenly_spaced_across_interval(monkeypatch):
 
 def test_camera_phases_can_be_grouped_for_pre_admission_batching(monkeypatch):
     monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "2")
+    monkeypatch.delenv("SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT", raising=False)
     cfg = _config(5)
 
     offsets = [camera_phase_offset(f"cam{index + 1}", cfg, 0.3) for index in range(5)]
 
     assert offsets == pytest.approx([0.0, 0.0, 0.1, 0.1, 0.2])
+
+
+def test_partial_final_phase_can_reserve_less_of_the_inference_period(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "4")
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT", "0.7")
+    cfg = _config(27)
+
+    offsets = [camera_phase_offset(f"cam{index + 1}", cfg, 0.25) for index in range(27)]
+
+    groups = sorted(set(offsets))
+    assert groups == pytest.approx([index * 0.25 / 6.7 for index in range(7)])
+    assert 0.25 - groups[-1] == pytest.approx(0.25 * 0.7 / 6.7)
+
+
+def test_remainder_weight_does_not_change_full_group_layout(monkeypatch):
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "4")
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT", "0.7")
+    cfg = _config(20)
+
+    offsets = [camera_phase_offset(f"cam{index + 1}", cfg, 0.25) for index in range(20)]
+
+    assert sorted(set(offsets)) == pytest.approx([0.0, 0.05, 0.1, 0.15, 0.2])
+
+
+@pytest.mark.parametrize("value", ["invalid", "nan", "inf"])
+def test_invalid_remainder_weight_falls_back_to_uniform_spacing(monkeypatch, value):
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_GROUP_SIZE", "4")
+    monkeypatch.setenv("SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT", value)
+
+    assert camera_phase_offset("cam5", _config(5), 0.3) == pytest.approx(0.15)
 
 
 def test_invalid_phase_group_size_falls_back_to_one(monkeypatch):

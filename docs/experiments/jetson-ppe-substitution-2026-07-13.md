@@ -2,6 +2,12 @@
 
 Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
 
+> **Later capacity note:** partial-phase weighting subsequently raised this
+> inference tier from 24 to 27 camera-equivalents, including the strict
+> all-camera one-FPS PPE confirmation load and one device-wide RT-DETRv4-S FPS.
+> See `jetson-ppe-phase-weighting-2026-07-13.md`. The 24-camera result below is
+> retained as the uniform-phase baseline.
+
 ## Decision
 
 Promote an explicit 0.5 FPS PPE cadence and optional tracked-context
