@@ -93,3 +93,17 @@ SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT=0.70
 
 Raw JSON and console evidence is stored on the Jetson under
 `/opt/rakshak-lens/model-server-models/experiments/ppe-25-phase-sweep/`.
+
+## Live rollout
+
+Commit `c2151ae` was pushed directly to `master`, and its hash-matched edge
+image was promoted with `SAFETYLENS_INFERENCE_PHASE_REMAINDER_WEIGHT=0.70` in
+the actual container environment. The warmed model-server container was not
+restarted, and the previous edge container remains stopped as rollback.
+
+After the reconnect cycle, edge health was `ok` with no reasons. Cam1 and cam2
+were both running, frame-fresh, and using hardware `gstreamer_nvdec`. They had
+232 inference successes at the observation point with zero inference failures
+or overload drops. Primary, PPE, and RT-DETR transport had zero admission or
+route failures, the alert persistence and delivery workers were alive with no
+failures, and the model watchdog timer was active.
