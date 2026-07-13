@@ -122,6 +122,18 @@ class SpecialistFrameBatchItem(BaseModel):
     byte_length: int = Field(gt=0)
 
 
+class PPEFrameBatchItem(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    conf: float = Field(default=0.35, ge=0.0, le=1.0)
+    device: str = "cuda"
+    imgsz: int = Field(default=640, gt=0)
+    classes: List[str] = Field(default_factory=list)
+    frame_width: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
+    frame_height: int = Field(gt=0, le=_MAX_RAW_FRAME_DIMENSION)
+    frame_channels: int = Field(default=3)
+    byte_length: int = Field(gt=0)
+
+
 class ModelInstallRequest(BaseModel):
     model_keys: List[str] = Field(default_factory=list)
 
@@ -310,6 +322,62 @@ def _parse_specialist_frame_batch(
             raise HTTPException(
                 status_code=400,
                 detail="Invalid specialist frame shape or classes",
+            )
+    return batch
+
+
+def _parse_ppe_frame_batch(
+    batch_json: str,
+    expected_count: int,
+) -> List[PPEFrameBatchItem]:
+    if len(batch_json) > 8_192:
+        raise HTTPException(
+            status_code=413,
+            detail="PPE frame batch metadata is too large",
+        )
+    try:
+        payload = json.loads(batch_json)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid PPE frame batch metadata",
+        ) from exc
+    if not isinstance(payload, list) or len(payload) != expected_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PPE frame batch must contain exactly {expected_count} frames",
+        )
+    try:
+        batch = [PPEFrameBatchItem(**item) for item in payload]
+    except (TypeError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid PPE frame batch request",
+        ) from exc
+    if len({item.request_id for item in batch}) != expected_count:
+        raise HTTPException(
+            status_code=400,
+            detail="PPE frame request IDs must be unique",
+        )
+    compatibility = {
+        (item.conf, item.device, item.imgsz, tuple(item.classes)) for item in batch
+    }
+    if len(compatibility) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="PPE frame batch settings must match",
+        )
+    for item in batch:
+        expected = item.frame_width * item.frame_height * item.frame_channels
+        if (
+            item.frame_channels != 3
+            or item.byte_length != expected
+            or not 1 <= len(item.classes) <= 32
+            or any(not value.strip() for value in item.classes)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid PPE frame shape or classes",
             )
     return batch
 
@@ -920,3 +988,75 @@ def infer_raw_specialist_batch4(
 ) -> Dict[str, Any]:
     _require_model_server_token(authorization)
     return _infer_raw_specialist_frame_batch(frame_bytes, batch_json, 4)
+
+
+def _infer_raw_ppe_frame_batch(
+    frame_bytes: bytes,
+    batch_json: str,
+    expected_count: int,
+) -> Dict[str, Any]:
+    """Run only the fixed-prompt PPE engine for one frame group."""
+    batch = _parse_ppe_frame_batch(batch_json, expected_count)
+    if len(frame_bytes) != sum(item.byte_length for item in batch):
+        raise HTTPException(
+            status_code=400,
+            detail="PPE frame batch byte length does not match metadata",
+        )
+    frames = []
+    offset = 0
+    for item in batch:
+        end = offset + item.byte_length
+        frames.append(
+            np.frombuffer(memoryview(frame_bytes)[offset:end], dtype=np.uint8).reshape(
+                (item.frame_height, item.frame_width, item.frame_channels)
+            )
+        )
+        offset = end
+
+    first = batch[0]
+    try:
+        records = model_manager.predict_ppe_record_batch(
+            frames,
+            conf=first.conf,
+            device=first.device,
+            imgsz=first.imgsz,
+            classes=first.classes,
+        )
+        if records is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Batch-{expected_count} PPE runtime is unavailable",
+            )
+        if len(records) != expected_count:
+            raise RuntimeError("PPE frame batch returned the wrong result count")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("PPE frame batch inference failed")
+        raise HTTPException(
+            status_code=500,
+            detail="PPE frame batch inference failed",
+        ) from exc
+    return {
+        "results": {item.request_id: result for item, result in zip(batch, records)}
+    }
+
+
+@app.post("/api/infer/raw/ppe-batch2")
+def infer_raw_ppe_batch2(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-PPE-Frame-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_ppe_frame_batch(frame_bytes, batch_json, 2)
+
+
+@app.post("/api/infer/raw/ppe-batch4")
+def infer_raw_ppe_batch4(
+    frame_bytes: bytes = Body(..., media_type="application/octet-stream"),
+    batch_json: str = Header(..., alias="X-Rakshak-PPE-Frame-Batch"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    _require_model_server_token(authorization)
+    return _infer_raw_ppe_frame_batch(frame_bytes, batch_json, 4)

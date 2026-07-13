@@ -795,12 +795,20 @@ def test_grouped_inference_runs_closed_set_candidate_with_rule_labels(monkeypatc
 def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
     calls = []
 
-    def fake_check_yoloe_violations(detections, camera_id, frame_w=None, frame_h=None):
+    def fake_check_yoloe_violations(
+        detections,
+        camera_id,
+        frame_w=None,
+        frame_h=None,
+        *,
+        capability_filter=None,
+    ):
         calls.append({
             "camera_id": camera_id,
             "classes": [d["class"] for d in detections],
             "frame_w": frame_w,
             "frame_h": frame_h,
+            "capability_filter": capability_filter,
         })
         return []
 
@@ -834,6 +842,7 @@ def test_closed_set_candidate_observation_runs_ppe_violation_check(monkeypatch):
             "classes": ["person"],
             "frame_w": 60,
             "frame_h": 40,
+            "capability_filter": None,
         }
     ]
     assert confirmation_required is False

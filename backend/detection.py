@@ -1069,7 +1069,14 @@ def _ppe_person_diagnostics(
     return diagnostics
 
 
-def check_yoloe_violations(detections: list, camera_id: str, frame_w: int | None = None, frame_h: int | None = None) -> list:
+def check_yoloe_violations(
+    detections: list,
+    camera_id: str,
+    frame_w: int | None = None,
+    frame_h: int | None = None,
+    *,
+    capability_filter: set[str] | None = None,
+) -> list:
     """Return candidate violation dicts (NOT yet persisted to DB).
     Per-person check: only flags persons whose bbox does not contain any matching PPE item."""
     candidates = []
@@ -1097,6 +1104,9 @@ def check_yoloe_violations(detections: list, camera_id: str, frame_w: int | None
         severity_map = {}
         threshold_map = {}
         for rid in safety_rule_ids:
+            capability = RULE_ID_TO_CAPABILITY.get(rid)
+            if capability_filter is not None and capability not in capability_filter:
+                continue
             rule = rule_map.get(rid)
             if rule and rule.get("id") == RIDER_HELMET_RULE_ID:
                 continue
@@ -1117,6 +1127,10 @@ def check_yoloe_violations(detections: list, camera_id: str, frame_w: int | None
         ppe_rules = [
             r for r in cfg.get("safety_rules", [])
             if r.get("type") == "ppe" and r.get("enabled", True) and r.get("id") != RIDER_HELMET_RULE_ID
+            and (
+                capability_filter is None
+                or RULE_ID_TO_CAPABILITY.get(r.get("id")) in capability_filter
+            )
         ]
         ppe_groups = {r["name"].lower(): r["classes"] for r in ppe_rules}
         severity_map = {r["name"].lower(): r.get("severity", "P2") for r in ppe_rules}
@@ -1190,7 +1204,9 @@ def check_yoloe_violations(detections: list, camera_id: str, frame_w: int | None
             })
 
     rider_helmet_rule = _rider_helmet_rule_for_camera(cam, cfg)
-    if rider_helmet_rule:
+    if rider_helmet_rule and (
+        capability_filter is None or "rider_helmet_required" in capability_filter
+    ):
         candidates.extend(_check_rider_helmet_violations(
             detections,
             camera_id,

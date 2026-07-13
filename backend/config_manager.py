@@ -290,6 +290,8 @@ DEFAULT_CONFIG = {
         "inference_width": 640,
         "coco_inference_width": 640,
         "ppe_inference_width": 640,
+        "ppe_specialist_target_fps": 0.5,
+        "ppe_specialist_substitution_enabled": False,
         "mobile_phone_inference_width": 640,
         "mobile_phone_probe_interval_seconds": 1.0,
         "rtdetr_phone_substitution_enabled": False,

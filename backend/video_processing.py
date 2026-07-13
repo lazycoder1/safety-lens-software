@@ -37,6 +37,7 @@ from rtdetr_phone_scheduler import (
     SUBSTITUTION_SCHEDULER as RTDETR_PHONE_SUBSTITUTION_SCHEDULER,
     PrimaryPersonTracker,
 )
+from ppe_substitution_scheduler import SCHEDULER as PPE_SUBSTITUTION_SCHEDULER
 from camera_capture import (
     CAMERA_STOP_TIMEOUT_SECONDS,
     CameraConnectionEvent,
@@ -86,6 +87,10 @@ def rtdetr_phone_substitution_stats() -> dict:
     return RTDETR_PHONE_SUBSTITUTION_SCHEDULER.stats()
 
 
+def ppe_substitution_stats() -> dict:
+    return PPE_SUBSTITUTION_SCHEDULER.stats()
+
+
 def _is_executor_shutdown_error(exc: RuntimeError) -> bool:
     message = str(exc).lower()
     return (
@@ -122,6 +127,8 @@ _MOBILE_PHONE_PROBE_CONTEXT_SUPPRESSION_REASON = "awaiting_primary_person_contex
 _PPE_PHONE_PROBE_DEFERRAL_REASON = "deferred_for_mobile_phone_probe"
 _RTDETR_PHONE_PROBE_REASON = "rtdetr_phone_track_recall"
 _RTDETR_PHONE_FALLBACK_REASON = "rtdetr_phone_route_fallback"
+_PPE_CADENCE_SUPPRESSION_REASON = "ppe_specialist_cadence"
+_PPE_SUBSTITUTION_REASON = "ppe_specialist_track_substitution"
 
 FACE_LOG_COOLDOWN_SECONDS = 10.0
 PLATE_LOG_COOLDOWN_SECONDS = 10.0
@@ -1521,6 +1528,86 @@ def _rtdetr_phone_substitution_execution_plan(
     return substituted, True
 
 
+def _ppe_specialist_cadence_execution_plan(
+    camera_id: str,
+    execution_plan: dict,
+    cfg: dict | None,
+    *,
+    now: float,
+    stable_person_track: bool,
+    previous_detections: list[dict] | None = None,
+) -> tuple[dict, bool, bool]:
+    """Bound PPE duty and replace a primary slot when tracked context is safe."""
+    if not execution_plan.get("run_ppe_specialist") or not isinstance(cfg, dict):
+        return execution_plan, False, False
+
+    ppe_capabilities = set(
+        _capabilities_for_model_key(execution_plan, "ppe_specialist")
+    )
+    unsupported_companion = any(
+        execution_plan.get(key)
+        for key in (
+            "run_ppe_closed_set_candidate",
+            "run_yoloe_long_tail",
+            "run_fire_smoke_specialist",
+            "run_face_recognition",
+            "run_pose_specialist",
+            "run_plate_recognition",
+            "run_rtdetr_phone",
+        )
+    )
+    due, substitute = PPE_SUBSTITUTION_SCHEDULER.consider(
+        camera_id,
+        cfg,
+        now=now,
+        substitution_eligible=bool(
+            execution_plan.get("run_coco_primary")
+            and ppe_capabilities
+            and stable_person_track
+            and not unsupported_companion
+        ),
+    )
+    if not due:
+        suppressed = deepcopy(execution_plan)
+        suppressed["run_ppe_specialist"] = False
+        suppressed["ppe_prompt_terms"] = []
+        suppressed["required_model_keys"] = [
+            model_key
+            for model_key in suppressed.get("required_model_keys", [])
+            if model_key != "ppe_specialist"
+        ]
+        runtime_suppressed = list(
+            suppressed.get("runtime_suppressed_model_keys") or []
+        )
+        if "ppe_specialist" not in runtime_suppressed:
+            runtime_suppressed.append("ppe_specialist")
+        suppressed["runtime_suppressed_model_keys"] = runtime_suppressed
+        suppressed["runtime_suppression_reason"] = _PPE_CADENCE_SUPPRESSION_REASON
+        return suppressed, False, False
+
+    if not substitute:
+        return execution_plan, True, False
+
+    substituted = deepcopy(execution_plan)
+    substituted["run_coco_primary"] = False
+    substituted["run_ppe_substitution"] = True
+    substituted["partial_detection_capabilities"] = sorted(ppe_capabilities)
+    substituted["runtime_probe_reason"] = _PPE_SUBSTITUTION_REASON
+    substituted["required_model_keys"] = [
+        model_key
+        for model_key in substituted.get("required_model_keys", [])
+        if model_key != "coco_primary"
+    ]
+    substituted["ppe_context_detections"] = [
+        deepcopy(detection)
+        for detection in (previous_detections or [])
+        if detection.get("model_family") == "coco_primary"
+        and detection.get("class")
+        in {"person", "motorcycle", "motorbike", "scooter"}
+    ]
+    return substituted, True, True
+
+
 def _crowd_count_threshold_candidates(camera_id: str, detections: list[dict]) -> list[dict]:
     """Emit a policy candidate for count-threshold rules without enabling person_presence."""
     persons = [d for d in detections if d.get("class") == "person"]
@@ -2057,6 +2144,10 @@ def _run_grouped_inference(
             class_names=ppe_prompts,
         )
         detections.extend(ppe_detections)
+        if execution_plan.get("run_ppe_substitution"):
+            detections.extend(
+                deepcopy(execution_plan.get("ppe_context_detections") or [])
+            )
 
     if execution_plan.get("run_ppe_closed_set_candidate"):
         records = record_batches["ppe_closed_set_candidate"]
@@ -2734,7 +2825,13 @@ def _process_detection_observation(
         candidates = []
         if detections:
             if scheduled_plan.get("run_ppe_specialist") or scheduled_plan.get("run_ppe_closed_set_candidate"):
-                candidates.extend(check_yoloe_violations(detections, camera_id, frame_w, frame_h))
+                candidates.extend(check_yoloe_violations(
+                    detections,
+                    camera_id,
+                    frame_w,
+                    frame_h,
+                    capability_filter=partial_capabilities,
+                ))
             if partial_capabilities is None:
                 candidates.extend(check_violations(detections, camera_id))
             else:
@@ -2897,6 +2994,7 @@ def video_processor(camera_id: str, stop_event: threading.Event):
 
 
 def _video_processor_loop(camera_id: str, stop_event: threading.Event):
+    PPE_SUBSTITUTION_SCHEDULER.reset(camera_id)
     cfg = get_config()
     cam = cfg["cameras"][camera_id]
     stream_type = cam.get("stream_type", "file")
@@ -3291,6 +3389,20 @@ def _video_processor_loop(camera_id: str, stop_event: threading.Event):
                                 ),
                             )
                         )
+                        runtime_plan, _ppe_due, _ppe_substituted = (
+                            _ppe_specialist_cadence_execution_plan(
+                                camera_id,
+                                runtime_plan,
+                                current_cfg,
+                                now=now,
+                                stable_person_track=primary_person_tracker.has_stable_person(
+                                    now=now,
+                                    min_hits=min_track_hits,
+                                    ttl_seconds=tracker_ttl,
+                                ),
+                                previous_detections=primary_context_detections,
+                            )
+                        )
                         try:
                             pending_inference = inference_executor.submit(
                                 _run_detection_job,
@@ -3431,6 +3543,7 @@ def _finalize_camera_worker_exit(cam_id: str, stop_event: threading.Event) -> No
         state.clear_camera_connection_health(cam_id)
         state.clear_camera_inference_health(cam_id)
         state.camera_runtime_status[cam_id] = "offline" if stop_event.is_set() else "error"
+    PPE_SUBSTITUTION_SCHEDULER.reset(cam_id)
 
 
 def _worker_registration_active(

@@ -51,6 +51,8 @@ def test_load_config_returns_default_values():
     cfg = config_manager.load_config()
     assert cfg["global"]["target_fps"] == 6
     assert cfg["global"]["yolo_conf"] == 0.35
+    assert cfg["global"]["ppe_specialist_target_fps"] == 0.5
+    assert cfg["global"]["ppe_specialist_substitution_enabled"] is False
     assert cfg["vlm"]["model"] == "qwen3-vl:8b"
     assert set(cfg["cameras"]) == {"cam2"}
     assert cfg["cameras"]["cam2"]["name"] == "Warehouse Aisle"

@@ -668,6 +668,66 @@ def test_primary_frame_batch4_uses_four_unique_transport_ids(monkeypatch):
     ]
 
 
+def test_ppe_frame_batch4_sends_fixed_classes_and_raw_frames(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"results": {f"frame-{index}": [] for index in range(4)}}
+
+    class Session:
+        @staticmethod
+        def post(url, *, data, headers, timeout):
+            captured.update(url=url, data=data, headers=headers, timeout=timeout)
+            return Response()
+
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_settings",
+        lambda: {"url": "http://model", "token": "", "timeout_seconds": 2.0},
+    )
+    monkeypatch.setattr(model_manager, "_remote_session", Session)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_ppe_batch_route_may_run",
+        lambda _batch_size: True,
+    )
+    monkeypatch.setattr(
+        model_manager,
+        "_REMOTE_PPE_BATCH_SUPPORT",
+        {"url": "http://model", "2": None, "4": None},
+    )
+    frames = [np.full((4, 5, 3), value, dtype=np.uint8) for value in (10, 20, 30, 40)]
+    items = [
+        {
+            "frame": frame,
+            "request": {
+                "request_id": "ppe",
+                "conf": 0.2,
+                "device": "cuda",
+                "imgsz": 640,
+                "classes": ["helmet"],
+            },
+        }
+        for frame in frames
+    ]
+
+    result = model_manager._remote_post_raw_ppe_batch(items)
+
+    metadata = json.loads(captured["headers"]["X-Rakshak-PPE-Frame-Batch"])
+    assert captured["url"].endswith("/api/infer/raw/ppe-batch4")
+    assert result == {"results": {f"frame-{index}": [] for index in range(4)}}
+    assert [item["classes"] for item in metadata] == [["helmet"]] * 4
+    assert bytes(captured["data"]) == b"".join(frame.tobytes() for frame in frames)
+
+
 def test_edge_raw_batch_falls_back_to_jpeg_for_older_server(monkeypatch):
     frame = np.zeros((180, 320, 3), dtype=np.uint8)
     captured = {}
@@ -765,6 +825,77 @@ def test_edge_pairs_two_primary_frames_before_remote_admission(monkeypatch):
     assert results[1]["coco_primary:0"][0]["bbox"] == [20, 40, 200, 400]
     assert batcher.stats()["paired_requests"] == 2
     assert batcher.stats()["pairs_executed"] == 1
+
+
+def test_edge_pairs_two_ppe_only_frames_before_remote_admission(monkeypatch):
+    class CountingAdmission:
+        def __init__(self):
+            self.acquires = 0
+            self.releases = 0
+
+        def acquire(self, *, timeout):
+            self.acquires += 1
+            return True
+
+        def release(self):
+            self.releases += 1
+
+    admission = CountingAdmission()
+    batcher = model_manager._RemotePrimaryFrameBatcher(
+        0.1,
+        model_key="ppe_specialist",
+    )
+    captured = {}
+
+    def fake_ppe_batch(items):
+        captured["classes"] = [item["request"]["classes"] for item in items]
+        return {
+            "results": {
+                "frame-0": [{"class_id": 0}],
+                "frame-1": [{"class_id": 0}],
+            }
+        }
+
+    monkeypatch.setattr(model_manager, "is_remote_inference_enabled", lambda: True)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_ppe_batch_route_may_run",
+        lambda _batch_size: True,
+    )
+    monkeypatch.setattr(model_manager, "_REMOTE_JOB_ADMISSION", admission)
+    monkeypatch.setattr(model_manager, "_REMOTE_PPE_FRAME_BATCHER", batcher)
+    monkeypatch.setattr(
+        model_manager,
+        "_remote_post_raw_ppe_batch",
+        fake_ppe_batch,
+    )
+    request = {
+        "request_id": "ppe",
+        "model_key": "ppe_specialist",
+        "imgsz": 640,
+        "classes": ["helmet"],
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                model_manager.predict_record_batches,
+                np.zeros((360, 640, 3), dtype=np.uint8),
+                [request],
+            )
+            for _ in range(2)
+        ]
+        results = [future.result() for future in futures]
+
+    assert admission.acquires == 1
+    assert admission.releases == 1
+    assert captured["classes"] == [["helmet"], ["helmet"]]
+    assert results == [
+        {"ppe": [{"class_id": 0}]},
+        {"ppe": [{"class_id": 0}]},
+    ]
+    assert batcher.stats()["model_key"] == "ppe_specialist"
+    assert batcher.stats()["batch2_executed"] == 1
 
 
 def test_edge_groups_four_primary_frames_before_remote_admission(monkeypatch):
@@ -2005,6 +2136,101 @@ def test_model_server_accepts_four_primary_ppe_raw_frames(monkeypatch):
         }
         for index in range(4)
     }
+
+
+def test_model_server_accepts_four_ppe_only_raw_frames(monkeypatch):
+    classes = ["motorcycle helmet", "rider helmet", "helmet"]
+    captured = {}
+
+    def fake_ppe(frames, *, conf, device, imgsz, classes):
+        captured.update(
+            count=len(frames),
+            conf=conf,
+            device=device,
+            imgsz=imgsz,
+            classes=classes,
+        )
+        return [[{"ppe": index}] for index in range(len(frames))]
+
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(
+        model_server.model_manager,
+        "predict_ppe_record_batch",
+        fake_ppe,
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((4, 5, 3), dtype=np.uint8)
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "conf": 0.2,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": classes,
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index in range(4)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/ppe-batch4",
+        content=frame.tobytes() * 4,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-PPE-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"] == {
+        f"frame-{index}": [{"ppe": index}] for index in range(4)
+    }
+    assert captured == {
+        "count": 4,
+        "conf": 0.2,
+        "device": "cuda",
+        "imgsz": 640,
+        "classes": classes,
+    }
+
+
+def test_model_server_ppe_only_batch_reports_unavailable_runtime(monkeypatch):
+    monkeypatch.setattr(model_server, "MODEL_SERVER_TOKEN", "")
+    monkeypatch.setattr(
+        model_server.model_manager,
+        "predict_ppe_record_batch",
+        lambda *_args, **_kwargs: None,
+    )
+    client = TestClient(model_server.app, raise_server_exceptions=False)
+    frame = np.zeros((4, 5, 3), dtype=np.uint8)
+    metadata = [
+        {
+            "request_id": f"frame-{index}",
+            "conf": 0.2,
+            "device": "cuda",
+            "imgsz": 640,
+            "classes": ["helmet"],
+            "frame_width": 5,
+            "frame_height": 4,
+            "frame_channels": 3,
+            "byte_length": frame.nbytes,
+        }
+        for index in range(2)
+    ]
+
+    response = client.post(
+        "/api/infer/raw/ppe-batch2",
+        content=frame.tobytes() * 2,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-PPE-Frame-Batch": json.dumps(metadata),
+        },
+    )
+
+    assert response.status_code == 409
 
 
 def test_model_server_can_overlap_primary_and_ppe_batch_engines(monkeypatch):

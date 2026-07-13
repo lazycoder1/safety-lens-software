@@ -15,6 +15,179 @@ def _rider_plan():
     }
 
 
+def _ppe_substitution_config(*, enabled=True):
+    return {
+        "global": {
+            "ppe_specialist_target_fps": 0.5,
+            "ppe_specialist_substitution_enabled": enabled,
+        }
+    }
+
+
+def test_ppe_cadence_suppresses_additive_work_between_due_slots():
+    video_processing.PPE_SUBSTITUTION_SCHEDULER.reset()
+    plan = _rider_plan()
+    cfg = _ppe_substitution_config(enabled=False)
+
+    first, due, substituted = (
+        video_processing._ppe_specialist_cadence_execution_plan(
+            "cam1",
+            plan,
+            cfg,
+            now=10.0,
+            stable_person_track=True,
+        )
+    )
+    suppressed, due_again, substituted_again = (
+        video_processing._ppe_specialist_cadence_execution_plan(
+            "cam1",
+            plan,
+            cfg,
+            now=10.25,
+            stable_person_track=True,
+        )
+    )
+
+    assert first is plan
+    assert (due, substituted) == (True, False)
+    assert (due_again, substituted_again) == (False, False)
+    assert suppressed["run_coco_primary"] is True
+    assert suppressed["run_ppe_specialist"] is False
+    assert suppressed["required_model_keys"] == ["coco_primary"]
+    assert suppressed["runtime_suppression_reason"] == "ppe_specialist_cadence"
+
+
+def test_ppe_due_slot_replaces_primary_with_stable_cached_context():
+    video_processing.PPE_SUBSTITUTION_SCHEDULER.reset()
+    plan = _rider_plan()
+    context = [
+        {
+            "class": "person",
+            "confidence": 0.9,
+            "bbox": [40, 10, 100, 155],
+            "model_family": "coco_primary",
+        },
+        {
+            "class": "motorcycle",
+            "confidence": 0.9,
+            "bbox": [30, 100, 130, 190],
+            "model_family": "coco_primary",
+        },
+        {
+            "class": "dog",
+            "confidence": 0.8,
+            "bbox": [1, 2, 10, 12],
+            "model_family": "coco_primary",
+        },
+    ]
+
+    result, due, substituted = (
+        video_processing._ppe_specialist_cadence_execution_plan(
+            "cam1",
+            plan,
+            _ppe_substitution_config(),
+            now=20.0,
+            stable_person_track=True,
+            previous_detections=context,
+        )
+    )
+
+    assert (due, substituted) == (True, True)
+    assert result["run_coco_primary"] is False
+    assert result["run_ppe_specialist"] is True
+    assert result["required_model_keys"] == ["ppe_specialist"]
+    assert result["partial_detection_capabilities"] == ["rider_helmet_required"]
+    assert [item["class"] for item in result["ppe_context_detections"]] == [
+        "person",
+        "motorcycle",
+    ]
+
+
+def test_ppe_substitution_stays_additive_with_unvalidated_companion():
+    video_processing.PPE_SUBSTITUTION_SCHEDULER.reset()
+    plan = _rider_plan()
+    plan["run_pose_specialist"] = True
+
+    result, due, substituted = (
+        video_processing._ppe_specialist_cadence_execution_plan(
+            "cam1",
+            plan,
+            _ppe_substitution_config(),
+            now=30.0,
+            stable_person_track=True,
+        )
+    )
+
+    assert result is plan
+    assert (due, substituted) == (True, False)
+
+
+def test_grouped_ppe_substitution_requests_only_ppe_and_merges_cached_context(
+    monkeypatch,
+):
+    frame = np.zeros((200, 200, 3), dtype=np.uint8)
+    context = {
+        "class": "person",
+        "confidence": 0.9,
+        "bbox": [40, 10, 100, 155],
+        "model_family": "coco_primary",
+        "capability_keys": ["person_presence"],
+    }
+    captured = {}
+
+    def fake_predict(_frame, requests, **_options):
+        captured["requests"] = requests
+        return {
+            "ppe_specialist": [
+                {
+                    "class_id": 0,
+                    "confidence": 0.8,
+                    "bbox": [50, 15, 75, 40],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        video_processing.model_manager,
+        "predict_record_batches",
+        fake_predict,
+    )
+    plan = {
+        "capabilities": ["helmet_required"],
+        "required_model_keys": ["ppe_specialist"],
+        "run_coco_primary": False,
+        "run_ppe_specialist": True,
+        "run_ppe_substitution": True,
+        "ppe_prompt_terms": ["hard hat"],
+        "partial_detection_capabilities": ["helmet_required"],
+        "ppe_context_detections": [context],
+    }
+
+    _annotated, detections, _pose, invocations = (
+        video_processing._run_grouped_inference(
+            "cam1",
+            frame,
+            plan,
+            conf=0.35,
+            device="cuda",
+            imgsz=640,
+            cfg={"global": {"ppe_inference_width": 640}},
+            frame_batch_size_hint=4,
+        )
+    )
+
+    assert [request["model_key"] for request in captured["requests"]] == [
+        "ppe_specialist"
+    ]
+    assert invocations["coco_primary"] == 0
+    assert invocations["ppe_specialist"] == 1
+    assert [item["model_family"] for item in detections] == [
+        "ppe_specialist",
+        "coco_primary",
+    ]
+    assert detections[1] == context
+
+
 def test_rider_only_ppe_waits_for_coco_vehicle_context():
     plan = _rider_plan()
 
@@ -562,6 +735,84 @@ def test_partial_phone_observation_does_not_clear_unrelated_alert_state():
     assert active == {"Animal Intrusion"}
     assert windows["Animal Intrusion"] == []
     assert windows["Mobile Phone Usage"] == [True, False]
+
+
+def test_partial_ppe_observation_advances_only_ppe_and_preserves_unrelated_state(
+    monkeypatch,
+):
+    capability_filters = []
+
+    def check_ppe(_detections, _camera_id, _frame_w, _frame_h, *, capability_filter=None):
+        capability_filters.append(capability_filter)
+        return [
+            {
+                "camera_id": "cam-ppe",
+                "rule": "Missing helmet",
+                "severity": "P2",
+                "confidence": 0.9,
+                "description": "Worker missing helmet",
+                "source": "PPE Specialist",
+                "threshold": 2,
+            }
+        ]
+
+    monkeypatch.setattr(video_processing, "check_yoloe_violations", check_ppe)
+    monkeypatch.setattr(
+        video_processing,
+        "check_violations",
+        lambda *_args, **_kwargs: [],
+    )
+    active = {"Animal Intrusion"}
+    windows = {"Animal Intrusion": [True, True]}
+
+    video_processing._process_detection_observation(
+        "cam-ppe",
+        np.zeros((200, 200, 3), dtype=np.uint8),
+        None,
+        [
+            {
+                "class": "person",
+                "confidence": 0.9,
+                "bbox": [40, 10, 100, 155],
+                "model_family": "coco_primary",
+            }
+        ],
+        None,
+        {
+            "capabilities": ["helmet_required", "animal_presence"],
+            "partial_detection_capabilities": ["helmet_required"],
+            "run_pose_specialist": False,
+            "run_ppe_specialist": True,
+            "run_ppe_closed_set_candidate": False,
+        },
+        {"safety_rule_ids": ["ppe_helmet", "alert_animal"]},
+        {
+            "safety_rules": [
+                {
+                    "id": "ppe_helmet",
+                    "name": "Helmet",
+                    "type": "ppe",
+                    "enabled": True,
+                },
+                {
+                    "id": "alert_animal",
+                    "name": "Animal Intrusion",
+                    "type": "alert",
+                    "enabled": True,
+                },
+            ]
+        },
+        last_alert_by_rule={},
+        active_violations=active,
+        violation_window=windows,
+        alert_cooldown=30,
+        window_size=15,
+    )
+
+    assert capability_filters == [{"helmet_required"}]
+    assert active == {"Animal Intrusion"}
+    assert windows["Animal Intrusion"] == [True, True]
+    assert windows["Missing helmet"] == [True]
 
 
 def test_partial_phone_observations_create_phone_alert_after_threshold(monkeypatch):

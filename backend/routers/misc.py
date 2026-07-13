@@ -116,6 +116,7 @@ def _apply_persistence_health(snapshot: dict, pipeline_stats: dict) -> None:
 def _build_health():
     from video_processing import (
         get_alert_pipeline_stats,
+        ppe_substitution_stats,
         rtdetr_phone_substitution_stats,
     )
 
@@ -127,7 +128,9 @@ def _build_health():
     snapshot["alertPipeline"] = pipeline_stats
     snapshot["inferenceTransport"] = {
         "primaryFrameBatch": model_manager.remote_primary_batch_stats(),
+        "ppeFrameBatch": model_manager.remote_ppe_batch_stats(),
         "specialistFrameBatch": model_manager.remote_specialist_batch_stats(),
+        "ppeSubstitution": ppe_substitution_stats(),
         "rtdetrPhoneFrameBatch": model_manager.remote_rtdetr_phone_batch_stats(),
         "rtdetrPhoneSubstitution": rtdetr_phone_substitution_stats(),
     }

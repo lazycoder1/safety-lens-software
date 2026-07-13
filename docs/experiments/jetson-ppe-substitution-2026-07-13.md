@@ -1,0 +1,143 @@
+# Jetson tracked PPE substitution — 2026-07-13
+
+Target: NVIDIA Orin NX Developer Kit, JetPack 5.1.3, TensorRT 8.5.2.2.
+
+## Decision
+
+Promote an explicit 0.5 FPS PPE cadence and optional tracked-context
+substitution. For PPE-enabled cameras using the deployed fixed rider-helmet
+prompt contract, the repeatably freshness-safe inference tier is 24 camera
+equivalents at four scheduled decision slots per second:
+
+- 3.5 fresh YOLO26 Small primary observations per camera per second;
+- 0.5 fresh YOLOE PPE observations per camera per second;
+- cached primary person/vehicle context is used only for the PPE association;
+- unrelated alert state is not advanced or cleared by a partial PPE frame.
+
+Twenty-five cameras is rejected. It completed every request but one of two
+60-second runs reached 282.405 ms PPE latency, above the 250 ms camera period.
+The existing non-PPE tier remains 21 cameras at four full primary FPS. The
+RT-DETR phone tier remains 20 cameras at four effective decision FPS plus one
+device-wide RT-DETR frame per second. These are separate measured profiles;
+their maxima must not be combined arithmetically.
+
+## Problem found
+
+Previous capacity tests budgeted the PPE specialist at about 11.1% duty, but
+the camera worker had no explicit PPE cadence. After primary context became
+actionable, a persistent person could cause PPE inference on every four-FPS
+primary pass. The benchmark and the live execution contract therefore did not
+match.
+
+This was both a capacity risk and an engineering observability problem: the
+device could appear healthy in a sparse scene, then multiply specialist work
+when people entered PPE cameras.
+
+## Implementation
+
+The worker now applies a monotonic, per-camera PPE cadence before submitting
+inference. The default target is 0.5 FPS and applies even while substitution is
+disabled, so the configured duty is a real runtime contract rather than a
+benchmark-only assumption.
+
+When substitution is enabled, a due PPE frame replaces its normal primary
+frame only when all of these conditions hold:
+
+1. the camera plan requires both COCO primary and PPE specialist inference;
+2. the lightweight primary person tracker has a stable, unexpired track;
+3. cached full-primary context is still within the existing one-second TTL;
+4. no unvalidated companion specialist requires the same frame;
+5. the cached context contains only person and rider-vehicle classes needed
+   for PPE association.
+
+An unstable or expired track keeps the due pass additive. A non-due frame runs
+the primary normally and suppresses only PPE. RT-DETR phone substitution is
+scheduled first; a selected phone pass defers PPE rather than silently losing
+it.
+
+The model server adds authenticated raw-frame PPE-only batch-2 and batch-4
+routes. The edge reuses the existing bounded microbatch implementation for a
+single configured model key, rather than introducing a second batching stack.
+Prompt mismatch returns to the existing generic route without globally
+poisoning route discovery.
+
+PPE substitution is an explicitly partial observation. Only PPE capabilities
+advance; vehicle, animal, crowd, zone, object-lifecycle, fall, phone, and other
+rule windows remain unchanged. This prevents a PPE-only frame from falsely
+clearing an unrelated incident.
+
+## Worker-path semantic gate
+
+All 18 existing PPE validation images were replayed through both paths:
+
+1. additive primary plus PPE inference;
+2. primary-only context followed by PPE-only inference and cached-context
+   composition.
+
+The comparison used the actual worker normalization, batch transport, fixed
+TensorRT runtimes, person/vehicle association, and violation function.
+
+| Gate | Result |
+| --- | ---: |
+| Relevant detection parity | 18 / 18 frames |
+| Violation outcome parity | 18 / 18 frames |
+| PPE batch-4 transport | 16 frames / 4 calls |
+| PPE batch-2 transport | 2 frames / 1 call |
+| Route fallbacks / overloads / timeouts | 0 / 0 / 0 |
+
+The corpus contains no actionable rider-helmet violation after primary rider
+association, so alert-positive and unrelated-state behavior is additionally
+covered by the local synthetic geometry and partial-observation tests. The
+Jetson gate proves real detector-output parity, not broad ground-truth PPE
+accuracy beyond the existing corpus.
+
+## Exact 0.5 FPS capacity gate
+
+The load used 640-pixel YOLO26 Small INT8 and YOLOE-26S FP16, four-camera
+phases, fixed batch-4 with batch-2 remainder handling, four bounded admission
+slots, 125 ms admission, 14 ms batch wait, and 12.5% PPE duty at four scheduled
+decision FPS. PPE work replaced a primary slot and used the new PPE-only edge
+transport.
+
+| Cameras | Duration | Effective decisions | PPE passes | Drops / failures | Primary maximum | PPE maximum | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 28 | 30 s | 3,360 / 3,360 | 420 | 0 / 0 | 224.908 ms | 293.937 ms | reject PPE tail |
+| 26 | 30 s | 3,120 / 3,120 | 390 | 0 / 0 | 212.795 ms | 276.841 ms | reject PPE tail |
+| 25 | 30 s | 3,000 / 3,000 | 375 | 0 / 0 | 101.006 ms | 194.231 ms | provisional |
+| 25, run 1 | 60 s | 6,000 / 6,000 | 750 | 0 / 0 | 205.439 ms | 282.405 ms | reject tail |
+| 25, run 2 | 60 s | 6,000 / 6,000 | 750 | 0 / 0 | 188.703 ms | 236.614 ms | pass only |
+| 24 | 30 s | 2,880 / 2,880 | 360 | 0 / 0 | 93.230 ms | 149.786 ms | pass |
+| 24, run 1 | 60 s | 5,760 / 5,760 | 720 | 0 / 0 | 135.679 ms | 219.121 ms | pass |
+| 24, run 2 | 60 s | 5,760 / 5,760 | 720 | 0 / 0 | 120.590 ms | 169.144 ms | pass |
+
+Both sustained 24-camera runs used exactly 180 PPE batch-4 calls with no
+partial batch, singleton, timeout, route-fallback, admission, or model failure.
+
+## Alert-latency and scope notes
+
+The 0.5 FPS specialist cadence means five persistent rider-helmet votes take
+about ten seconds. A generic PPE rule using the fallback ten-vote threshold
+takes about twenty seconds unless its rule has an explicit lower threshold.
+This trades alert confirmation speed for deterministic capacity and false-alert
+resistance; it must remain visible in camera/rule configuration rather than be
+described as four fresh PPE observations per second.
+
+The 24-camera capacity result uses the deployed fixed rider-helmet prompt set.
+Other dynamic prompt sets safely fall back to the generic PPE transport but do
+not inherit this measured tier until separately load-gated. Likewise, the
+24-camera PPE tier has not yet been combined with the one-FPS device-wide
+RT-DETR phone budget.
+
+## Validation and evidence
+
+- 368 relevant local tests passed;
+- Ruff passed on every changed runtime, verifier, and test file;
+- `git diff --check` passed;
+- candidate image runtime-source hashes matched the local backend sources;
+- worker parity and raw load evidence is stored on the Jetson under
+  `/opt/rakshak-lens/model-server-models/experiments/ppe-substitution/`.
+
+The checked-in substitution default remains off for conservative upgrades.
+The Jetson can enable it explicitly after installing the hash-matched candidate
+images and should expose cadence, substitution, and PPE-batch counters in the
+health response.

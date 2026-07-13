@@ -110,6 +110,12 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=4.0)
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--specialist-duty", type=float, default=0.111)
+    parser.add_argument(
+        "--specialist-mode",
+        choices=("additive", "substitute"),
+        default="additive",
+        help="Run due PPE work alongside primary or in place of that primary slot.",
+    )
     parser.add_argument("--phone-probe-interval", type=float, default=1.0)
     parser.add_argument("--phone-probe-width", type=int, default=960)
     parser.add_argument(
@@ -212,6 +218,8 @@ def main() -> int:
         )
     if args.substitution_source == "rtdetr" and args.transport != "edge":
         parser.error("RT-DETR substitution requires --transport edge")
+    if args.specialist_mode == "substitute" and args.transport != "edge":
+        parser.error("PPE substitution requires --transport edge")
     if not 20 <= args.jpeg_quality <= 100:
         parser.error("jpeg-quality must be between 20 and 100")
     if not 0.1 <= args.phase_remainder_weight <= 1.0:
@@ -353,6 +361,30 @@ def main() -> int:
         if not isinstance(records, list):
             raise RuntimeError("edge returned an invalid RT-DETR record batch")
 
+    def post_ppe(
+        camera_index: int,
+        frame_batch_size_hint: int | None,
+    ) -> None:
+        if edge_model_manager is None:
+            raise RuntimeError("PPE substitution requires edge model transport")
+        frame = frame_sets[camera_index % len(frame_sets)][640]
+        results = edge_model_manager.predict_record_batches(
+            frame,
+            [
+                {
+                    "request_id": "ppe_specialist",
+                    "model_key": "ppe_specialist",
+                    "conf": 0.3,
+                    "device": "cuda",
+                    "imgsz": 640,
+                    "classes": PPE_CLASSES,
+                }
+            ],
+            frame_batch_size_hint=frame_batch_size_hint,
+        )
+        if set(results) != {"ppe_specialist"}:
+            raise RuntimeError("edge returned an incomplete PPE substitution result")
+
     def run_camera(camera_index: int) -> None:
         if edge_model_manager is not None:
             try:
@@ -384,6 +416,7 @@ def main() -> int:
         substituted_requests = 0
         substitution_attempts = 0
         rtdetr_latencies: list[float] = []
+        ppe_substitution_latencies: list[float] = []
         specialist_deferred = False
         frame_batch_size_hint = (
             _phase_group_cardinality(
@@ -417,6 +450,26 @@ def main() -> int:
                 specialist_deferred = True
             elif specialist:
                 specialist_deferred = False
+            if specialist and args.specialist_mode == "substitute":
+                request_started = time.perf_counter()
+                try:
+                    post_ppe(camera_index, frame_batch_size_hint)
+                except Exception as exc:
+                    if edge_model_manager is not None and isinstance(
+                        exc,
+                        edge_model_manager.RemoteInferenceOverloadedError,
+                    ):
+                        overloads += 1
+                    else:
+                        failures += 1
+                else:
+                    specialist_requests += 1
+                    substituted_requests += 1
+                    ppe_substitution_latencies.append(
+                        (time.perf_counter() - request_started) * 1000.0
+                    )
+                sequence += 1
+                continue
             substitute_primary = (
                 camera_index in substitution_cameras
                 and _specialist_due(sequence, args.substitute_duty)
@@ -496,6 +549,7 @@ def main() -> int:
             ),
             "latencies_ms": latencies,
             "rtdetr_latencies_ms": rtdetr_latencies,
+            "ppe_substitution_latencies_ms": ppe_substitution_latencies,
         }
 
     benchmark_start = 0.0
@@ -528,14 +582,21 @@ def main() -> int:
         for report in reports
         for latency in report.get("rtdetr_latencies_ms", [])
     ]
+    all_ppe_substitution_latencies = [
+        latency
+        for report in reports
+        for latency in report.get("ppe_substitution_latencies_ms", [])
+    ]
     for report in reports:
         report.pop("latencies_ms", None)
         report.pop("rtdetr_latencies_ms", None)
+        report.pop("ppe_substitution_latencies_ms", None)
     result = {
         "cameras": args.cameras,
         "target_fps": args.fps,
         "duration_seconds": args.duration,
         "specialist_duty_target": args.specialist_duty,
+        "specialist_mode": args.specialist_mode,
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
         "substitute_cameras": sorted(substitution_cameras),
         "substitute_duty_target": args.substitute_duty,
@@ -562,6 +623,11 @@ def main() -> int:
         ),
         "edge_specialist_batch": (
             edge_model_manager.remote_specialist_batch_stats()
+            if edge_model_manager is not None
+            else None
+        ),
+        "edge_ppe_batch": (
+            edge_model_manager.remote_ppe_batch_stats()
             if edge_model_manager is not None
             else None
         ),
@@ -597,6 +663,17 @@ def main() -> int:
             else None,
             "maximum": round(max(all_rtdetr_latencies), 3)
             if all_rtdetr_latencies
+            else None,
+        },
+        "ppe_substitution_latency_ms": {
+            "median": round(statistics.median(all_ppe_substitution_latencies), 3)
+            if all_ppe_substitution_latencies
+            else None,
+            "p95": round(_percentile(all_ppe_substitution_latencies, 0.95), 3)
+            if all_ppe_substitution_latencies
+            else None,
+            "maximum": round(max(all_ppe_substitution_latencies), 3)
+            if all_ppe_substitution_latencies
             else None,
         },
         "per_camera": reports,

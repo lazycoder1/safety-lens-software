@@ -639,6 +639,27 @@ def test_check_yoloe_violations_uses_safety_rule_ids_when_yoloe_classes_are_stal
 
 
 @mock.patch("detection.get_config")
+def test_check_yoloe_violations_respects_partial_capability_filter(mock_cfg):
+    mock_cfg.return_value = {
+        "cameras": {
+            "cam5": {
+                "safety_rule_ids": ["ppe_helmet", "ppe_gloves"],
+            }
+        },
+        "safety_rules": list(DEFAULT_SAFETY_RULES),
+    }
+    dets = [{"class": "person", "confidence": 0.91, "bbox": [0, 0, 100, 200]}]
+
+    violations = check_yoloe_violations(
+        dets,
+        "cam5",
+        capability_filter={"helmet_required"},
+    )
+
+    assert [violation["rule"] for violation in violations] == ["Missing helmet"]
+
+
+@mock.patch("detection.get_config")
 def test_rider_helmet_rule_does_not_flag_people_without_vehicle(mock_cfg):
     mock_cfg.return_value = {
         "cameras": {"gate_cam": {"safety_rule_ids": ["ppe_rider_helmet"]}},

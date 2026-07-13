@@ -114,6 +114,12 @@ _REMOTE_SPECIALIST_BATCH2_SUPPORT_LOCK = threading.Lock()
 _REMOTE_SPECIALIST_BATCH2_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
 _REMOTE_SPECIALIST_BATCH4_SUPPORT_LOCK = threading.Lock()
 _REMOTE_SPECIALIST_BATCH4_SUPPORT: dict[str, Any] = {"url": None, "supported": None}
+_REMOTE_PPE_BATCH_SUPPORT_LOCK = threading.Lock()
+_REMOTE_PPE_BATCH_SUPPORT: dict[str, Any] = {
+    "url": None,
+    "2": None,
+    "4": None,
+}
 _REMOTE_RTDETR_PHONE_SUPPORT_LOCK = threading.Lock()
 _REMOTE_RTDETR_PHONE_SUPPORT: dict[str, Any] = {
     "url": None,
@@ -1290,6 +1296,99 @@ def _remote_post_raw_primary_batch4(
     with _REMOTE_PRIMARY_BATCH4_SUPPORT_LOCK:
         if _REMOTE_PRIMARY_BATCH4_SUPPORT["url"] == settings["url"]:
             _REMOTE_PRIMARY_BATCH4_SUPPORT["supported"] = True
+    return response.json()
+
+
+def _remote_ppe_batch_route_may_run(batch_size: int) -> bool:
+    if batch_size not in {2, 4} or not _remote_raw_transport_enabled():
+        return False
+    settings = _remote_settings()
+    with _REMOTE_PPE_BATCH_SUPPORT_LOCK:
+        if _REMOTE_PPE_BATCH_SUPPORT["url"] != settings["url"]:
+            _REMOTE_PPE_BATCH_SUPPORT.update(
+                url=settings["url"],
+                **{"2": None, "4": None},
+            )
+        return _REMOTE_PPE_BATCH_SUPPORT[str(batch_size)] is not False
+
+
+def _remote_post_raw_ppe_batch(
+    items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Post two or four PPE-only frames, or return None for safe fallback."""
+    batch_size = len(items)
+    if batch_size not in {2, 4}:
+        raise ValueError("Remote PPE batch requires two or four frames")
+    if not _remote_ppe_batch_route_may_run(batch_size):
+        return None
+    settings = _remote_settings()
+    metadata = []
+    contiguous_frames = []
+    total_bytes = 0
+    for index, item in enumerate(items):
+        frame = item["frame"]
+        if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+            return None
+        contiguous = np.ascontiguousarray(frame)
+        height, width, channels = contiguous.shape
+        byte_length = int(contiguous.nbytes)
+        contiguous_frames.append(contiguous)
+        total_bytes += byte_length
+        request = item["request"]
+        metadata.append(
+            {
+                "request_id": f"frame-{index}",
+                "conf": request["conf"],
+                "device": request["device"],
+                "imgsz": request["imgsz"],
+                "classes": request["classes"],
+                "frame_width": width,
+                "frame_height": height,
+                "frame_channels": channels,
+                "byte_length": byte_length,
+            }
+        )
+
+    body = bytearray(total_bytes)
+    offset = 0
+    for frame in contiguous_frames:
+        view = memoryview(frame).cast("B")
+        body[offset : offset + len(view)] = view
+        offset += len(view)
+    headers = _remote_headers(settings["token"])
+    headers.update(
+        {
+            "Content-Type": "application/octet-stream",
+            "X-Rakshak-PPE-Frame-Batch": json.dumps(
+                metadata,
+                separators=(",", ":"),
+            ),
+        }
+    )
+    response = _remote_session().post(
+        f"{settings['url']}/api/infer/raw/ppe-batch{batch_size}",
+        data=body,
+        headers=headers,
+        timeout=settings["timeout_seconds"],
+    )
+    if response.status_code == 404:
+        try:
+            route_missing = response.json().get("detail") == "Not Found"
+        except (AttributeError, TypeError, ValueError):
+            route_missing = False
+        if route_missing:
+            with _REMOTE_PPE_BATCH_SUPPORT_LOCK:
+                if _REMOTE_PPE_BATCH_SUPPORT["url"] == settings["url"]:
+                    _REMOTE_PPE_BATCH_SUPPORT[str(batch_size)] = False
+            return None
+    if response.status_code == 409:
+        # A configured fixed engine can reject one prompt set while remaining
+        # valid for another camera. Do not poison route discovery globally.
+        return None
+    response.raise_for_status()
+    with _REMOTE_PPE_BATCH_SUPPORT_LOCK:
+        if _REMOTE_PPE_BATCH_SUPPORT["url"] == settings["url"]:
+            _REMOTE_PPE_BATCH_SUPPORT[str(batch_size)] = True
     return response.json()
 
 
@@ -3632,25 +3731,30 @@ def _scale_remote_records_to_source(
 
 
 class _RemotePrimaryFrameBatcher:
-    """Group compatible primary frames before remote admission."""
+    """Group compatible primary or PPE-only frames before remote admission."""
 
     def __init__(
         self,
         wait_seconds: float,
         batch_size: int = 2,
         batch2_early_flush_seconds: float = 0.0,
+        *,
+        model_key: str = "coco_primary",
     ):
         if batch_size not in {2, 4}:
             raise ValueError("Remote frame batch size must be 2 or 4")
         self.wait_seconds = wait_seconds
         self.batch_size = batch_size
+        if model_key not in {"coco_primary", "ppe_specialist"}:
+            raise ValueError("Remote single-model batcher model is unsupported")
+        self.model_key = model_key
         self.batch2_early_flush_seconds = (
             min(wait_seconds, max(0.0, batch2_early_flush_seconds))
             if batch_size == 4
             else 0.0
         )
         self._lock = threading.Lock()
-        self._pending: dict[tuple[float, str, int], list[dict[str, Any]]] = {}
+        self._pending: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         self._counters = {
             "eligible_requests": 0,
             "paired_requests": 0,
@@ -3667,7 +3771,7 @@ class _RemotePrimaryFrameBatcher:
 
     def _claim_batch(
         self,
-        key: tuple[float, str, int],
+        key: tuple[Any, ...],
         current: dict[str, Any],
         batch_size: int,
     ) -> list[dict[str, Any]] | None:
@@ -3704,11 +3808,14 @@ class _RemotePrimaryFrameBatcher:
             with self._lock:
                 self._counters["pairs_executed"] += 1
                 self._counters[f"batch{batch_size}_executed"] += 1
-            response = (
-                _remote_post_raw_primary_batch4(items)
-                if batch_size == 4
-                else _remote_post_raw_primary_batch2(items)
-            )
+            if self.model_key == "ppe_specialist":
+                response = _remote_post_raw_ppe_batch(items)
+            else:
+                response = (
+                    _remote_post_raw_primary_batch4(items)
+                    if batch_size == 4
+                    else _remote_post_raw_primary_batch2(items)
+                )
             if response is None:
                 with self._lock:
                     self._counters["route_fallbacks"] += batch_size
@@ -3717,7 +3824,7 @@ class _RemotePrimaryFrameBatcher:
                 expected = {f"frame-{index}" for index in range(batch_size)}
                 if not isinstance(results, dict) or set(results) != expected:
                     raise RuntimeError(
-                        "Model server returned an incomplete primary frame batch"
+                        "Model server returned an incomplete single-model frame batch"
                     )
                 for index, item in enumerate(items):
                     request_id = f"frame-{index}"
@@ -3741,15 +3848,24 @@ class _RemotePrimaryFrameBatcher:
 
     def _eligible(self, request: dict[str, Any]) -> bool:
         route_available = (
-            _remote_primary_batch4_route_may_run()
-            if self.batch_size == 4
-            else _remote_primary_batch2_route_may_run()
+            _remote_ppe_batch_route_may_run(self.batch_size)
+            if self.model_key == "ppe_specialist"
+            else (
+                _remote_primary_batch4_route_may_run()
+                if self.batch_size == 4
+                else _remote_primary_batch2_route_may_run()
+            )
+        )
+        classes_compatible = (
+            bool(request["classes"])
+            if self.model_key == "ppe_specialist"
+            else not request["classes"]
         )
         return (
             self.wait_seconds > 0
-            and request["model_key"] == "coco_primary"
+            and request["model_key"] == self.model_key
             and request["imgsz"] == _REMOTE_PRIMARY_BATCH_IMGSZ
-            and not request["classes"]
+            and classes_compatible
             and route_available
         )
 
@@ -3781,7 +3897,12 @@ class _RemotePrimaryFrameBatcher:
             "records": [],
             "error": None,
         }
-        key = (request["conf"], request["device"], request["imgsz"])
+        key = (
+            request["conf"],
+            request["device"],
+            request["imgsz"],
+            tuple(request["classes"]),
+        )
         items = None
         with self._lock:
             self._counters["eligible_requests"] += 1
@@ -3801,7 +3922,12 @@ class _RemotePrimaryFrameBatcher:
                 if current["error"] is not None:
                     raise current["error"]
                 return current["handled"], current["records"]
-            if _remote_primary_batch2_route_may_run():
+            batch2_available = (
+                _remote_ppe_batch_route_may_run(2)
+                if self.model_key == "ppe_specialist"
+                else _remote_primary_batch2_route_may_run()
+            )
+            if batch2_available:
                 items = self._claim_batch(key, current, 2)
                 if items is not None:
                     return self._execute_batch(items, 2, current)
@@ -3832,6 +3958,7 @@ class _RemotePrimaryFrameBatcher:
         with self._lock:
             return {
                 "enabled": self.wait_seconds > 0,
+                "model_key": self.model_key,
                 "batch_size": self.batch_size,
                 "wait_ms": round(self.wait_seconds * 1000, 3),
                 "batch2_early_flush_ms": round(
@@ -3849,9 +3976,20 @@ _REMOTE_PRIMARY_FRAME_BATCHER = _RemotePrimaryFrameBatcher(
     _REMOTE_BATCH2_EARLY_FLUSH_SECONDS,
 )
 
+_REMOTE_PPE_FRAME_BATCHER = _RemotePrimaryFrameBatcher(
+    _REMOTE_SPECIALIST_BATCH_WAIT_SECONDS,
+    _REMOTE_FRAME_BATCH_SIZE,
+    _REMOTE_BATCH2_EARLY_FLUSH_SECONDS,
+    model_key="ppe_specialist",
+)
+
 
 def remote_primary_batch_stats() -> dict[str, Any]:
     return _REMOTE_PRIMARY_FRAME_BATCHER.stats()
+
+
+def remote_ppe_batch_stats() -> dict[str, Any]:
+    return _REMOTE_PPE_FRAME_BATCHER.stats()
 
 
 class _RemoteSpecialistFrameBatcher:
@@ -4418,7 +4556,12 @@ def predict_record_batches(
 
     if len(normalized) == 1:
         item = normalized[0]
-        handled, records = _REMOTE_PRIMARY_FRAME_BATCHER.submit(
+        frame_batcher = (
+            _REMOTE_PPE_FRAME_BATCHER
+            if item["model_key"] == "ppe_specialist"
+            else _REMOTE_PRIMARY_FRAME_BATCHER
+        )
+        handled, records = frame_batcher.submit(
             frame,
             item,
             frame_batch_size_hint=frame_batch_size_hint,

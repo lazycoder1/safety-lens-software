@@ -187,6 +187,13 @@ def test_health():
         "admission_overloads",
     } <= set(data["inferenceTransport"]["primaryFrameBatch"])
     assert {
+        "model_key",
+        "eligible_requests",
+        "batch2_executed",
+        "batch4_executed",
+        "route_fallbacks",
+    } <= set(data["inferenceTransport"]["ppeFrameBatch"])
+    assert {
         "enabled",
         "wait_ms",
         "target_imgsz",
@@ -210,6 +217,13 @@ def test_health():
         "selected_frames",
         "missed_pair_windows",
     } <= set(data["inferenceTransport"]["rtdetrPhoneSubstitution"])
+    assert {
+        "tracked_cameras",
+        "cadence_suppressed_frames",
+        "selected_frames",
+        "substituted_frames",
+        "additive_frames",
+    } <= set(data["inferenceTransport"]["ppeSubstitution"])
 
 
 def test_error_reporting_is_public_but_error_query_requires_auth():
@@ -749,6 +763,8 @@ def test_update_global_partial(mock_restart):
             "yolo_conf": 0.5,
             "coco_inference_width": 640,
             "ppe_inference_width": 640,
+            "ppe_specialist_target_fps": 0.5,
+            "ppe_specialist_substitution_enabled": True,
             "mobile_phone_inference_width": 960,
             "mobile_phone_probe_interval_seconds": 1.0,
             "rtdetr_phone_substitution_enabled": True,
@@ -762,6 +778,8 @@ def test_update_global_partial(mock_restart):
     assert data["yolo_conf"] == 0.5
     assert data["coco_inference_width"] == 640
     assert data["ppe_inference_width"] == 640
+    assert data["ppe_specialist_target_fps"] == 0.5
+    assert data["ppe_specialist_substitution_enabled"] is True
     assert data["mobile_phone_inference_width"] == 960
     assert data["mobile_phone_probe_interval_seconds"] == 1.0
     assert data["rtdetr_phone_substitution_enabled"] is True
