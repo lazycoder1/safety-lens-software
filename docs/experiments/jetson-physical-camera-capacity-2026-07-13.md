@@ -128,3 +128,22 @@ Raw evidence is stored on the Jetson under:
 - `/opt/rakshak-lens/model-server-models/experiments/physical-combined-cases/`
 - `/opt/rakshak-lens/model-server-models/experiments/physical-25-dual-inference/`
 - `/opt/rakshak-lens/model-server-models/experiments/capture-resize-parity/`
+
+## Live rollout
+
+Commit `36b2cfc` was pushed directly to `master`, and its hash-matched edge
+image was promoted with the three measured Jetson settings. The model server
+remained warm and the prior edge container remains stopped as rollback.
+
+After the reconnect cycle:
+
+- overall edge health was `ok` with no reasons;
+- cam1 and cam2 were both running, frame-fresh, and using `gstreamer_nvdec`;
+- the effective capture rate resolved to six FPS for both configured cameras;
+- cam1's published main-stream frame was 640×360, confirming direct 640-wide
+  capture, while cam2 retained its native 352×288 substream;
+- the cameras had 287 inference successes at the observation point with zero
+  failures or overload drops;
+- primary, PPE, and RT-DETR transports had zero admission or route failures;
+- alert persistence and delivery workers were alive with zero failures; and
+- the one-minute model watchdog timer was active.
