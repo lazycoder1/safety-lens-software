@@ -31,6 +31,67 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
 
 
+def _distribution(values: list[float]) -> dict[str, float | None]:
+    """Return a stable latency/age summary without retaining samples in output."""
+    if not values:
+        return {
+            "median": None,
+            "p95": None,
+            "p99": None,
+            "maximum": None,
+        }
+    return {
+        "median": round(statistics.median(values), 3),
+        "p95": round(_percentile(values, 0.95), 3),
+        "p99": round(_percentile(values, 0.99), 3),
+        "maximum": round(max(values), 3),
+    }
+
+
+def _jain_index(values: list[float]) -> float | None:
+    """Return Jain's fairness index, or None when there is no service."""
+    bounded = [max(0.0, float(value)) for value in values]
+    if not bounded or not any(bounded):
+        return None
+    numerator = sum(bounded) ** 2
+    denominator = len(bounded) * sum(value * value for value in bounded)
+    return round(numerator / denominator, 6) if denominator else None
+
+
+def _camera_fps_profile(
+    raw_profile: str | None,
+    *,
+    cameras: int,
+    default_fps: float,
+) -> list[float]:
+    """Expand a comma-separated camera-rate pattern across all cameras."""
+    if not raw_profile:
+        return [default_fps] * cameras
+    try:
+        pattern = [float(value.strip()) for value in raw_profile.split(",")]
+    except ValueError as exc:
+        raise ValueError("camera FPS profile must contain only numbers") from exc
+    if not pattern or any(not math.isfinite(value) or value <= 0 for value in pattern):
+        raise ValueError("camera FPS profile values must be positive and finite")
+    return [pattern[index % len(pattern)] for index in range(cameras)]
+
+
+def _maximum_gap_ms(
+    completion_times: list[float],
+    *,
+    window_start: float,
+    window_end: float,
+) -> float:
+    """Return the largest service gap, including both measurement edges."""
+    if window_end <= window_start:
+        return 0.0
+    observed = sorted(
+        value for value in completion_times if window_start <= value <= window_end
+    )
+    points = [window_start, *observed, window_end]
+    return round(max(right - left for left, right in zip(points, points[1:])) * 1000, 3)
+
+
 def _resize(frame: np.ndarray, maximum_dimension: int) -> np.ndarray:
     height, width = frame.shape[:2]
     scale = min(1.0, maximum_dimension / max(height, width))
@@ -108,7 +169,32 @@ def main() -> int:
     parser.add_argument("--frames", nargs="+", type=Path, required=True)
     parser.add_argument("--cameras", type=int, required=True)
     parser.add_argument("--fps", type=float, default=4.0)
+    parser.add_argument(
+        "--camera-fps-profile",
+        help=(
+            "Optional comma-separated quiet/uncertain/active FPS pattern. "
+            "The pattern repeats when fewer rates than cameras are supplied."
+        ),
+    )
     parser.add_argument("--duration", type=float, default=30.0)
+    parser.add_argument(
+        "--stale-after-ms",
+        type=float,
+        default=0.0,
+        help=(
+            "Drop a scheduled frame before submit when it is already older "
+            "than this threshold; zero preserves catch-up/FIFO behavior."
+        ),
+    )
+    parser.add_argument(
+        "--maximum-drain-seconds",
+        type=float,
+        default=15.0,
+        help=(
+            "Bound how long FIFO-like overdue work may drain after the "
+            "measurement window before remaining slots are abandoned."
+        ),
+    )
     parser.add_argument("--specialist-duty", type=float, default=0.111)
     parser.add_argument(
         "--specialist-mode",
@@ -205,6 +291,22 @@ def main() -> int:
     args = parser.parse_args()
     if args.cameras < 1 or args.fps <= 0 or args.duration <= 0:
         parser.error("cameras, fps, and duration must be positive")
+    if not math.isfinite(args.stale_after_ms) or args.stale_after_ms < 0:
+        parser.error("stale-after-ms must be finite and non-negative")
+    if (
+        not math.isfinite(args.maximum_drain_seconds)
+        or args.maximum_drain_seconds < 0
+        or args.maximum_drain_seconds > 120
+    ):
+        parser.error("maximum-drain-seconds must be between zero and 120")
+    try:
+        camera_fps = _camera_fps_profile(
+            args.camera_fps_profile,
+            cameras=args.cameras,
+            default_fps=args.fps,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if not 0 <= args.specialist_duty <= 1:
         parser.error("specialist-duty must be between 0 and 1")
     if not 0 <= args.phone_context_duty <= 1:
@@ -273,8 +375,7 @@ def main() -> int:
     start_event = threading.Event()
     prewarm_failures: list[int] = []
     prewarm_lock = threading.Lock()
-    period = 1.0 / args.fps
-    probe_every = max(1, round(args.phone_probe_interval * args.fps))
+    phase_period = 1.0 / max(camera_fps)
     reports: list[dict] = [{} for _ in range(args.cameras)]
     substitution_cameras = set(args.substitute_cameras)
 
@@ -413,14 +514,29 @@ def main() -> int:
         started = benchmark_start + _phase_offset(
             camera_index,
             args.cameras,
-            period,
+            phase_period,
             args.phase_mode,
             args.phase_group_size,
             args.phase_remainder_weight,
         )
+        camera_target_fps = camera_fps[camera_index]
+        period = 1.0 / camera_target_fps
+        probe_every = max(1, round(args.phone_probe_interval * camera_target_fps))
         deadline = benchmark_start + args.duration
         sequence = 0
         latencies: list[float] = []
+        latencies_within_window: list[float] = []
+        schedule_lateness_ms: list[float] = []
+        frame_age_ms: list[float] = []
+        frame_age_within_window_ms: list[float] = []
+        stale_drop_age_ms: list[float] = []
+        completion_times: list[float] = []
+        primary_successes_within_window = 0
+        effective_successes_within_window = 0
+        completions_after_deadline = 0
+        external_substitutions_unmeasured = 0
+        abandoned_after_drain_deadline = 0
+        stale_before_submit_drops = 0
         overloads = 0
         failures = 0
         specialist_requests = 0
@@ -439,13 +555,48 @@ def main() -> int:
             if args.phase_remainder_hint
             else None
         )
-        while True:
-            scheduled = started + sequence * period
-            if scheduled >= deadline:
+        scheduled_slots = max(0, math.ceil((deadline - started) / period - 1e-12))
+        drain_deadline = deadline + args.maximum_drain_seconds
+
+        def record_completion(
+            completed: float,
+            scheduled: float,
+            *,
+            primary: bool,
+            frame_age_observed: bool = True,
+        ) -> None:
+            nonlocal primary_successes_within_window
+            nonlocal effective_successes_within_window
+            nonlocal completions_after_deadline
+            completion_times.append(completed)
+            within_window = completed <= deadline
+            if within_window:
+                effective_successes_within_window += 1
+                primary_successes_within_window += int(primary)
+            else:
+                completions_after_deadline += 1
+            if frame_age_observed:
+                age = (completed - scheduled) * 1000.0
+                frame_age_ms.append(age)
+                if within_window:
+                    frame_age_within_window_ms.append(age)
+
+        while sequence < scheduled_slots:
+            if time.monotonic() >= drain_deadline:
+                abandoned_after_drain_deadline = scheduled_slots - sequence
                 break
+            scheduled = started + sequence * period
             remaining = scheduled - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
+            submit_ready = time.monotonic()
+            scheduled_age_ms = max(0.0, (submit_ready - scheduled) * 1000.0)
+            schedule_lateness_ms.append(scheduled_age_ms)
+            if args.stale_after_ms and scheduled_age_ms > args.stale_after_ms:
+                stale_before_submit_drops += 1
+                stale_drop_age_ms.append(scheduled_age_ms)
+                sequence += 1
+                continue
             specialist = specialist_deferred or _specialist_due(
                 sequence,
                 args.specialist_duty,
@@ -476,6 +627,8 @@ def main() -> int:
                 else:
                     specialist_requests += 1
                     substituted_requests += 1
+                    completed = time.monotonic()
+                    record_completion(completed, scheduled, primary=False)
                     ppe_substitution_latencies.append(
                         (time.perf_counter() - request_started) * 1000.0
                     )
@@ -496,6 +649,14 @@ def main() -> int:
                 substitution_attempts += 1
                 if args.substitution_source == "external":
                     substituted_requests += 1
+                    completed = time.monotonic()
+                    external_substitutions_unmeasured += 1
+                    record_completion(
+                        completed,
+                        scheduled,
+                        primary=False,
+                        frame_age_observed=False,
+                    )
                     sequence += 1
                     continue
                 request_started = time.perf_counter()
@@ -511,6 +672,8 @@ def main() -> int:
                         failures += 1
                 else:
                     substituted_requests += 1
+                    completed = time.monotonic()
+                    record_completion(completed, scheduled, primary=False)
                     rtdetr_latencies.append(
                         (time.perf_counter() - request_started) * 1000.0
                     )
@@ -541,27 +704,77 @@ def main() -> int:
                 else:
                     failures += 1
             else:
-                latencies.append((time.perf_counter() - request_started) * 1000.0)
+                completed = time.monotonic()
+                request_latency = (time.perf_counter() - request_started) * 1000.0
+                latencies.append(request_latency)
+                if completed <= deadline:
+                    latencies_within_window.append(request_latency)
+                record_completion(completed, scheduled, primary=True)
                 specialist_requests += int(specialist)
             finally:
                 if admitted_externally:
                     admission.release()
             sequence += 1
+        camera_finished = time.monotonic()
         reports[camera_index] = {
             "camera": camera_index,
-            "scheduled": sequence,
+            "target_fps": camera_target_fps,
+            "scheduled": scheduled_slots,
+            "processed_slots": sequence,
+            "abandoned_after_drain_deadline": abandoned_after_drain_deadline,
             "successes": len(latencies),
+            "successes_within_window": primary_successes_within_window,
             "specialist_requests": specialist_requests,
             "substituted_requests": substituted_requests,
+            "external_substitutions_unmeasured": external_substitutions_unmeasured,
             "substitution_attempts": substitution_attempts,
+            "effective_successes_within_window": effective_successes_within_window,
+            "completions_after_deadline": completions_after_deadline,
             "overloads": overloads,
             "failures": failures,
-            "achieved_fps": round(len(latencies) / args.duration, 3),
-            "effective_fps": round(
-                (len(latencies) + substituted_requests) / args.duration,
+            "stale_before_submit_drops": stale_before_submit_drops,
+            "achieved_fps": round(
+                primary_successes_within_window / args.duration,
                 3,
             ),
+            "effective_fps": round(
+                effective_successes_within_window / args.duration,
+                3,
+            ),
+            "service_ratio": round(
+                effective_successes_within_window / max(1, scheduled_slots),
+                6,
+            ),
+            "drain_elapsed_seconds": round(max(0.0, camera_finished - deadline), 3),
+            "schedule_lateness_ms": _distribution(schedule_lateness_ms),
+            "stale_drop_age_ms": _distribution(stale_drop_age_ms),
+            "frame_age_ms": _distribution(frame_age_ms),
+            "frame_age_within_window_ms": _distribution(
+                frame_age_within_window_ms
+            ),
+            "maximum_measurement_service_gap_ms": _maximum_gap_ms(
+                completion_times,
+                window_start=started,
+                window_end=deadline,
+            ),
+            "maximum_intercompletion_gap_ms": (
+                round(
+                    max(
+                        right - left
+                        for left, right in zip(completion_times, completion_times[1:])
+                    )
+                    * 1000.0,
+                    3,
+                )
+                if len(completion_times) > 1
+                else None
+            ),
             "latencies_ms": latencies,
+            "latencies_within_window_ms": latencies_within_window,
+            "schedule_lateness_samples_ms": schedule_lateness_ms,
+            "stale_drop_age_samples_ms": stale_drop_age_ms,
+            "frame_age_samples_ms": frame_age_ms,
+            "frame_age_within_window_samples_ms": frame_age_within_window_ms,
             "rtdetr_latencies_ms": rtdetr_latencies,
             "ppe_substitution_latencies_ms": ppe_substitution_latencies,
         }
@@ -580,9 +793,10 @@ def main() -> int:
         raise RuntimeError("shared benchmark start is not far enough in the future")
     start_event.set()
     for thread in threads:
-        thread.join(timeout=args.duration + 15.0)
+        thread.join(timeout=args.duration + args.maximum_drain_seconds + 5.0)
     if any(thread.is_alive() for thread in threads):
         raise RuntimeError("camera load worker did not stop")
+    benchmark_finished = time.monotonic()
     if prewarm_failures:
         raise RuntimeError(
             f"edge session prewarm failed for {len(prewarm_failures)} camera workers"
@@ -590,6 +804,11 @@ def main() -> int:
 
     all_latencies = [
         latency for report in reports for latency in report.get("latencies_ms", [])
+    ]
+    all_latencies_within_window = [
+        latency
+        for report in reports
+        for latency in report.get("latencies_within_window_ms", [])
     ]
     all_rtdetr_latencies = [
         latency
@@ -601,14 +820,60 @@ def main() -> int:
         for report in reports
         for latency in report.get("ppe_substitution_latencies_ms", [])
     ]
+    all_schedule_lateness = [
+        latency
+        for report in reports
+        for latency in report.get("schedule_lateness_samples_ms", [])
+    ]
+    all_stale_drop_ages = [
+        latency
+        for report in reports
+        for latency in report.get("stale_drop_age_samples_ms", [])
+    ]
+    all_frame_ages = [
+        latency
+        for report in reports
+        for latency in report.get("frame_age_samples_ms", [])
+    ]
+    all_frame_ages_within_window = [
+        latency
+        for report in reports
+        for latency in report.get("frame_age_within_window_samples_ms", [])
+    ]
     for report in reports:
         report.pop("latencies_ms", None)
+        report.pop("latencies_within_window_ms", None)
+        report.pop("schedule_lateness_samples_ms", None)
+        report.pop("stale_drop_age_samples_ms", None)
+        report.pop("frame_age_samples_ms", None)
+        report.pop("frame_age_within_window_samples_ms", None)
         report.pop("rtdetr_latencies_ms", None)
         report.pop("ppe_substitution_latencies_ms", None)
+    achieved_rates = [report["achieved_fps"] for report in reports]
+    effective_rates = [report["effective_fps"] for report in reports]
+    service_ratios = [report["service_ratio"] for report in reports]
+    effective_requests = len(all_latencies) + sum(
+        report["substituted_requests"] for report in reports
+    )
+    effective_requests_within_window = sum(
+        report["effective_successes_within_window"] for report in reports
+    )
+    benchmark_wall_elapsed = benchmark_finished - benchmark_start
     result = {
         "cameras": args.cameras,
         "target_fps": args.fps,
+        "camera_fps_profile": camera_fps,
         "duration_seconds": args.duration,
+        "benchmark_wall_elapsed_seconds": round(
+            benchmark_wall_elapsed,
+            3,
+        ),
+        "drain_elapsed_seconds": round(
+            max(0.0, benchmark_finished - (benchmark_start + args.duration)),
+            3,
+        ),
+        "maximum_drain_seconds": args.maximum_drain_seconds,
+        "stale_after_ms": args.stale_after_ms or None,
         "specialist_duty_target": args.specialist_duty,
         "specialist_mode": args.specialist_mode,
         "specialist_requests": sum(report["specialist_requests"] for report in reports),
@@ -652,45 +917,51 @@ def main() -> int:
             else None
         ),
         "requests": len(all_latencies),
-        "effective_requests": len(all_latencies)
-        + sum(report["substituted_requests"] for report in reports),
+        "requests_within_window": sum(
+            report["successes_within_window"] for report in reports
+        ),
+        "effective_requests": effective_requests,
+        "effective_requests_within_window": effective_requests_within_window,
+        "aggregate_effective_fps": round(
+            effective_requests_within_window / args.duration,
+            3,
+        ),
+        "drained_effective_fps": round(
+            effective_requests / max(benchmark_wall_elapsed, 1e-9),
+            3,
+        ),
+        "completions_after_deadline": sum(
+            report["completions_after_deadline"] for report in reports
+        ),
+        "abandoned_after_drain_deadline": sum(
+            report["abandoned_after_drain_deadline"] for report in reports
+        ),
         "overloads": sum(report["overloads"] for report in reports),
         "failures": sum(report["failures"] for report in reports),
+        "stale_before_submit_drops": sum(
+            report["stale_before_submit_drops"] for report in reports
+        ),
         "minimum_camera_fps": min(report["achieved_fps"] for report in reports),
         "minimum_effective_camera_fps": min(
             report["effective_fps"] for report in reports
         ),
-        "latency_ms": {
-            "median": round(statistics.median(all_latencies), 3)
-            if all_latencies
-            else None,
-            "p95": round(_percentile(all_latencies, 0.95), 3)
-            if all_latencies
-            else None,
-            "maximum": round(max(all_latencies), 3) if all_latencies else None,
+        "fairness": {
+            "achieved_fps_jain": _jain_index(achieved_rates),
+            "effective_fps_jain": _jain_index(effective_rates),
+            "demand_normalized_jain": _jain_index(service_ratios),
         },
-        "rtdetr_latency_ms": {
-            "median": round(statistics.median(all_rtdetr_latencies), 3)
-            if all_rtdetr_latencies
-            else None,
-            "p95": round(_percentile(all_rtdetr_latencies, 0.95), 3)
-            if all_rtdetr_latencies
-            else None,
-            "maximum": round(max(all_rtdetr_latencies), 3)
-            if all_rtdetr_latencies
-            else None,
-        },
-        "ppe_substitution_latency_ms": {
-            "median": round(statistics.median(all_ppe_substitution_latencies), 3)
-            if all_ppe_substitution_latencies
-            else None,
-            "p95": round(_percentile(all_ppe_substitution_latencies, 0.95), 3)
-            if all_ppe_substitution_latencies
-            else None,
-            "maximum": round(max(all_ppe_substitution_latencies), 3)
-            if all_ppe_substitution_latencies
-            else None,
-        },
+        "schedule_lateness_ms": _distribution(all_schedule_lateness),
+        "stale_drop_age_ms": _distribution(all_stale_drop_ages),
+        "frame_age_ms": _distribution(all_frame_ages),
+        "frame_age_within_window_ms": _distribution(
+            all_frame_ages_within_window
+        ),
+        "latency_ms": _distribution(all_latencies),
+        "latency_within_window_ms": _distribution(all_latencies_within_window),
+        "rtdetr_latency_ms": _distribution(all_rtdetr_latencies),
+        "ppe_substitution_latency_ms": _distribution(
+            all_ppe_substitution_latencies
+        ),
         "per_camera": reports,
     }
     rendered = json.dumps(result, indent=2, sort_keys=True)

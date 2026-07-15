@@ -38,13 +38,25 @@ backend/.pytest_cache/
 
 # Config with secrets
 backend/config.json
+/backend/config.json.*
+/backend/.config.json.*
 
 # Licensing — runtime state and any private keys must never be committed
 backend/keys/*_private.pem
 backend/license/
 backend/heartbeat/
 backend/auth/
-safetylens-extras.zip
+/*-extras.zip
+
+# Local model payloads, private QA evidence, and review captures
+/models/
+/qa/
+/tmp-review/
+
+# Generated marketing renders
+/marketing/**/dist/
+/marketing/**/preview/
+/marketing/**/*-preview/
 
 # Local environment and deployment backups can contain credentials
 .env

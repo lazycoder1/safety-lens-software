@@ -32,6 +32,7 @@ backend/.pytest_cache
 backend/tests
 backend/config.json
 backend/config.json.*
+backend/.config.json.*
 backend/*.db
 backend/*.db-*
 backend/*.sqlite
@@ -56,7 +57,7 @@ backend/keys/*.pem
 **/*.onnx
 **/*.engine
 models
-safetylens-extras.zip
+*-extras.zip
 mobileclip_blt.ts
 mobileclip2_b.ts
 backend/mobileclip_blt.ts

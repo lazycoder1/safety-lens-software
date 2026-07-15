@@ -96,3 +96,60 @@ def test_sequence_offset_places_rt_work_beside_ppe_without_collision():
     assert len(shifted_rt) == 30
     assert ppe.isdisjoint(shifted_rt)
     assert all(rt + 1 in ppe for rt in shifted_rt)
+
+
+def test_distribution_includes_p99_and_handles_empty_samples():
+    benchmark = _load_benchmark()
+
+    assert benchmark._distribution([]) == {
+        "median": None,
+        "p95": None,
+        "p99": None,
+        "maximum": None,
+    }
+    summary = benchmark._distribution([1.0, 2.0, 3.0, 100.0])
+
+    assert summary["median"] == 2.5
+    assert summary["p95"] == pytest.approx(85.45)
+    assert summary["p99"] == pytest.approx(97.09)
+    assert summary["maximum"] == 100.0
+
+
+def test_jain_index_reports_equal_service_and_starvation():
+    benchmark = _load_benchmark()
+
+    assert benchmark._jain_index([1.0, 1.0, 1.0, 1.0]) == 1.0
+    assert benchmark._jain_index([1.0, 0.0, 0.0, 0.0]) == 0.25
+    assert benchmark._jain_index([0.0, 0.0]) is None
+
+
+def test_camera_fps_profile_repeats_and_defaults():
+    benchmark = _load_benchmark()
+
+    assert benchmark._camera_fps_profile(
+        None,
+        cameras=3,
+        default_fps=4.0,
+    ) == [4.0, 4.0, 4.0]
+    assert benchmark._camera_fps_profile(
+        "1,2,4",
+        cameras=5,
+        default_fps=4.0,
+    ) == [1.0, 2.0, 4.0, 1.0, 2.0]
+
+    with pytest.raises(ValueError, match="positive"):
+        benchmark._camera_fps_profile("1,0", cameras=2, default_fps=4.0)
+
+
+def test_maximum_service_gap_includes_window_edges_and_starvation():
+    benchmark = _load_benchmark()
+
+    assert benchmark._maximum_gap_ms(
+        [], window_start=10.0, window_end=12.0
+    ) == 2000.0
+    assert benchmark._maximum_gap_ms(
+        [10.25, 10.5, 11.0], window_start=10.0, window_end=12.0
+    ) == 1000.0
+    assert benchmark._maximum_gap_ms(
+        [], window_start=12.0, window_end=11.0
+    ) == 0.0
