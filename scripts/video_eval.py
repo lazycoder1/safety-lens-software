@@ -11,8 +11,10 @@ import argparse
 import base64
 import email.policy
 import hashlib
+import heapq
 import hmac
 import json
+import math
 import os
 import socketserver
 import subprocess
@@ -99,6 +101,661 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+PAIRED_ACCURACY_SCHEMA = "rakshak.paired_accuracy.v1"
+PAIRED_ACCURACY_DEFAULT_BOOTSTRAPS = 2000
+PAIRED_ACCURACY_DEFAULT_SEED = 20260715
+PAIRED_ACCURACY_MAX_RULES = 128
+PAIRED_ACCURACY_MAX_RECORDS = 1_000_000
+
+
+def _paired_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not readable JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return value
+
+
+def _paired_required_string(value: Any, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field} must be a non-empty string")
+    return normalized
+
+
+def _paired_timestamp_ms(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite numeric timestamp in milliseconds")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(f"{field} must be a finite non-negative timestamp in milliseconds")
+    return normalized
+
+
+def _paired_boolean_map(value: Any, rules: list[str], field: str) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object with one explicit boolean per rule")
+    missing = sorted(set(rules) - set(value))
+    extra = sorted(set(value) - set(rules))
+    if missing or extra:
+        raise ValueError(f"{field} rule keys differ (missing={missing}, extra={extra})")
+    normalized: dict[str, bool] = {}
+    for rule in rules:
+        prediction = value[rule]
+        if not isinstance(prediction, bool):
+            raise ValueError(f"{field}.{rule} must be an explicit boolean")
+        normalized[rule] = prediction
+    return normalized
+
+
+def validate_paired_accuracy_corpus(document: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize an explicitly labeled, timestamped evaluation corpus."""
+    corpus_id = _paired_required_string(document.get("corpus_id"), "corpus.corpus_id")
+    raw_rules = document.get("rules")
+    if not isinstance(raw_rules, list) or not raw_rules:
+        raise ValueError("corpus.rules must be a non-empty list")
+    rules = [_paired_required_string(value, "corpus.rules[]") for value in raw_rules]
+    if len(rules) > PAIRED_ACCURACY_MAX_RULES:
+        raise ValueError(f"corpus.rules exceeds the {PAIRED_ACCURACY_MAX_RULES} rule limit")
+    if len(set(rules)) != len(rules):
+        raise ValueError("corpus.rules must not contain duplicates")
+    rules = sorted(rules)
+
+    raw_samples = document.get("samples")
+    if not isinstance(raw_samples, list) or not raw_samples:
+        raise ValueError("corpus.samples must be a non-empty list")
+    if len(raw_samples) > PAIRED_ACCURACY_MAX_RECORDS:
+        raise ValueError(f"corpus.samples exceeds the {PAIRED_ACCURACY_MAX_RECORDS} record limit")
+    samples: dict[str, dict[str, Any]] = {}
+    clip_ids: set[str] = set()
+    for index, raw_sample in enumerate(raw_samples):
+        if not isinstance(raw_sample, dict):
+            raise ValueError(f"corpus.samples[{index}] must be an object")
+        sample_id = _paired_required_string(raw_sample.get("sample_id"), f"corpus.samples[{index}].sample_id")
+        if sample_id in samples:
+            raise ValueError(f"corpus.samples has duplicate sample_id {sample_id!r}")
+        clip_id = _paired_required_string(raw_sample.get("clip_id"), f"corpus.samples[{index}].clip_id")
+        timestamp_ms = _paired_timestamp_ms(
+            raw_sample.get("timestamp_ms"),
+            f"corpus.samples[{index}].timestamp_ms",
+        )
+        samples[sample_id] = {
+            "sample_id": sample_id,
+            "clip_id": clip_id,
+            "timestamp_ms": timestamp_ms,
+            "labels": _paired_boolean_map(
+                raw_sample.get("labels"),
+                rules,
+                f"corpus.samples[{index}].labels",
+            ),
+        }
+        clip_ids.add(clip_id)
+
+    raw_events = document.get("events", [])
+    if not isinstance(raw_events, list):
+        raise ValueError("corpus.events must be a list")
+    if len(raw_events) > PAIRED_ACCURACY_MAX_RECORDS:
+        raise ValueError(f"corpus.events exceeds the {PAIRED_ACCURACY_MAX_RECORDS} record limit")
+    events: list[dict[str, Any]] = []
+    event_ids: set[str] = set()
+    for index, raw_event in enumerate(raw_events):
+        if not isinstance(raw_event, dict):
+            raise ValueError(f"corpus.events[{index}] must be an object")
+        event_id = _paired_required_string(raw_event.get("event_id"), f"corpus.events[{index}].event_id")
+        if event_id in event_ids:
+            raise ValueError(f"corpus.events has duplicate event_id {event_id!r}")
+        clip_id = _paired_required_string(raw_event.get("clip_id"), f"corpus.events[{index}].clip_id")
+        if clip_id not in clip_ids:
+            raise ValueError(f"corpus.events[{index}].clip_id does not identify a corpus clip")
+        rule = _paired_required_string(raw_event.get("rule"), f"corpus.events[{index}].rule")
+        if rule not in rules:
+            raise ValueError(f"corpus.events[{index}].rule is not declared in corpus.rules")
+        start_ms = _paired_timestamp_ms(raw_event.get("start_ms"), f"corpus.events[{index}].start_ms")
+        end_ms = _paired_timestamp_ms(raw_event.get("end_ms"), f"corpus.events[{index}].end_ms")
+        if end_ms < start_ms:
+            raise ValueError(f"corpus.events[{index}] ends before it starts")
+        event_ids.add(event_id)
+        events.append(
+            {
+                "event_id": event_id,
+                "clip_id": clip_id,
+                "rule": rule,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+            }
+        )
+    return {
+        "corpus_id": corpus_id,
+        "rules": rules,
+        "samples": samples,
+        "events": events,
+        "clip_ids": sorted(clip_ids),
+    }
+
+
+def validate_paired_accuracy_run(
+    document: dict[str, Any],
+    corpus: dict[str, Any],
+    run_label: str,
+) -> dict[str, Any]:
+    """Require exact sample/timestamp coverage so aggregate counters cannot masquerade as accuracy."""
+    run_id = _paired_required_string(document.get("run_id"), f"{run_label}.run_id")
+    corpus_id = _paired_required_string(document.get("corpus_id"), f"{run_label}.corpus_id")
+    if corpus_id != corpus["corpus_id"]:
+        raise ValueError(f"{run_label}.corpus_id does not match the labeled corpus")
+    raw_samples = document.get("samples")
+    if not isinstance(raw_samples, list):
+        raise ValueError(f"{run_label}.samples must be a list")
+    if len(raw_samples) > PAIRED_ACCURACY_MAX_RECORDS:
+        raise ValueError(f"{run_label}.samples exceeds the record limit")
+    samples: dict[str, dict[str, Any]] = {}
+    for index, raw_sample in enumerate(raw_samples):
+        if not isinstance(raw_sample, dict):
+            raise ValueError(f"{run_label}.samples[{index}] must be an object")
+        sample_id = _paired_required_string(
+            raw_sample.get("sample_id"),
+            f"{run_label}.samples[{index}].sample_id",
+        )
+        if sample_id in samples:
+            raise ValueError(f"{run_label}.samples has duplicate sample_id {sample_id!r}")
+        truth = corpus["samples"].get(sample_id)
+        if truth is None:
+            raise ValueError(f"{run_label}.samples contains unknown sample_id {sample_id!r}")
+        clip_id = _paired_required_string(raw_sample.get("clip_id"), f"{run_label}.samples[{index}].clip_id")
+        timestamp_ms = _paired_timestamp_ms(
+            raw_sample.get("timestamp_ms"),
+            f"{run_label}.samples[{index}].timestamp_ms",
+        )
+        if clip_id != truth["clip_id"] or timestamp_ms != truth["timestamp_ms"]:
+            raise ValueError(f"{run_label}.samples[{index}] does not match the corpus clip/timestamp")
+        samples[sample_id] = {
+            "sample_id": sample_id,
+            "clip_id": clip_id,
+            "timestamp_ms": timestamp_ms,
+            "predictions": _paired_boolean_map(
+                raw_sample.get("predictions"),
+                corpus["rules"],
+                f"{run_label}.samples[{index}].predictions",
+            ),
+        }
+    expected_ids = set(corpus["samples"])
+    missing_ids = sorted(expected_ids - set(samples))
+    if missing_ids:
+        preview = missing_ids[:5]
+        raise ValueError(f"{run_label}.samples is missing corpus samples {preview}")
+
+    raw_alerts = document.get("alerts", [])
+    if not isinstance(raw_alerts, list):
+        raise ValueError(f"{run_label}.alerts must be a list")
+    if len(raw_alerts) > PAIRED_ACCURACY_MAX_RECORDS:
+        raise ValueError(f"{run_label}.alerts exceeds the record limit")
+    alerts: list[dict[str, Any]] = []
+    alert_ids: set[str] = set()
+    for index, raw_alert in enumerate(raw_alerts):
+        if not isinstance(raw_alert, dict):
+            raise ValueError(f"{run_label}.alerts[{index}] must be an object")
+        alert_id = _paired_required_string(raw_alert.get("alert_id"), f"{run_label}.alerts[{index}].alert_id")
+        if alert_id in alert_ids:
+            raise ValueError(f"{run_label}.alerts has duplicate alert_id {alert_id!r}")
+        clip_id = _paired_required_string(raw_alert.get("clip_id"), f"{run_label}.alerts[{index}].clip_id")
+        if clip_id not in corpus["clip_ids"]:
+            raise ValueError(f"{run_label}.alerts[{index}].clip_id does not identify a corpus clip")
+        rule = _paired_required_string(raw_alert.get("rule"), f"{run_label}.alerts[{index}].rule")
+        if rule not in corpus["rules"]:
+            raise ValueError(f"{run_label}.alerts[{index}].rule is not declared in corpus.rules")
+        alerts.append(
+            {
+                "alert_id": alert_id,
+                "clip_id": clip_id,
+                "rule": rule,
+                "timestamp_ms": _paired_timestamp_ms(
+                    raw_alert.get("timestamp_ms"),
+                    f"{run_label}.alerts[{index}].timestamp_ms",
+                ),
+            }
+        )
+        alert_ids.add(alert_id)
+    return {"run_id": run_id, "corpus_id": corpus_id, "samples": samples, "alerts": alerts}
+
+
+def _paired_empty_frame_counts() -> dict[str, int]:
+    return {"true_positive": 0, "false_positive": 0, "false_negative": 0, "true_negative": 0}
+
+
+def _paired_frame_counts_by_rule_clip(
+    corpus: dict[str, Any],
+    run: dict[str, Any],
+) -> dict[str, dict[str, dict[str, int]]]:
+    counts = {
+        rule: {clip_id: _paired_empty_frame_counts() for clip_id in corpus["clip_ids"]}
+        for rule in corpus["rules"]
+    }
+    for sample_id, truth in corpus["samples"].items():
+        prediction = run["samples"][sample_id]
+        clip_id = truth["clip_id"]
+        for rule in corpus["rules"]:
+            expected = truth["labels"][rule]
+            observed = prediction["predictions"][rule]
+            if expected and observed:
+                key = "true_positive"
+            elif observed:
+                key = "false_positive"
+            elif expected:
+                key = "false_negative"
+            else:
+                key = "true_negative"
+            counts[rule][clip_id][key] += 1
+    return counts
+
+
+def _paired_ratio(numerator: int, denominator: int) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def _paired_round(value: float | None) -> float | None:
+    return round(value, 6) if value is not None else None
+
+
+def _paired_frame_metrics(counts: dict[str, int]) -> dict[str, Any]:
+    tp = counts["true_positive"]
+    fp = counts["false_positive"]
+    fn = counts["false_negative"]
+    tn = counts["true_negative"]
+    precision = _paired_ratio(tp, tp + fp)
+    recall = _paired_ratio(tp, tp + fn)
+    f1 = None
+    if precision is not None and recall is not None and precision + recall:
+        f1 = 2 * precision * recall / (precision + recall)
+    return {
+        **counts,
+        "sample_count": tp + fp + fn + tn,
+        "precision": _paired_round(precision),
+        "recall": _paired_round(recall),
+        "f1": _paired_round(f1),
+    }
+
+
+def _paired_empty_event_counts() -> dict[str, int]:
+    return {
+        "truth_event_count": 0,
+        "alert_count": 0,
+        "recalled_event_count": 0,
+        "matched_alert_count": 0,
+        "duplicate_alert_count": 0,
+        "false_alert_count": 0,
+    }
+
+
+def _paired_match_event_alerts(
+    events: list[dict[str, Any]],
+    alerts: list[dict[str, Any]],
+    *,
+    alert_early_ms: float,
+    alert_late_ms: float,
+) -> dict[str, int]:
+    """Maximum-cardinality event matching; eligible alerts after the first match are duplicates."""
+    ordered_events = sorted(
+        (
+            (event["start_ms"] - alert_early_ms, event["end_ms"] + alert_late_ms, event["event_id"])
+            for event in events
+        ),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    ordered_alerts = sorted(alerts, key=lambda item: (item["timestamp_ms"], item["alert_id"]))
+    unmatched_events: list[tuple[float, str]] = []
+    next_event = 0
+    eligible_max_end = -math.inf
+    eligible_count = 0
+    matched = 0
+    for alert in ordered_alerts:
+        timestamp_ms = alert["timestamp_ms"]
+        while next_event < len(ordered_events) and ordered_events[next_event][0] <= timestamp_ms:
+            _start_ms, end_ms, event_id = ordered_events[next_event]
+            heapq.heappush(unmatched_events, (end_ms, event_id))
+            eligible_max_end = max(eligible_max_end, end_ms)
+            next_event += 1
+        while unmatched_events and unmatched_events[0][0] < timestamp_ms:
+            heapq.heappop(unmatched_events)
+        if eligible_max_end >= timestamp_ms:
+            eligible_count += 1
+        if unmatched_events:
+            heapq.heappop(unmatched_events)
+            matched += 1
+    return {
+        "truth_event_count": len(ordered_events),
+        "alert_count": len(ordered_alerts),
+        "recalled_event_count": matched,
+        "matched_alert_count": matched,
+        "duplicate_alert_count": eligible_count - matched,
+        "false_alert_count": len(ordered_alerts) - eligible_count,
+    }
+
+
+def _paired_add_counts(target: dict[str, int], source: dict[str, int], multiplier: int = 1) -> None:
+    for key, value in source.items():
+        target[key] = target.get(key, 0) + value * multiplier
+
+
+def _paired_event_counts_by_rule_clip(
+    corpus: dict[str, Any],
+    run: dict[str, Any],
+    *,
+    alert_early_ms: float,
+    alert_late_ms: float,
+) -> tuple[dict[str, dict[str, dict[str, int]]], dict[str, dict[str, int]]]:
+    events_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    alerts_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for event in corpus["events"]:
+        events_by_key.setdefault((event["rule"], event["clip_id"]), []).append(event)
+    for alert in run["alerts"]:
+        alerts_by_key.setdefault((alert["rule"], alert["clip_id"]), []).append(alert)
+    by_rule: dict[str, dict[str, dict[str, int]]] = {}
+    overall = {clip_id: _paired_empty_event_counts() for clip_id in corpus["clip_ids"]}
+    for rule in corpus["rules"]:
+        by_rule[rule] = {}
+        for clip_id in corpus["clip_ids"]:
+            counts = _paired_match_event_alerts(
+                events_by_key.get((rule, clip_id), []),
+                alerts_by_key.get((rule, clip_id), []),
+                alert_early_ms=alert_early_ms,
+                alert_late_ms=alert_late_ms,
+            )
+            by_rule[rule][clip_id] = counts
+            _paired_add_counts(overall[clip_id], counts)
+    return by_rule, overall
+
+
+def _paired_event_metrics(counts: dict[str, int]) -> dict[str, Any]:
+    truth_events = counts["truth_event_count"]
+    alerts = counts["alert_count"]
+    recalled = counts["recalled_event_count"]
+    duplicates = counts["duplicate_alert_count"]
+    false_alerts = counts["false_alert_count"]
+    return {
+        **counts,
+        "event_recall": _paired_round(_paired_ratio(recalled, truth_events)),
+        "duplicate_rate": _paired_round(duplicates / alerts if alerts else 0.0),
+        "false_alert_rate": _paired_round(false_alerts / alerts if alerts else 0.0),
+        "alert_precision": _paired_round(_paired_ratio(recalled, alerts)),
+        "duplicates_per_recalled_event": _paired_round(_paired_ratio(duplicates, recalled)),
+    }
+
+
+def _paired_sum_clip_counts(
+    counts_by_clip: dict[str, dict[str, int]],
+    clip_weights: dict[str, int],
+) -> dict[str, int]:
+    total: dict[str, int] = {}
+    for clip_id, weight in clip_weights.items():
+        _paired_add_counts(total, counts_by_clip[clip_id], weight)
+    return total
+
+
+def _paired_percentile(values: list[float], quantile: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
+
+
+def _paired_splitmix64(state: int) -> tuple[int, int]:
+    """Return a fully specified cross-Python deterministic PRNG step."""
+    mask = (1 << 64) - 1
+    state = (state + 0x9E3779B97F4A7C15) & mask
+    value = state
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & mask
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & mask
+    return state, value ^ (value >> 31)
+
+
+def _paired_bootstrap_changes(
+    baseline_by_clip: dict[str, dict[str, int]],
+    candidate_by_clip: dict[str, dict[str, int]],
+    clip_ids: list[str],
+    *,
+    metric_function: Any,
+    metric_names: tuple[str, ...],
+    resamples: int,
+    seed: int,
+    confidence_level: float,
+) -> dict[str, dict[str, Any]]:
+    all_weights = {clip_id: 1 for clip_id in clip_ids}
+    baseline_point = metric_function(_paired_sum_clip_counts(baseline_by_clip, all_weights))
+    candidate_point = metric_function(_paired_sum_clip_counts(candidate_by_clip, all_weights))
+    distributions: dict[str, list[float]] = {metric: [] for metric in metric_names}
+    random_state = seed & ((1 << 64) - 1)
+    for _ in range(resamples):
+        weights: dict[str, int] = {}
+        for _ in clip_ids:
+            random_state, random_value = _paired_splitmix64(random_state)
+            clip_id = clip_ids[random_value % len(clip_ids)]
+            weights[clip_id] = weights.get(clip_id, 0) + 1
+        baseline_metrics = metric_function(_paired_sum_clip_counts(baseline_by_clip, weights))
+        candidate_metrics = metric_function(_paired_sum_clip_counts(candidate_by_clip, weights))
+        for metric in metric_names:
+            baseline_value = baseline_metrics.get(metric)
+            candidate_value = candidate_metrics.get(metric)
+            if baseline_value is not None and candidate_value is not None:
+                distributions[metric].append(float(candidate_value) - float(baseline_value))
+
+    alpha = (1 - confidence_level) / 2
+    changes: dict[str, dict[str, Any]] = {}
+    for metric in metric_names:
+        baseline_value = baseline_point.get(metric)
+        candidate_value = candidate_point.get(metric)
+        estimate = None
+        if baseline_value is not None and candidate_value is not None:
+            estimate = float(candidate_value) - float(baseline_value)
+        values = distributions[metric]
+        interval_available = estimate is not None and bool(values)
+        valid_fraction = len(values) / resamples
+        changes[metric] = {
+            "estimate": _paired_round(estimate),
+            "ci_lower": _paired_round(_paired_percentile(values, alpha)) if interval_available else None,
+            "ci_upper": _paired_round(_paired_percentile(values, 1 - alpha)) if interval_available else None,
+            "confidence_level": confidence_level,
+            "valid_resamples": len(values),
+            "valid_resample_fraction": _paired_round(valid_fraction),
+            "total_resamples": resamples,
+            "interval_available": interval_available,
+            "interval_reliable": interval_available and valid_fraction >= 0.8 and len(clip_ids) >= 2,
+            "candidate_minus_baseline": True,
+        }
+    return changes
+
+
+def build_paired_accuracy_report(
+    corpus: dict[str, Any],
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    corpus_sha256: str,
+    baseline_sha256: str,
+    candidate_sha256: str,
+    bootstrap_resamples: int = PAIRED_ACCURACY_DEFAULT_BOOTSTRAPS,
+    bootstrap_seed: int = PAIRED_ACCURACY_DEFAULT_SEED,
+    confidence_level: float = 0.95,
+    alert_early_ms: float = 0.0,
+    alert_late_ms: float = 0.0,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    if baseline["run_id"] == candidate["run_id"]:
+        raise ValueError("baseline.run_id and candidate.run_id must differ")
+    if not 100 <= bootstrap_resamples <= 20_000:
+        raise ValueError("bootstrap_resamples must be between 100 and 20000")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between 0 and 1")
+    for name, value in (("alert_early_ms", alert_early_ms), ("alert_late_ms", alert_late_ms)):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and non-negative")
+
+    baseline_frames = _paired_frame_counts_by_rule_clip(corpus, baseline)
+    candidate_frames = _paired_frame_counts_by_rule_clip(corpus, candidate)
+    baseline_events, baseline_events_overall = _paired_event_counts_by_rule_clip(
+        corpus,
+        baseline,
+        alert_early_ms=alert_early_ms,
+        alert_late_ms=alert_late_ms,
+    )
+    candidate_events, candidate_events_overall = _paired_event_counts_by_rule_clip(
+        corpus,
+        candidate,
+        alert_early_ms=alert_early_ms,
+        alert_late_ms=alert_late_ms,
+    )
+    clip_weights = {clip_id: 1 for clip_id in corpus["clip_ids"]}
+    frame_rule_metrics: dict[str, Any] = {}
+    event_rule_metrics: dict[str, Any] = {}
+    for rule in corpus["rules"]:
+        frame_rule_metrics[rule] = {
+            "baseline": _paired_frame_metrics(_paired_sum_clip_counts(baseline_frames[rule], clip_weights)),
+            "candidate": _paired_frame_metrics(_paired_sum_clip_counts(candidate_frames[rule], clip_weights)),
+            "paired_change": _paired_bootstrap_changes(
+                baseline_frames[rule],
+                candidate_frames[rule],
+                corpus["clip_ids"],
+                metric_function=_paired_frame_metrics,
+                metric_names=("precision", "recall", "f1"),
+                resamples=bootstrap_resamples,
+                seed=bootstrap_seed,
+                confidence_level=confidence_level,
+            ),
+        }
+        event_rule_metrics[rule] = {
+            "baseline": _paired_event_metrics(_paired_sum_clip_counts(baseline_events[rule], clip_weights)),
+            "candidate": _paired_event_metrics(_paired_sum_clip_counts(candidate_events[rule], clip_weights)),
+            "paired_change": _paired_bootstrap_changes(
+                baseline_events[rule],
+                candidate_events[rule],
+                corpus["clip_ids"],
+                metric_function=_paired_event_metrics,
+                metric_names=("event_recall", "duplicate_rate", "alert_precision"),
+                resamples=bootstrap_resamples,
+                seed=bootstrap_seed,
+                confidence_level=confidence_level,
+            ),
+        }
+    overall_events = {
+        "baseline": _paired_event_metrics(_paired_sum_clip_counts(baseline_events_overall, clip_weights)),
+        "candidate": _paired_event_metrics(_paired_sum_clip_counts(candidate_events_overall, clip_weights)),
+        "paired_change": _paired_bootstrap_changes(
+            baseline_events_overall,
+            candidate_events_overall,
+            corpus["clip_ids"],
+            metric_function=_paired_event_metrics,
+            metric_names=("event_recall", "duplicate_rate", "alert_precision"),
+            resamples=bootstrap_resamples,
+            seed=bootstrap_seed,
+            confidence_level=confidence_level,
+        ),
+    }
+    return {
+        "schema_version": PAIRED_ACCURACY_SCHEMA,
+        "generated_at": generated_at or utc_now(),
+        "status": "valid",
+        "corpus": {
+            "corpus_id": corpus["corpus_id"],
+            "sha256": corpus_sha256,
+            "sample_count": len(corpus["samples"]),
+            "clip_count": len(corpus["clip_ids"]),
+            "event_count": len(corpus["events"]),
+            "rules": corpus["rules"],
+        },
+        "runs": {
+            "baseline": {"run_id": baseline["run_id"], "sha256": baseline_sha256},
+            "candidate": {"run_id": candidate["run_id"], "sha256": candidate_sha256},
+        },
+        "frame_rule_metrics": frame_rule_metrics,
+        "alert_event_metrics": {"overall": overall_events, "by_rule": event_rule_metrics},
+        "methodology": {
+            "comparison_unit": "explicit_labeled_sample_at_exact_clip_timestamp",
+            "sample_coverage_required": "exact_for_both_runs",
+            "aggregate_count_or_fps_inference": False,
+            "alert_matching": "maximum_cardinality_with_one_alert_per_truth_event",
+            "duplicate_definition": "eligible_alerts_beyond_one_matched_alert_per_truth_event",
+            "duplicate_rate_denominator": "all_emitted_alerts",
+            "alert_early_ms": alert_early_ms,
+            "alert_late_ms": alert_late_ms,
+            "paired_interval_method": "percentile_cluster_bootstrap_by_clip",
+            "bootstrap_resamples": bootstrap_resamples,
+            "bootstrap_seed": bootstrap_seed,
+            "bootstrap_prng": "splitmix64",
+            "confidence_level": confidence_level,
+            "cluster_count": len(corpus["clip_ids"]),
+            "single_cluster_interval_warning": len(corpus["clip_ids"]) < 2,
+        },
+    }
+
+
+def write_paired_accuracy_json(path: Path, report: dict[str, Any]) -> None:
+    """Atomically write a bounded, aggregate-only report with private file permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    descriptor = None
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def run_paired_accuracy_experiment(
+    corpus_path: Path,
+    baseline_path: Path,
+    candidate_path: Path,
+    output_path: Path,
+    **options: Any,
+) -> dict[str, Any]:
+    input_paths = {path.resolve() for path in (corpus_path, baseline_path, candidate_path)}
+    if output_path.resolve() in input_paths:
+        raise ValueError("paired-accuracy output must not overwrite an input JSON file")
+    corpus = validate_paired_accuracy_corpus(_paired_json_object(corpus_path, "corpus"))
+    baseline = validate_paired_accuracy_run(
+        _paired_json_object(baseline_path, "baseline"),
+        corpus,
+        "baseline",
+    )
+    candidate = validate_paired_accuracy_run(
+        _paired_json_object(candidate_path, "candidate"),
+        corpus,
+        "candidate",
+    )
+    report = build_paired_accuracy_report(
+        corpus,
+        baseline,
+        candidate,
+        corpus_sha256=sha256_file(corpus_path),
+        baseline_sha256=sha256_file(baseline_path),
+        candidate_sha256=sha256_file(candidate_path),
+        **options,
+    )
+    write_paired_accuracy_json(output_path, report)
+    return report
 
 
 class WebhookCaptureServer:
@@ -2928,6 +3585,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate and plan only; assume the site YAML was already applied before backend startup.",
     )
 
+    paired = sub.add_parser(
+        "paired-accuracy",
+        help="Compare baseline and candidate outputs on the same labeled timestamped corpus.",
+    )
+    paired.add_argument("--corpus", required=True, help="Labeled corpus JSON.")
+    paired.add_argument("--baseline", required=True, help="Baseline timestamped output JSON.")
+    paired.add_argument("--candidate", required=True, help="Candidate timestamped output JSON.")
+    paired.add_argument("--out", required=True, help="Atomic aggregate-only JSON report path.")
+    paired.add_argument(
+        "--bootstrap-resamples",
+        type=int,
+        default=PAIRED_ACCURACY_DEFAULT_BOOTSTRAPS,
+    )
+    paired.add_argument("--bootstrap-seed", type=int, default=PAIRED_ACCURACY_DEFAULT_SEED)
+    paired.add_argument("--confidence-level", type=float, default=0.95)
+    paired.add_argument("--alert-early-ms", type=float, default=0.0)
+    paired.add_argument("--alert-late-ms", type=float, default=0.0)
+
     sub.add_parser("report", help="Generate markdown reports from result JSON files.")
     return parser
 
@@ -2942,6 +3617,38 @@ def main(argv: list[str] | None = None) -> int:
         result = run_scenario(manifest_path, args.scenario, skip_apply=args.skip_apply)
         print(json.dumps({"scenario_id": result["scenario_id"], "status": result["status"]}, indent=2))
         return 0 if result["status"] == "ready_to_sell" else 1
+
+    if args.command == "paired-accuracy":
+        def rooted(raw_path: str) -> Path:
+            path = Path(raw_path)
+            return path if path.is_absolute() else ROOT / path
+
+        try:
+            result = run_paired_accuracy_experiment(
+                rooted(args.corpus),
+                rooted(args.baseline),
+                rooted(args.candidate),
+                rooted(args.out),
+                bootstrap_resamples=args.bootstrap_resamples,
+                bootstrap_seed=args.bootstrap_seed,
+                confidence_level=args.confidence_level,
+                alert_early_ms=args.alert_early_ms,
+                alert_late_ms=args.alert_late_ms,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"paired-accuracy failed: {exc}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "status": result["status"],
+                    "corpus_id": result["corpus"]["corpus_id"],
+                    "output": str(rooted(args.out)),
+                },
+                indent=2,
+            )
+        )
+        return 0
 
     sales_path, claims_path = report(manifest_path)
     print(f"Wrote {sales_path}")

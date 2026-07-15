@@ -8,13 +8,16 @@ import queue
 import random
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
 import alert_delivery_store
+import alert_timing
 import alert_store
 import notification_dispatcher
 from delivery_result import DeliveryDisposition, ProviderDeliveryResult
+from pipeline_telemetry import telemetry as pipeline_telemetry
 
 
 logger = logging.getLogger("safetylens.alert_delivery")
@@ -33,6 +36,10 @@ class AlertDeliveryWorker:
         retry_base_seconds: float = 1.0,
         retry_cap_seconds: float = 60.0,
         rng=None,
+        initial_delivery_observer: Callable[
+            [alert_delivery_store.InitialDeliveryTiming], None
+        ]
+        | None = None,
     ) -> None:
         if worker_count < 1 or max_attempts < 1:
             raise ValueError("delivery worker and attempt counts must be positive")
@@ -44,6 +51,8 @@ class AlertDeliveryWorker:
         self._retry_cap_seconds = max(self._retry_base_seconds, float(retry_cap_seconds))
         self._rng = rng or random.uniform
         self._instance_id = f"{os.getpid()}-{uuid4()}"
+        self._observer_lock = threading.Lock()
+        self._initial_delivery_observer = initial_delivery_observer
 
         self._stop_claiming = threading.Event()
         self._condition = threading.Condition()
@@ -70,6 +79,16 @@ class AlertDeliveryWorker:
         }
         self._stats_cache: dict | None = None
         self._stats_cache_at = 0.0
+
+    def set_initial_delivery_observer(
+        self,
+        observer: Callable[[alert_delivery_store.InitialDeliveryTiming], None] | None,
+    ) -> None:
+        """Set a fail-open process-local observer for the durable timing stamp."""
+        if observer is not None and not callable(observer):
+            raise TypeError("initial delivery observer must be callable or None")
+        with self._observer_lock:
+            self._initial_delivery_observer = observer
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -216,11 +235,28 @@ class AlertDeliveryWorker:
                             for channel, limit in self._channel_limits.items()
                             if self._channel_inflight.get(channel, 0) >= limit
                         ]
-                    claimed = alert_delivery_store.claim_due(
+                    claim_result = alert_delivery_store.claim_due(
                         worker_id=self._instance_id,
                         lease_seconds=self._lease_seconds,
                         excluded_channels=excluded,
+                        include_terminalized=True,
                     )
+                    if (
+                        isinstance(claim_result, dict)
+                        and "terminalized" in claim_result
+                        and "delivery" in claim_result
+                    ):
+                        for terminalized in claim_result["terminalized"]:
+                            self._record_initial_outcome(
+                                terminalized,
+                                "terminal",
+                                completed_ns=time.monotonic_ns(),
+                            )
+                        claimed = claim_result["delivery"]
+                    else:
+                        # Compatibility for tests or third-party stores that
+                        # still return a claimed row directly.
+                        claimed = claim_result
                     failure_streak = 0
                     if claimed is None:
                         self._wait(self._poll_seconds)
@@ -328,6 +364,12 @@ class AlertDeliveryWorker:
                     "error_code": began.get("reason"),
                 },
             )
+            if began.get("final_state") in {"terminal", "cancelled"}:
+                self._record_initial_outcome(
+                    {**delivery, **began},
+                    str(began["final_state"]),
+                    completed_ns=time.monotonic_ns(),
+                )
             return
         delivery["_provider_started"] = True
         delivery = dict(delivery)
@@ -343,6 +385,10 @@ class AlertDeliveryWorker:
         self._record_result(delivery, result)
 
     def _record_result(self, delivery: dict, result: ProviderDeliveryResult) -> None:
+        # Capture provider completion before any PostgreSQL write. This is the
+        # same process-monotonic clock used by detection and persistence, so a
+        # skewed DB clock cannot improve or corrupt provider latency samples.
+        provider_completed_ns = time.monotonic_ns()
         delivery_id = str(delivery["id"])
         lease_token = str(delivery["lease_token"])
         attempt = int(delivery.get("attempt_count") or 1)
@@ -357,12 +403,24 @@ class AlertDeliveryWorker:
             "retry_after_seconds": result.retry_after_seconds,
         }
         if result.success:
-            updated = alert_delivery_store.mark_delivered(delivery_id, lease_token)
+            completion = alert_delivery_store.mark_delivered_with_timing(
+                delivery_id,
+                lease_token,
+            )
+            updated = completion.updated
             self._log_fenced(updated, "Alert target delivered", common_log)
             if updated:
                 self._set_metric("last_delivery_at", time.time())
+                self._record_initial_outcome(
+                    delivery,
+                    "delivered",
+                    completed_ns=provider_completed_ns,
+                )
+            if completion.initial_delivery_timing is not None:
+                self._observe_initial_delivery(completion.initial_delivery_timing)
             self._invalidate_stats()
             return
+        self._record_initial_failure_attempt(delivery)
         if result.disposition in {DeliveryDisposition.TERMINAL, DeliveryDisposition.SKIPPED}:
             updated = alert_delivery_store.mark_terminal(
                 delivery_id,
@@ -372,6 +430,12 @@ class AlertDeliveryWorker:
                 acceptance_unknown=result.acceptance_unknown,
             )
             self._log_fenced(updated, "Alert target failed terminally", common_log, error=True)
+            if updated:
+                self._record_initial_outcome(
+                    delivery,
+                    "terminal",
+                    completed_ns=provider_completed_ns,
+                )
             self._invalidate_stats()
             return
 
@@ -404,6 +468,11 @@ class AlertDeliveryWorker:
                 common_log,
                 error=state == "terminal",
             )
+            self._record_initial_outcome(
+                delivery,
+                state,
+                completed_ns=provider_completed_ns,
+            )
         else:
             self._log_fenced(False, "Alert target retry lost lease fencing", common_log)
         self._invalidate_stats()
@@ -434,10 +503,18 @@ class AlertDeliveryWorker:
             },
             error=code != "alert_inactive",
         )
+        if updated:
+            self._record_initial_outcome(
+                delivery,
+                "terminal",
+                completed_ns=time.monotonic_ns(),
+            )
         self._invalidate_stats()
 
     def _recover_unexpected_failure(self, delivery: dict, *, provider_started: bool) -> None:
         try:
+            if provider_started:
+                self._record_initial_failure_attempt(delivery)
             state = alert_delivery_store.schedule_retry(
                 str(delivery["id"]),
                 str(delivery["lease_token"]),
@@ -454,6 +531,12 @@ class AlertDeliveryWorker:
             )
             if state == "pending":
                 self.wake()
+            elif state in {"terminal", "cancelled"}:
+                self._record_initial_outcome(
+                    delivery,
+                    state,
+                    completed_ns=time.monotonic_ns(),
+                )
         except Exception as exc:
             logger.error(
                 "Could not release failed outbox lease",
@@ -474,13 +557,19 @@ class AlertDeliveryWorker:
                     error_code=error_code,
                 )
             else:
-                alert_delivery_store.schedule_internal_retry(
+                state = alert_delivery_store.schedule_internal_retry(
                     str(delivery["id"]),
                     str(delivery["lease_token"]),
                     delay_seconds=self._retry_base_seconds,
                     max_claims=self._max_attempts,
                     error_code=error_code,
                 )
+                if state in {"terminal", "cancelled"}:
+                    self._record_initial_outcome(
+                        delivery,
+                        state,
+                        completed_ns=time.monotonic_ns(),
+                    )
         except Exception:
             logger.error(
                 "Could not release an unstarted outbox claim",
@@ -552,6 +641,75 @@ class AlertDeliveryWorker:
         with self._metrics_lock:
             self._metrics[key] = value
 
+    def _observe_initial_delivery(
+        self,
+        timing: alert_delivery_store.InitialDeliveryTiming,
+    ) -> None:
+        with self._observer_lock:
+            observer = self._initial_delivery_observer
+        if observer is None:
+            return
+        try:
+            observer(timing)
+        except Exception as exc:
+            # Delivery is already durably committed. Telemetry must never turn
+            # an accepted provider send into a retry or worker failure.
+            logger.error(
+                "Initial delivery timing observer failed",
+                extra={
+                    "alert_id": timing.alert_id,
+                    "camera_id": timing.camera_id,
+                    "error_phase": "initial_delivery_observer",
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+    @staticmethod
+    def _is_initial_target(delivery: dict) -> bool:
+        return str(delivery.get("kind") or "initial") == "initial"
+
+    def _record_initial_failure_attempt(self, delivery: dict) -> None:
+        if not self._is_initial_target(delivery):
+            return
+        tracked = alert_timing.registry.tracks_initial_target(
+            str(delivery.get("alert_id") or ""),
+            delivery.get("target_key"),
+        )
+        pipeline_telemetry.record_alert_delivery_failure_attempt(tracked=tracked)
+
+    def _record_initial_outcome(
+        self,
+        delivery: dict,
+        outcome: str,
+        *,
+        completed_ns: int,
+    ) -> None:
+        if not self._is_initial_target(delivery):
+            return
+        transition = alert_timing.registry.record_initial_outcome(
+            str(delivery.get("alert_id") or ""),
+            delivery.get("target_key"),
+            outcome=outcome,
+            completed_ns=completed_ns,
+        )
+        if transition is not None and transition.deferred:
+            # The alert+outbox transaction can become visible just before the
+            # persistence callback runs. That callback registers the
+            # denominator and drains this deferred outcome atomically.
+            return
+        timing = None if transition is None else transition.context
+        tracked = pipeline_telemetry.record_alert_delivery_outcome(
+            outcome,
+            tracked=timing is not None,
+        )
+        if not tracked or outcome != "delivered" or timing is None:
+            return
+        pipeline_telemetry.observe_alert_elapsed_ns(
+            "firstPositiveToProviderSuccessMs",
+            timing.first_positive_ns,
+            completed_ns,
+        )
+
     def _reset_if_dead_locked(self) -> None:
         all_threads = [*self._threads]
         if self._claimer is not None:
@@ -604,3 +762,9 @@ def stop(timeout: float = 20.0) -> bool:
 
 def stats() -> dict:
     return _worker.stats()
+
+
+def set_initial_delivery_observer(
+    observer: Callable[[alert_delivery_store.InitialDeliveryTiming], None] | None,
+) -> None:
+    _worker.set_initial_delivery_observer(observer)

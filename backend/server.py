@@ -32,8 +32,10 @@ from video_processing import (
     start_camera,
     stop_all_camera_workers,
     stop_alert_pipeline,
+    shutdown_pipeline_runtime,
 )
 import db
+import alert_delivery_worker
 import alert_store
 import face_store
 import plate_store
@@ -49,6 +51,7 @@ logger = logging.getLogger("rakshak_lens")
 
 _camera_startup_task: asyncio.Task | None = None
 _camera_healing_task: asyncio.Task | None = None
+
 
 # ── App ─────────────────────────────────────────────────────────────────────
 
@@ -194,6 +197,9 @@ async def startup():
     audit_store.init_db()
     auth_store.init_auth_db()
     error_store.init_db()
+    # PostgreSQL timestamps remain durability metadata. Provider-success
+    # latency is observed in the outbox worker's process-monotonic clock.
+    alert_delivery_worker.set_initial_delivery_observer(None)
     await start_alert_delivery_workers()
 
     # License gate. Inference workers always start, but they self-pause
@@ -252,9 +258,17 @@ async def shutdown():
     if not cameras_stopped:
         logger.warning("One or more camera workers exceeded the shutdown timeout")
 
+    pipeline_stopped = await asyncio.to_thread(
+        shutdown_pipeline_runtime,
+        timeout=10.0,
+    )
+    if not pipeline_stopped:
+        logger.warning("Shared inference scheduler exceeded the shutdown timeout")
+
     drained = await asyncio.to_thread(stop_alert_pipeline, 10.0)
     if not drained:
         logger.warning("Alert pipeline did not drain before shutdown timeout")
+    alert_delivery_worker.set_initial_delivery_observer(None)
 
 
 async def _deferred_model_startup():

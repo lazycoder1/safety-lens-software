@@ -343,6 +343,11 @@ class CameraConnectionTracker:
         self.last_transition = "initializing"
         self.last_transition_monotonic = started_at
         self.capture_backend = "unknown"
+        self.appsink_latest_buffer_drops_observable = False
+        self.appsink_latest_buffer_drop_method = "unavailable"
+        self.capture_drop_accounting = "unavailable"
+        self.capture_drop_count_is_lower_bound = True
+        self.decoder_policy_drop_accounting = "unknown"
         self.outage_failure_count = 0
         self.total_failure_count = 0
         self.suppressed_failure_count = 0

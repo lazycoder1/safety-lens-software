@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from typing import Any
 
 import cv2
@@ -12,9 +13,11 @@ try:
     import gi
 
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import Gst, GstVideo
 except (ImportError, ValueError):  # pragma: no cover - depends on Jetson image.
     Gst = None
+    GstVideo = None
 
 
 _REQUIRED_ELEMENTS = (
@@ -50,7 +53,7 @@ def _pipeline_description(tcp_timeout_us: int) -> str:
 
 def nvdec_runtime_available() -> bool:
     """Return whether the complete in-process NVDEC pipeline is usable."""
-    if Gst is None:
+    if Gst is None or GstVideo is None:
         return False
     Gst.init(None)
     return all(Gst.ElementFactory.find(name) is not None for name in _REQUIRED_ELEMENTS)
@@ -121,11 +124,129 @@ def _configure_decoder_drop_interval(element: Any, interval: int) -> bool:
     return True
 
 
+def _video_decoder_factory_name(element: Any) -> str | None:
+    """Return the selected video decoder factory, ignoring parsers and bins."""
+    try:
+        factory = element.get_factory()
+        if factory is None:
+            return None
+        name = str(factory.get_name() or "")
+        klass = str(factory.get_metadata("klass") or "").lower()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not name:
+        return None
+    if name == "nvv4l2decoder":
+        return name
+    if "decoder" in klass and "video" in klass:
+        return name
+    # Some older vendor factories omit klass metadata.  These well-known
+    # prefixes still identify actual decoder elements rather than decodebin.
+    lowered = name.lower()
+    if lowered.startswith("avdec_") or (
+        lowered.startswith("v4l2") and lowered.endswith("dec")
+    ):
+        return name
+    return None
+
+
+def _has_readable_property(element: Any, name: str) -> bool:
+    try:
+        return element is not None and element.find_property(name) is not None
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _read_nonnegative_counter(element: Any, name: str) -> int | None:
+    try:
+        value = int(element.get_property(name))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return max(0, value)
+
+
+def _cumulative_delta(current: int | None, previous: int) -> tuple[int, int]:
+    """Convert a possibly-reset cumulative counter to a monotonic delta."""
+    if current is None:
+        return 0, previous
+    delta = current - previous if current >= previous else current
+    return max(0, delta), current
+
+
+def _copy_bgr_plane(
+    data: Any,
+    *,
+    width: int,
+    height: int,
+    stride: int,
+    offset: int = 0,
+) -> np.ndarray | None:
+    """Copy one BGR plane row-by-row without treating padding as pixels."""
+    row_bytes = int(width) * 3
+    rows = int(height)
+    plane_stride = int(stride)
+    plane_offset = int(offset)
+    if row_bytes <= 0 or rows <= 0 or abs(plane_stride) < row_bytes:
+        return None
+    try:
+        available = len(data)
+    except TypeError:
+        return None
+    frame = np.empty((rows, int(width), 3), dtype=np.uint8)
+    flat = frame.reshape(rows, row_bytes)
+    for row_index in range(rows):
+        start = plane_offset + row_index * plane_stride
+        end = start + row_bytes
+        if start < 0 or end > available:
+            return None
+        try:
+            flat[row_index, :] = np.frombuffer(
+                data,
+                dtype=np.uint8,
+                count=row_bytes,
+                offset=start,
+            )
+        except (TypeError, ValueError):
+            return None
+    return frame
+
+
+def _bgr_plane_layout(buffer: Any, caps: Any) -> tuple[int, int] | None:
+    """Return negotiated BGR plane stride/offset, honoring buffer metadata."""
+    if GstVideo is None:
+        return None
+    try:
+        video_meta = GstVideo.buffer_get_video_meta(buffer)
+    except (AttributeError, TypeError, ValueError):
+        video_meta = None
+    if video_meta is not None:
+        try:
+            return int(video_meta.stride[0]), int(video_meta.offset[0])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+    try:
+        parsed, info = GstVideo.video_info_from_caps(caps)
+    except (AttributeError, TypeError, ValueError):
+        # Older PyGObject builds expose the instance method instead of the
+        # introspection-friendly out-parameter helper.
+        try:
+            info = GstVideo.VideoInfo.new()
+            parsed = info.from_caps(caps)
+        except (AttributeError, TypeError, ValueError):
+            return None
+    if not parsed:
+        return None
+    try:
+        return int(info.stride[0]), int(info.offset[0])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+
+
 class GStreamerCapture:
     """Small cv2.VideoCapture-compatible wrapper around a latest-frame appsink."""
 
     delivers_latest_frame = True
-    capture_backend = "gstreamer_nvdec"
+    capture_backend = "gstreamer_unknown"
 
     def __init__(
         self,
@@ -157,6 +278,18 @@ class GStreamerCapture:
             decoder_drop_interval
         )
         self._decoder_drop_applied = False
+        self._selected_decoder_factory: str | None = None
+        self.capture_backend = "gstreamer_unknown"
+        self._last_rate_drop_count = 0
+        self._last_rate_duplicate_count = 0
+        self._last_sink_drop_count = 0
+        self._sink_probe_lock = threading.Lock()
+        self._sink_probe_arrival_count = 0
+        self._sink_probe_pull_count = 0
+        self._sink_probe_drop_lower_bound = 0
+        self._sink_replacement_probe_supported = False
+        self._sink_probe_pad: Any = None
+        self._sink_probe_id: int | None = None
 
         tcp_timeout_us = max(1_000_000, int(read_timeout_ms) * 1_000)
         pipeline = Gst.parse_launch(_pipeline_description(tcp_timeout_us))
@@ -182,8 +315,9 @@ class GStreamerCapture:
         # Set the URL as a property, not in the parse string, so parse errors
         # can never echo credentials embedded in the source.
         source_element.set_property("location", source)
-        if self._decoder_drop_interval > 0:
-            decoder_bin.connect("element-added", self._on_decoder_element_added)
+        # Always inspect decodebin's selected child.  Merely having the NVDEC
+        # plugin installed does not prove it won autoplug selection.
+        decoder_bin.connect("element-added", self._on_decoder_element_added)
         rate_limiter.set_property("max-rate", self._max_rate)
         rate_filter.set_property(
             "caps",
@@ -200,6 +334,12 @@ class GStreamerCapture:
             )
         self._pipeline = pipeline
         self._sink = sink
+        # GStreamer 1.28 added a cheap cumulative appsink `dropped` property.
+        # JetPack 5's older runtime does not have it.  Poll when present and do
+        # not enable emit-signals: those callbacks add per-frame overhead.
+        self._sink_drop_counter_supported = _has_readable_property(sink, "dropped")
+        if not self._sink_drop_counter_supported:
+            self._install_sink_replacement_probe(sink)
         self._bus = pipeline.get_bus()
         self._scale_filter = scale_filter
         self._rate_limiter = rate_limiter
@@ -221,12 +361,71 @@ class GStreamerCapture:
         _container: Any,
         element: Any,
     ) -> None:
-        """Set output dropping while the hardware decoder is still NULL/READY."""
+        """Record the decoder actually selected and configure NVDEC if present."""
+        factory_name = _video_decoder_factory_name(element)
+        if factory_name is None:
+            return
+        self._selected_decoder_factory = factory_name
+        self.capture_backend = (
+            "gstreamer_nvdec"
+            if factory_name == "nvv4l2decoder"
+            else "gstreamer_software"
+        )
         if _configure_decoder_drop_interval(
             element,
             self._decoder_drop_interval,
         ):
             self._decoder_drop_applied = True
+
+    def _install_sink_replacement_probe(self, sink: Any) -> None:
+        """Observe post-videorate arrivals without mapping or copying frames."""
+        try:
+            pad = sink.get_static_pad("sink")
+            if pad is None:
+                return
+            probe_id = pad.add_probe(
+                Gst.PadProbeType.BUFFER,
+                self._on_sink_buffer,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return
+        if not probe_id:
+            return
+        self._sink_probe_pad = pad
+        self._sink_probe_id = int(probe_id)
+        self._sink_replacement_probe_supported = True
+
+    def _record_sink_arrival(self) -> None:
+        with self._sink_probe_lock:
+            self._sink_probe_arrival_count += 1
+            self._update_sink_probe_drop_lower_bound()
+
+    def _record_sink_pull(self) -> None:
+        with self._sink_probe_lock:
+            self._sink_probe_pull_count += 1
+            self._update_sink_probe_drop_lower_bound()
+
+    def _update_sink_probe_drop_lower_bound(self) -> None:
+        # appsink holds at most one buffer.  Subtracting one possible queued
+        # buffer avoids a pull/arrival race and undercounts by at most one over
+        # the capture lifetime.  Keep the cumulative bound monotonic after a
+        # pull empties the queue.
+        candidate = max(
+            0,
+            self._sink_probe_arrival_count - self._sink_probe_pull_count - 1,
+        )
+        self._sink_probe_drop_lower_bound = max(
+            self._sink_probe_drop_lower_bound,
+            candidate,
+        )
+
+    def _on_sink_buffer(self, _pad: Any, _info: Any) -> Any:
+        self._record_sink_arrival()
+        return Gst.PadProbeReturn.OK
+
+    def _sink_probe_drops(self) -> int:
+        with self._sink_probe_lock:
+            return self._sink_probe_drop_lower_bound
 
     def _configure_output_caps(self, _pad: Any, info: Any, settings: Any) -> Any:
         """Fix output dimensions from the decoder CAPS event before frame flow."""
@@ -278,6 +477,8 @@ class GStreamerCapture:
         if sample is None:
             self._consume_terminal_message()
             return None
+        if self._sink_replacement_probe_supported:
+            self._record_sink_pull()
 
         buffer = sample.get_buffer()
         caps = sample.get_caps()
@@ -293,11 +494,19 @@ class GStreamerCapture:
         if not ok:
             return None
         try:
-            expected = width * height * 3
-            if len(mapped.data) < expected:
+            layout = _bgr_plane_layout(buffer, caps)
+            if layout is None:
                 return None
-            frame = np.frombuffer(mapped.data, dtype=np.uint8, count=expected)
-            frame = frame.reshape((height, width, 3)).copy()
+            stride, offset = layout
+            frame = _copy_bgr_plane(
+                mapped.data,
+                width=width,
+                height=height,
+                stride=stride,
+                offset=offset,
+            )
+            if frame is None:
+                return None
         finally:
             buffer.unmap(mapped)
 
@@ -352,9 +561,96 @@ class GStreamerCapture:
             )
         self._max_rate = maximum
 
+    def consume_capture_policy_counts(self) -> tuple[int, int]:
+        """Return observable policy drops/duplicates since the previous read.
+
+        GStreamer's counters are cumulative and may reset when the pipeline is
+        renegotiated.  Converting them to non-negative deltas keeps the public
+        telemetry monotonic without exposing any stream metadata.  Recent
+        runtimes also expose appsink latest-buffer replacements; older JetPack
+        versions do not, so their capture drop count remains a documented lower
+        bound rather than enabling expensive signal callbacks.
+        """
+        limiter = self._rate_limiter
+        rate_dropped = (
+            _read_nonnegative_counter(limiter, "drop")
+            if limiter is not None
+            else None
+        )
+        rate_duplicated = (
+            _read_nonnegative_counter(limiter, "duplicate")
+            if limiter is not None
+            else None
+        )
+        rate_drop_delta, self._last_rate_drop_count = _cumulative_delta(
+            rate_dropped,
+            self._last_rate_drop_count,
+        )
+        duplicate_delta, self._last_rate_duplicate_count = _cumulative_delta(
+            rate_duplicated,
+            self._last_rate_duplicate_count,
+        )
+        sink_dropped = (
+            _read_nonnegative_counter(self._sink, "dropped")
+            if self._sink_drop_counter_supported
+            else (
+                self._sink_probe_drops()
+                if self._sink_replacement_probe_supported
+                else None
+            )
+        )
+        sink_drop_delta, self._last_sink_drop_count = _cumulative_delta(
+            sink_dropped,
+            self._last_sink_drop_count,
+        )
+        return rate_drop_delta + sink_drop_delta, duplicate_delta
+
+    def capture_policy_telemetry(self) -> dict[str, Any]:
+        """Describe exactly which configured drop stages are observable."""
+        appsink_drops_observable = (
+            self._sink_drop_counter_supported
+            or self._sink_replacement_probe_supported
+        )
+        if self._sink_drop_counter_supported:
+            appsink_drop_method = "native-counter"
+        elif self._sink_replacement_probe_supported:
+            appsink_drop_method = "sink-pad-probe-lower-bound"
+        else:
+            appsink_drop_method = "unavailable"
+        if self._decoder_drop_interval <= 0:
+            decoder_accounting = "not-configured"
+        elif self._decoder_drop_applied:
+            decoder_accounting = "configured-not-observable"
+        else:
+            decoder_accounting = "requested-not-applied"
+        return {
+            "appsinkLatestBufferDropsObservable": appsink_drops_observable,
+            "appsinkLatestBufferDropMethod": appsink_drop_method,
+            "captureDropAccounting": (
+                "videorate-plus-appsink"
+                if appsink_drops_observable
+                else "videorate-only"
+            ),
+            "captureDropCountIsLowerBound": (
+                not self._sink_drop_counter_supported
+                or self._decoder_drop_applied
+            ),
+            "decoderPolicyDropAccounting": decoder_accounting,
+        }
+
     def release(self) -> None:
         self._opened = False
         self._pending_frame = None
+        probe_pad = self._sink_probe_pad
+        probe_id = self._sink_probe_id
+        self._sink_probe_pad = None
+        self._sink_probe_id = None
+        self._sink_replacement_probe_supported = False
+        if probe_pad is not None and probe_id is not None:
+            try:
+                probe_pad.remove_probe(probe_id)
+            except (AttributeError, TypeError, ValueError):
+                pass
         pipeline = self._pipeline
         self._pipeline = None
         self._sink = None

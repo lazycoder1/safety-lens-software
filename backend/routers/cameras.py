@@ -33,6 +33,7 @@ from camera_runtime import derive_camera_runtime_status
 from config_manager import get_config, save_config
 from dependencies import require_admin
 from mjpeg_fanout import stream_fanout
+from pipeline_telemetry import telemetry as pipeline_telemetry
 from video_processing import (
     _capability_schedule_state,
     _scheduled_execution_plan,
@@ -863,6 +864,7 @@ async def api_delete_camera(cam_id: str, request: Request):
         )
     del cfg["cameras"][cam_id]
     save_config(cfg)
+    pipeline_telemetry.remove_camera(cam_id)
     stream_fanout.retire(cam_id)
     audit_store.log_event(
         "camera.delete",

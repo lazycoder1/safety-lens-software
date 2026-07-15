@@ -1731,23 +1731,30 @@ def test_update_camera_not_found():
     assert resp.status_code == 404
 
 
+@mock.patch("routers.cameras.pipeline_telemetry.remove_camera")
 @mock.patch("routers.cameras.stream_fanout.retire")
 @mock.patch("routers.cameras.stop_camera", return_value=True)
-def test_delete_camera(mock_stop, mock_retire):
+def test_delete_camera(mock_stop, mock_retire, mock_remove_telemetry):
     cam_id = _first_camera_id()
     resp = api_delete(f"/api/cameras/{cam_id}")
     assert resp.status_code == 200
     assert resp.json()["deleted"] == cam_id
     mock_stop.assert_called_once_with(cam_id)
     mock_retire.assert_called_once_with(cam_id)
+    mock_remove_telemetry.assert_called_once_with(cam_id)
 
     cfg = config_manager.get_config()
     assert cam_id not in cfg["cameras"]
 
 
+@mock.patch("routers.cameras.pipeline_telemetry.remove_camera")
 @mock.patch("routers.cameras.stream_fanout.retire")
 @mock.patch("routers.cameras.stop_camera", return_value=False)
-def test_delete_camera_waits_for_stuck_worker(mock_stop, mock_retire):
+def test_delete_camera_waits_for_stuck_worker(
+    mock_stop,
+    mock_retire,
+    mock_remove_telemetry,
+):
     cam_id = _first_camera_id()
 
     resp = api_delete(f"/api/cameras/{cam_id}")
@@ -1756,7 +1763,29 @@ def test_delete_camera_waits_for_stuck_worker(mock_stop, mock_retire):
     assert resp.json()["detail"] == "Camera worker is still stopping; retry deletion"
     mock_stop.assert_called_once_with(cam_id)
     mock_retire.assert_not_called()
+    mock_remove_telemetry.assert_not_called()
     assert cam_id in config_manager.get_config()["cameras"]
+
+
+@mock.patch("routers.cameras.pipeline_telemetry.remove_camera")
+@mock.patch("routers.cameras.stream_fanout.retire")
+@mock.patch("routers.cameras.save_config", side_effect=RuntimeError("persistence failed"))
+@mock.patch("routers.cameras.stop_camera", return_value=True)
+def test_delete_camera_keeps_telemetry_when_persistence_fails(
+    mock_stop,
+    mock_save,
+    mock_retire,
+    mock_remove_telemetry,
+):
+    cam_id = _first_camera_id()
+
+    resp = api_delete(f"/api/cameras/{cam_id}")
+
+    assert resp.status_code == 500
+    mock_stop.assert_called_once_with(cam_id)
+    mock_save.assert_called_once()
+    mock_retire.assert_not_called()
+    mock_remove_telemetry.assert_not_called()
 
 
 def test_delete_camera_not_found():

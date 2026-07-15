@@ -299,11 +299,30 @@ DEFAULT_CONFIG = {
         "rtdetr_phone_target_fps": 1.0,
         "rtdetr_phone_person_track_min_hits": 2,
         "rtdetr_phone_person_track_ttl_seconds": 1.0,
+        # Scalable pipeline features are independently gated so a deployed
+        # site can A/B each stage and fall back without changing camera data.
+        "shared_inference_scheduler_mode": "off",
+        "shared_inference_max_workers": 4,
+        "shared_inference_max_batch_size": 4,
+        "shared_inference_max_frame_age_seconds": 0.75,
+        "adaptive_inference_mode": "off",
+        "keyframe_tracking_mode": "off",
+        "ppe_person_crop_mode": "off",
+        "phone_person_crop_mode": "off",
         "device": "mps",
         "alert_cooldown": 60,
     },
     "vlm": {
-        "enabled": True,
+        # VLM is optional enrichment. It is disabled by default and may only
+        # use an off-device endpoint unless an operator explicitly opts out.
+        "enabled": False,
+        "remote_only": True,
+        "alerting_enabled": False,
+        "required_for_health": False,
+        "maximum_pending_cameras": 32,
+        "maximum_queue_age_seconds": 15.0,
+        "failure_threshold": 3,
+        "circuit_cooldown_seconds": 60.0,
         "interval": 45,
         "model": "qwen3-vl:8b",
         "prompt": (

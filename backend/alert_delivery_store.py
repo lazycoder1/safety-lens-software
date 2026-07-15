@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -14,6 +15,34 @@ from db import get_conn
 
 _get_conn = get_conn
 _NOTIFY_CHANNEL = "safetylens_alert_delivery"
+
+
+@dataclass(frozen=True, slots=True)
+class InitialDeliveryTiming:
+    """Durable timing anchors emitted only for the first initial delivery."""
+
+    alert_id: str
+    camera_id: str
+    first_positive_at: datetime | None
+    confirmed_at: datetime | None
+    persisted_at: datetime | None
+    first_initial_delivery_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryCompletion:
+    """Result of a fenced delivery completion transaction."""
+
+    updated: bool
+    initial_delivery_timing: InitialDeliveryTiming | None = None
+
+
+def _utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _env_seconds(name: str, default: float, minimum: float = 1.0) -> float:
@@ -348,6 +377,7 @@ def claim_due(
     worker_id: str,
     lease_seconds: float,
     excluded_channels: list[str] | None = None,
+    include_terminalized: bool = False,
 ) -> dict | None:
     """Lease one live due row; claiming does not consume a provider attempt."""
     lease_token = str(uuid4())
@@ -389,8 +419,12 @@ def claim_due(
                     updated_at = clock_timestamp()
                 FROM stale
                 WHERE delivery.id = stale.id
+                RETURNING delivery.alert_id,
+                          delivery.kind,
+                          delivery.target_key
                 """
             )
+            terminalized = [dict(item) for item in cur.fetchall()]
             cur.execute(
                 """
                 WITH candidate AS (
@@ -450,7 +484,13 @@ def claim_due(
             )
             row = cur.fetchone()
         conn.commit()
-    return _row_to_dict(row) if row else None
+    claimed = _row_to_dict(row) if row else None
+    if include_terminalized:
+        return {
+            "delivery": claimed,
+            "terminalized": terminalized,
+        }
+    return claimed
 
 
 def begin_send(
@@ -501,6 +541,11 @@ def begin_send(
                 cancelled = True
 
             if reason is not None:
+                final_state = (
+                    None
+                    if release_only
+                    else ("cancelled" if cancelled else "terminal")
+                )
                 cur.execute(
                     """
                     UPDATE alert_delivery_outbox
@@ -515,15 +560,29 @@ def begin_send(
                     WHERE id = %s AND lease_token = %s AND state = 'pending'
                     """,
                     (
-                        "pending" if release_only else ("cancelled" if cancelled else "terminal"),
+                        "pending" if release_only else final_state,
                         None if release_only else reason,
                         terminal,
                         delivery_id,
                         lease_token,
                     ),
                 )
+                updated = cur.rowcount == 1
                 conn.commit()
-                return {"started": False, "reason": reason}
+                result = {
+                    "started": False,
+                    "reason": reason,
+                }
+                if final_state is not None and updated:
+                    result.update(
+                        {
+                            "final_state": final_state,
+                            "alert_id": str(row.get("alert_id") or ""),
+                            "kind": str(row.get("kind") or "initial"),
+                            "target_key": str(row.get("target_key") or ""),
+                        }
+                    )
+                return result
 
             cur.execute(
                 """
@@ -589,14 +648,92 @@ def mark_delivered(
     *,
     acceptance_unknown: bool = False,
 ) -> bool:
-    return _finish(
+    """Complete a delivery while preserving the original boolean API."""
+    return mark_delivered_with_timing(
         delivery_id,
         lease_token,
-        state="delivered",
-        error_code=None,
-        error_message=None,
-        terminal_reason=None,
         acceptance_unknown=acceptance_unknown,
+    ).updated
+
+
+def mark_delivered_with_timing(
+    delivery_id: str,
+    lease_token: str,
+    *,
+    acceptance_unknown: bool = False,
+) -> DeliveryCompletion:
+    """Complete a target and durably stamp the first initial delivery.
+
+    The outbox lease fence and alert timestamp are committed together. Only
+    the transaction that changes ``first_initial_delivery_at`` receives a
+    timing record, so concurrent initial targets cannot double-report it.
+    """
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE alert_delivery_outbox
+                SET state = 'delivered',
+                    delivered_at = clock_timestamp(),
+                    terminal_reason = NULL,
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    last_acceptance_unknown = %s,
+                    ever_acceptance_unknown = ever_acceptance_unknown OR %s,
+                    send_in_flight = FALSE,
+                    leased_by = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = clock_timestamp()
+                WHERE id = %s
+                  AND lease_token = %s
+                  AND state = 'pending'
+                RETURNING alert_id, kind, delivered_at
+                """,
+                (
+                    bool(acceptance_unknown),
+                    bool(acceptance_unknown),
+                    delivery_id,
+                    lease_token,
+                ),
+            )
+            completed = cur.fetchone()
+            timing = None
+            if completed and completed.get("kind") == "initial":
+                cur.execute(
+                    """
+                    UPDATE alerts
+                    SET first_initial_delivery_at = %s
+                    WHERE id = %s
+                      AND first_initial_delivery_at IS NULL
+                    RETURNING id AS alert_id,
+                              camera_id,
+                              first_positive_at,
+                              confirmed_at,
+                              persisted_at,
+                              first_initial_delivery_at
+                    """,
+                    (completed["delivered_at"], completed["alert_id"]),
+                )
+                stamped = cur.fetchone()
+                if stamped is not None:
+                    first_initial_delivery_at = _utc_datetime(
+                        stamped["first_initial_delivery_at"]
+                    )
+                    if first_initial_delivery_at is None:
+                        raise RuntimeError("initial delivery timestamp was not persisted")
+                    timing = InitialDeliveryTiming(
+                        alert_id=str(stamped["alert_id"]),
+                        camera_id=str(stamped["camera_id"]),
+                        first_positive_at=_utc_datetime(stamped.get("first_positive_at")),
+                        confirmed_at=_utc_datetime(stamped.get("confirmed_at")),
+                        persisted_at=_utc_datetime(stamped.get("persisted_at")),
+                        first_initial_delivery_at=first_initial_delivery_at,
+                    )
+        conn.commit()
+    return DeliveryCompletion(
+        updated=completed is not None,
+        initial_delivery_timing=timing,
     )
 
 

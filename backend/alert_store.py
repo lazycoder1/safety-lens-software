@@ -62,6 +62,10 @@ def init_db():
             cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS priority INTEGER")
             cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS message TEXT")
             cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS first_positive_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS persisted_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS first_initial_delivery_at TIMESTAMPTZ")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)")
@@ -97,6 +101,8 @@ def create_alert(
     alert_id: str | None = None,
     timestamp: str | None = None,
     delivery_targets: list[dict] | None = None,
+    first_positive_at: datetime | str | None = None,
+    confirmed_at: datetime | str | None = None,
 ) -> dict:
     if alert_id is None:
         alert_id = str(uuid4())
@@ -106,6 +112,8 @@ def create_alert(
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("alert_id must be a UUID") from exc
     timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+    first_positive_at = _normalize_utc_datetime(first_positive_at, field_name="first_positive_at")
+    confirmed_at = _normalize_utc_datetime(confirmed_at, field_name="confirmed_at")
     snapshot_path = None
     clean_snapshot_path = None
     created_snapshot_paths: list[Path] = []
@@ -137,18 +145,21 @@ def create_alert(
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO alerts
-                       (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path, policy_id, priority, message, metadata)
-                       VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       (id, severity, status, rule, camera_id, camera_name, zone, confidence, timestamp, source, description, snapshot_path, bboxes, clean_snapshot_path, policy_id, priority, message, metadata, first_positive_at, confirmed_at, persisted_at)
+                       VALUES (%s, %s, 'active', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                        ON CONFLICT (id) DO NOTHING
-                       RETURNING id""",
+                       RETURNING persisted_at""",
                     (
                         alert_id, severity, rule, camera_id, camera_name, zone,
                         round(confidence, 2), timestamp, source, description,
                         snapshot_path, json.dumps(bboxes), clean_snapshot_path,
                         policy_id, priority, message, json.dumps(metadata or {}),
+                        first_positive_at, confirmed_at,
                     ),
                 )
-                inserted = cur.fetchone() is not None
+                inserted_row = cur.fetchone()
+                inserted = inserted_row is not None
+                persisted_at = inserted_row[0] if inserted else None
                 if inserted:
                     alert_delivery_store.insert_targets(
                         cur,
@@ -209,7 +220,42 @@ def create_alert(
         round(confidence, 2), timestamp, source, description, snapshot_path,
         bboxes=bboxes, clean_snapshot_path=clean_snapshot_path,
         policy_id=policy_id, priority=priority, message=message, metadata=metadata or {},
+        first_positive_at=first_positive_at, confirmed_at=confirmed_at,
+        persisted_at=persisted_at,
     )
+
+
+def mark_first_initial_delivery_at(
+    alert_id: str,
+    delivered_at: datetime | str | None = None,
+) -> dict | None:
+    """Set an alert's initial-delivery timestamp once and return its timing anchors."""
+    delivered_at = _normalize_utc_datetime(delivered_at, field_name="delivered_at")
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE alerts
+                SET first_initial_delivery_at = COALESCE(
+                    first_initial_delivery_at,
+                    COALESCE(%s, CURRENT_TIMESTAMP)
+                )
+                WHERE id = %s
+                RETURNING first_positive_at, confirmed_at, persisted_at,
+                          first_initial_delivery_at
+                """,
+                (delivered_at, alert_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if row is None:
+        return None
+    return {
+        "firstPositiveAt": _public_timestamp(row.get("first_positive_at")),
+        "confirmedAt": _public_timestamp(row.get("confirmed_at")),
+        "persistedAt": _public_timestamp(row.get("persisted_at")),
+        "firstInitialDeliveryAt": _public_timestamp(row.get("first_initial_delivery_at")),
+    }
 
 
 def _write_snapshot_once(path: Path, content: bytes) -> bool:
@@ -751,6 +797,10 @@ def _row_to_dict(row: dict) -> dict:
         delivery_results=delivery_results,
         policy_id=row.get("policy_id"), priority=row.get("priority"),
         message=row.get("message"), metadata=metadata,
+        first_positive_at=row.get("first_positive_at"),
+        confirmed_at=row.get("confirmed_at"),
+        persisted_at=row.get("persisted_at"),
+        first_initial_delivery_at=row.get("first_initial_delivery_at"),
     )
 
 
@@ -761,6 +811,8 @@ def _build_dict(
     snoozed_until=None, false_positive=False,
     bboxes=None, clean_snapshot_path=None, delivery_results=None,
     policy_id=None, priority=None, message=None, metadata=None,
+    first_positive_at=None, confirmed_at=None, persisted_at=None,
+    first_initial_delivery_at=None,
 ) -> dict:
     return {
         "id": id,
@@ -787,6 +839,10 @@ def _build_dict(
         "resolvedAt": resolved_at,
         "snoozedUntil": snoozed_until,
         "falsePositive": false_positive,
+        "firstPositiveAt": _public_timestamp(first_positive_at),
+        "confirmedAt": _public_timestamp(confirmed_at),
+        "persistedAt": _public_timestamp(persisted_at),
+        "firstInitialDeliveryAt": _public_timestamp(first_initial_delivery_at),
     }
 
 
@@ -812,6 +868,45 @@ def _parse_iso_timestamp(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _normalize_utc_datetime(
+    value: datetime | str | None,
+    *,
+    field_name: str,
+) -> datetime | None:
+    """Normalize wall-clock timestamps for TIMESTAMPTZ storage."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = _parse_iso_timestamp(value.strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+    else:
+        raise TypeError(f"{field_name} must be a datetime, ISO-8601 string, or None")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _public_timestamp(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = _parse_iso_timestamp(value)
+        except ValueError:
+            return value
+    else:
+        raise TypeError("persisted alert timestamps must be datetime, ISO-8601 string, or None")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 # ── Search & Heatmap functions ────────────────────────────────────────────

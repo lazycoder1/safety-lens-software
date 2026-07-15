@@ -259,8 +259,20 @@ class AlertPipeline:
                 raise
             self._accepting = True
 
-    def submit(self, payload: dict, *, output_ids: list[str] | None = None) -> Future:
-        """Queue an immutable alert request and return its persistence future."""
+    def submit(
+        self,
+        payload: dict,
+        *,
+        output_ids: list[str] | None = None,
+        allow_backpressure: bool = True,
+    ) -> Future:
+        """Queue an immutable alert request and return its persistence future.
+
+        Core safety alerts keep the default lossless producer backpressure.
+        Optional advisory producers may set ``allow_backpressure=False`` so a
+        full persistence queue rejects immediately instead of blocking the
+        real-time or shutdown path.
+        """
         self.start()
         future = _AlertFuture()
         job = _PersistJob(
@@ -277,15 +289,22 @@ class AlertPipeline:
                 raise RuntimeError("Alert pipeline is shutting down")
             self._active_submitters += 1
         try:
-            try:
-                self._persist_queue.put(job, timeout=self._submit_timeout)
-            except queue.Full:
-                self._increment("backpressure_events")
-                logger.warning(
-                    "Alert persistence queue full; applying producer backpressure",
-                    extra={"queue_size": self._persist_queue.qsize()},
-                )
-                self._persist_queue.put(job)
+            if allow_backpressure:
+                try:
+                    self._persist_queue.put(job, timeout=self._submit_timeout)
+                except queue.Full:
+                    self._increment("backpressure_events")
+                    logger.warning(
+                        "Alert persistence queue full; applying producer backpressure",
+                        extra={"queue_size": self._persist_queue.qsize()},
+                    )
+                    self._persist_queue.put(job)
+            else:
+                try:
+                    self._persist_queue.put_nowait(job)
+                except queue.Full:
+                    self._increment("backpressure_events")
+                    raise
             self._increment("submitted")
         finally:
             with self._submission_condition:

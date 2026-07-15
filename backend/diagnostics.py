@@ -20,6 +20,7 @@ import audit_store
 import db
 import licensing
 import model_manager
+from pipeline_telemetry import telemetry as pipeline_telemetry
 import state
 from config_manager import get_config, get_redacted_config
 from logging_config import LOGS_DIR
@@ -52,7 +53,9 @@ def _capture_acceleration_health(camera: dict, connection: dict) -> dict:
         "hardwareAccelerationExpected": expected,
         "hardwareAccelerationActive": active,
         "hardwareFallback": (
-            expected and connection.get("captureBackend") == "ffmpeg"
+            expected
+            and connection.get("captureBackend")
+            in {"ffmpeg", "gstreamer_unknown", "gstreamer_software"}
         ),
     }
 
@@ -143,7 +146,11 @@ def build_health_snapshot() -> dict:
         for cam_id, cam in cfg.get("cameras", {}).items():
             enabled = bool(cam.get("enabled", True))
             worker_running = _registered_worker_is_alive(state.camera_threads, cam_id)
-            vlm_expected = cam.get("demo") == "yolo+vlm"
+            vlm_cfg = cfg.get("vlm")
+            vlm_expected = bool(
+                (vlm_cfg is None or vlm_cfg.get("enabled", False))
+                and cam.get("demo") == "yolo+vlm"
+            )
             vlm_worker_running = _registered_worker_is_alive(state.vlm_threads, cam_id)
             last_frame_at = state.camera_frame_updated_at.get(cam_id)
             last_frame_age = None if last_frame_at is None else now - last_frame_at
@@ -156,6 +163,7 @@ def build_health_snapshot() -> dict:
             if worker_running and not frame_available and runtime_status == "running":
                 runtime_status = "stale"
             stream_stats = stream_fanout.stats(cam_id)
+            frame_dimensions = state.get_camera_frame_dimensions(cam_id)
             connection_health = state.get_camera_connection_health(cam_id)
             acceleration_health = _capture_acceleration_health(
                 cam,
@@ -184,6 +192,13 @@ def build_health_snapshot() -> dict:
                     "frameFresh": frame_available,
                     "lastFrameAgeSeconds": None if last_frame_age is None else round(last_frame_age, 1),
                     "runtimeStatus": runtime_status,
+                    "streamType": cam.get("stream_type", "file"),
+                    "frameWidth": (
+                        frame_dimensions[0] if frame_dimensions is not None else None
+                    ),
+                    "frameHeight": (
+                        frame_dimensions[1] if frame_dimensions is not None else None
+                    ),
                     "connection": connection_health,
                     "inference": state.get_camera_inference_health(cam_id),
                     "phoneProbe": _phone_probe_health(cam_id, now),
@@ -218,7 +233,11 @@ def build_health_snapshot() -> dict:
             if status == "ok":
                 status = "degraded"
             reasons.append("one or more enabled cameras are not running")
-        if missing_vlm_companions:
+        vlm_health_cfg = cfg.get("vlm")
+        if missing_vlm_companions and (
+            vlm_health_cfg is None
+            or vlm_health_cfg.get("required_for_health", False)
+        ):
             if status == "ok":
                 status = "degraded"
             reasons.append("one or more enabled VLM camera companions are not running")
@@ -251,12 +270,26 @@ def build_health_snapshot() -> dict:
             "modelMetadata": model_metadata,
             "cameras": cameras,
             "streamFanout": stream_fanout.operational_stats(),
+            "pipelineTelemetry": pipeline_telemetry.public_snapshot(),
             "storage": {
                 **storage,
                 "freeBytes": free_bytes,
             },
             "retention": retention,
         }
+        try:
+            # Imported lazily to avoid a diagnostics/video-processing import
+            # cycle during process bootstrap.
+            from video_processing import pipeline_runtime_stats
+
+            result.update(pipeline_runtime_stats())
+        except Exception:
+            logger.exception("Pipeline runtime diagnostics unavailable")
+            result["sharedInferenceScheduler"] = {
+                "running": False,
+                "accepting": False,
+                "diagnosticsUnavailable": True,
+            }
         _health_cache = result
         _health_cache_time = time.time()
         return result

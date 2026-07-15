@@ -846,6 +846,11 @@ def test_connection_health_bounds_fields_and_rejects_arbitrary_transition_text(
         "lastTransition": "unknown",
         "lastTransitionAgeSeconds": state.CAMERA_CONNECTION_AGE_MAX_SECONDS,
         "captureBackend": "unknown",
+        "appsinkLatestBufferDropsObservable": False,
+        "appsinkLatestBufferDropMethod": "unavailable",
+        "captureDropAccounting": "unavailable",
+        "captureDropCountIsLowerBound": True,
+        "decoderPolicyDropAccounting": "unknown",
     }
     serialized = json.dumps(snapshot)
     assert "password" not in serialized
@@ -885,7 +890,44 @@ def test_non_rtsp_worker_clears_stale_connection_health(monkeypatch):
         "lastTransition": "unknown",
         "lastTransitionAgeSeconds": None,
         "captureBackend": "unknown",
+        "appsinkLatestBufferDropsObservable": False,
+        "appsinkLatestBufferDropMethod": "unavailable",
+        "captureDropAccounting": "unavailable",
+        "captureDropCountIsLowerBound": True,
+        "decoderPolicyDropAccounting": "unknown",
     }
+
+
+def test_connection_health_exposes_bounded_capture_drop_accounting(monkeypatch):
+    monkeypatch.setattr(state, "camera_connection_health", {})
+    state.update_camera_connection_health(
+        "cam1",
+        outage_active=False,
+        outage_started_monotonic=None,
+        outage_failure_count=0,
+        total_failure_count=0,
+        suppressed_failure_count=0,
+        last_transition="connected",
+        last_transition_monotonic=10,
+        capture_backend="gstreamer_nvdec",
+        appsink_latest_buffer_drops_observable=True,
+        appsink_latest_buffer_drop_method="sink-pad-probe-lower-bound",
+        capture_drop_accounting="videorate-plus-appsink",
+        capture_drop_count_is_lower_bound=False,
+        decoder_policy_drop_accounting="not-configured",
+    )
+
+    snapshot = state.get_camera_connection_health("cam1", now_monotonic=11)
+
+    assert snapshot["captureBackend"] == "gstreamer_nvdec"
+    assert snapshot["appsinkLatestBufferDropsObservable"] is True
+    assert (
+        snapshot["appsinkLatestBufferDropMethod"]
+        == "sink-pad-probe-lower-bound"
+    )
+    assert snapshot["captureDropAccounting"] == "videorate-plus-appsink"
+    assert snapshot["captureDropCountIsLowerBound"] is False
+    assert snapshot["decoderPolicyDropAccounting"] == "not-configured"
 
 
 def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
@@ -951,6 +993,7 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
     monkeypatch.setattr(state, "vlm_threads", {})
     monkeypatch.setattr(state, "camera_frames", {})
     monkeypatch.setattr(state, "camera_detections", {})
+    monkeypatch.setattr(state, "camera_frame_dimensions", {"cam1": (640, 360)})
     monkeypatch.setattr(state, "camera_runtime_status", {"cam1": "reconnecting"})
     monkeypatch.setattr(state, "camera_connection_health", {})
     now = state.time.monotonic()
@@ -992,6 +1035,11 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
         "lastTransition",
         "lastTransitionAgeSeconds",
         "captureBackend",
+        "appsinkLatestBufferDropsObservable",
+        "appsinkLatestBufferDropMethod",
+        "captureDropAccounting",
+        "captureDropCountIsLowerBound",
+        "decoderPolicyDropAccounting",
         "hardwareAccelerationExpected",
         "hardwareAccelerationActive",
         "hardwareFallback",
@@ -1000,6 +1048,9 @@ def test_health_exposes_safe_connection_outage_and_degrades(monkeypatch):
     assert connection["hardwareAccelerationExpected"] is True
     assert connection["hardwareAccelerationActive"] is False
     assert connection["hardwareFallback"] is True
+    assert snapshot["cameras"][0]["frameWidth"] == 640
+    assert snapshot["cameras"][0]["frameHeight"] == 360
+    assert snapshot["cameras"][0]["streamType"] == "rtsp"
 
 
 def test_health_identifies_requested_nvdec_cpu_fallback(monkeypatch):
@@ -1020,6 +1071,14 @@ def test_health_identifies_requested_nvdec_cpu_fallback(monkeypatch):
         "hardwareAccelerationExpected": True,
         "hardwareAccelerationActive": True,
         "hardwareFallback": False,
+    }
+    assert diagnostics._capture_acceleration_health(
+        {"stream_type": "rtsp"},
+        {"captureBackend": "gstreamer_software"},
+    ) == {
+        "hardwareAccelerationExpected": True,
+        "hardwareAccelerationActive": False,
+        "hardwareFallback": True,
     }
 
 

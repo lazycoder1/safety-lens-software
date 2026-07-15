@@ -974,6 +974,43 @@ def test_full_queue_applies_backpressure_without_dropping_alerts():
     assert pipeline.shutdown(timeout=1)
 
 
+def test_optional_advisory_submission_rejects_full_queue_without_waiting():
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def persist(**payload):
+        if payload["sequence"] == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        return _alert_from_payload(**payload)
+
+    pipeline = AlertPipeline(
+        persist_alert=persist,
+        deliver_alert=lambda _alert, _outputs: True,
+        persist_queue_size=1,
+        submit_timeout=1.0,
+    )
+    first = pipeline.submit({"sequence": 1})
+    assert first_started.wait(timeout=1)
+    second = pipeline.submit({"sequence": 2})
+
+    started = time.perf_counter()
+    with pytest.raises(alert_pipeline.queue.Full):
+        pipeline.submit(
+            {"sequence": 3},
+            allow_backpressure=False,
+        )
+    assert time.perf_counter() - started < 0.05
+    assert pipeline.stats()["submitted"] == 2
+    assert pipeline.stats()["backpressure_events"] == 1
+
+    release_first.set()
+    assert first.result(timeout=1)["sequence"] == 1
+    assert second.result(timeout=1)["sequence"] == 2
+    assert pipeline.drain(timeout=1)
+    assert pipeline.shutdown(timeout=1)
+
+
 def test_timed_out_shutdown_does_not_strand_inflight_persistence():
     persistence_started = threading.Event()
     release_persistence = threading.Event()

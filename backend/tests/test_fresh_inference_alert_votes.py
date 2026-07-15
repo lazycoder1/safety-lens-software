@@ -127,8 +127,10 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     violation_checks = []
     alert_capture_indices = []
     detections_before_clear = []
+    signature_calls = []
     next_slots = iter((0.0, 0.0, 1.0, float("inf")))
     original_clear_observation = video_processing._clear_camera_observation
+    original_frame_change_signature = video_processing._frame_change_signature
 
     def run_inference(_camera_id, frame, *_args, **_kwargs):
         inference_calls.append(capture.read_count)
@@ -156,9 +158,15 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
         original_clear_observation(camera_id)
 
     monkeypatch.setattr(video_processing, "get_config", lambda: config)
-    monkeypatch.setattr(video_processing, "open_video_capture", lambda *_args, **_kwargs: capture)
-    monkeypatch.setattr(video_processing.model_manager, "missing_model_keys", lambda _keys: [])
-    monkeypatch.setattr(video_processing.licensing, "is_inference_allowed", lambda: True)
+    monkeypatch.setattr(
+        video_processing, "open_video_capture", lambda *_args, **_kwargs: capture
+    )
+    monkeypatch.setattr(
+        video_processing.model_manager, "missing_model_keys", lambda _keys: []
+    )
+    monkeypatch.setattr(
+        video_processing.licensing, "is_inference_allowed", lambda: True
+    )
     monkeypatch.setattr(
         video_processing.inference_scheduler,
         "next_inference_slot",
@@ -171,18 +179,32 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     )
     monkeypatch.setattr(video_processing.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(video_processing, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        video_processing,
+        "_frame_change_signature",
+        lambda frame: signature_calls.append(capture.read_count)
+        or original_frame_change_signature(frame),
+    )
     monkeypatch.setattr(video_processing, "_run_grouped_inference", run_inference)
     monkeypatch.setattr(video_processing, "check_violations", check_violations)
-    monkeypatch.setattr(video_processing, "check_zone_intrusions", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        video_processing, "check_zone_intrusions", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        video_processing, "extract_violation_bboxes", lambda *_args, **_kwargs: []
+    )
     monkeypatch.setattr(
         video_processing,
         "_encode_inference_snapshot_pair",
         lambda *_args, **_kwargs: (b"annotated", b"clean"),
     )
     monkeypatch.setattr(video_processing, "create_alert", create_alert)
-    monkeypatch.setattr(video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(video_processing, "_clear_camera_observation", record_then_clear)
+    monkeypatch.setattr(
+        video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        video_processing, "_clear_camera_observation", record_then_clear
+    )
     monkeypatch.setattr(video_processing, "stream_fanout", MjpegFanout())
     monkeypatch.setattr(
         video_processing.policy_engine,
@@ -212,6 +234,7 @@ def test_cached_detection_does_not_advance_alert_window_between_inferences(
     assert inference_calls == [1, 20]
     assert violation_checks == expected_violation_checks
     assert alert_capture_indices == expected_alert_indices
+    assert len(signature_calls) <= len(inference_calls)
     assert len(detections_before_clear[0]) == expected_preserved_detections
     assert len(state.camera_detection_history["cam1"]) == expected_history_length
 
@@ -290,27 +313,39 @@ def test_cached_pose_result_is_evaluated_once_per_inference(monkeypatch):
         return {"id": "fall-alert"}
 
     monkeypatch.setattr(video_processing, "get_config", lambda: config)
-    monkeypatch.setattr(video_processing, "open_video_capture", lambda *_args, **_kwargs: capture)
-    monkeypatch.setattr(video_processing.model_manager, "missing_model_keys", lambda _keys: [])
-    monkeypatch.setattr(video_processing.licensing, "is_inference_allowed", lambda: True)
+    monkeypatch.setattr(
+        video_processing, "open_video_capture", lambda *_args, **_kwargs: capture
+    )
+    monkeypatch.setattr(
+        video_processing.model_manager, "missing_model_keys", lambda _keys: []
+    )
+    monkeypatch.setattr(
+        video_processing.licensing, "is_inference_allowed", lambda: True
+    )
     monkeypatch.setattr(
         video_processing.inference_scheduler,
         "next_inference_slot",
         lambda *_args, **_kwargs: next(next_slots),
     )
-    monkeypatch.setattr(video_processing.time, "monotonic", lambda: float(capture.read_count))
+    monkeypatch.setattr(
+        video_processing.time, "monotonic", lambda: float(capture.read_count)
+    )
     monkeypatch.setattr(video_processing.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(video_processing, "ThreadPoolExecutor", _ImmediateExecutor)
     monkeypatch.setattr(video_processing, "_run_grouped_inference", run_inference)
     monkeypatch.setattr(video_processing, "check_fall_detections", check_fall)
-    monkeypatch.setattr(video_processing, "extract_violation_bboxes", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        video_processing, "extract_violation_bboxes", lambda *_args, **_kwargs: []
+    )
     monkeypatch.setattr(
         video_processing,
         "_encode_inference_snapshot_pair",
         lambda *_args, **_kwargs: (b"annotated", b"clean"),
     )
     monkeypatch.setattr(video_processing, "create_alert", create_alert)
-    monkeypatch.setattr(video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        video_processing, "_publish_stream_frame", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(video_processing, "stream_fanout", MjpegFanout())
     monkeypatch.setattr(
         video_processing.policy_engine,

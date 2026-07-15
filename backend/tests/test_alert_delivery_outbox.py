@@ -48,7 +48,15 @@ def _target(
     return target
 
 
-def _create_alert(*, targets=None, alert_id=None, timestamp=None, snapshot=None):
+def _create_alert(
+    *,
+    targets=None,
+    alert_id=None,
+    timestamp=None,
+    snapshot=None,
+    first_positive_at=None,
+    confirmed_at=None,
+):
     return alert_store.create_alert(
         camera_id="cam-1",
         camera_name="Camera 1",
@@ -60,6 +68,8 @@ def _create_alert(*, targets=None, alert_id=None, timestamp=None, snapshot=None)
         timestamp=timestamp,
         delivery_targets=targets,
         snapshot_jpeg=snapshot,
+        first_positive_at=first_positive_at,
+        confirmed_at=confirmed_at,
     )
 
 
@@ -258,8 +268,74 @@ def test_expired_lease_is_reclaimed_and_stale_token_is_fenced():
     assert second["id"] == first["id"]
     assert second["lease_token"] != first["lease_token"]
     assert not alert_delivery_store.mark_delivered(str(first["id"]), str(first["lease_token"]))
+    assert alert_store.get_alert(alert["id"])["firstInitialDeliveryAt"] is None
     assert alert_delivery_store.mark_delivered(str(second["id"]), str(second["lease_token"]))
     assert alert_delivery_store.get_for_alert(alert["id"])[0]["state"] == "delivered"
+    assert alert_store.get_alert(alert["id"])["firstInitialDeliveryAt"] is not None
+
+
+def test_first_initial_delivery_stamp_is_atomic_and_escalation_cannot_overwrite_it():
+    first_positive_at = datetime.now(timezone.utc) - timedelta(seconds=4)
+    confirmed_at = first_positive_at + timedelta(seconds=1)
+    alert = _create_alert(
+        first_positive_at=first_positive_at,
+        confirmed_at=confirmed_at,
+        targets=[
+            _target("telegram", suffix="first", priority=1),
+            _target("webhook", suffix="second", priority=1),
+            _target("email", suffix="escalation", kind="escalation", priority=2),
+        ],
+    )
+    first = alert_delivery_store.claim_due(worker_id="first", lease_seconds=30)
+    second = alert_delivery_store.claim_due(worker_id="second", lease_seconds=30)
+    assert {first["kind"], second["kind"]} == {"initial"}
+
+    barrier = threading.Barrier(3)
+    completions = []
+
+    def finish(claim):
+        barrier.wait()
+        completions.append(
+            alert_delivery_store.mark_delivered_with_timing(
+                str(claim["id"]),
+                str(claim["lease_token"]),
+            )
+        )
+
+    threads = [threading.Thread(target=finish, args=(claim,)) for claim in (first, second)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(completion.updated for completion in completions)
+    emitted = [
+        completion.initial_delivery_timing
+        for completion in completions
+        if completion.initial_delivery_timing is not None
+    ]
+    assert len(emitted) == 1
+    timing = emitted[0]
+    assert timing.alert_id == alert["id"]
+    assert timing.camera_id == "cam-1"
+    assert timing.first_positive_at == first_positive_at
+    assert timing.confirmed_at == confirmed_at
+    assert timing.persisted_at is not None
+
+    stamped_at = alert_store.get_alert(alert["id"])["firstInitialDeliveryAt"]
+    assert stamped_at == timing.first_initial_delivery_at.isoformat()
+
+    escalation = alert_delivery_store.claim_due(worker_id="escalation", lease_seconds=30)
+    assert escalation["kind"] == "escalation"
+    escalation_completion = alert_delivery_store.mark_delivered_with_timing(
+        str(escalation["id"]),
+        str(escalation["lease_token"]),
+    )
+
+    assert escalation_completion.updated
+    assert escalation_completion.initial_delivery_timing is None
+    assert alert_store.get_alert(alert["id"])["firstInitialDeliveryAt"] == stamped_at
 
 
 def test_claim_recovery_does_not_consume_provider_attempt_budget():
@@ -337,6 +413,31 @@ def test_pending_row_created_before_worker_start_is_delivered(monkeypatch):
         )
     finally:
         assert worker.stop(timeout=2)
+
+
+def test_initial_delivery_observer_is_fail_open_after_durable_commit():
+    alert = _create_alert(targets=[_target()])
+    claimed = alert_delivery_store.claim_due(worker_id="worker", lease_seconds=30)
+    observed = []
+
+    def fail_observer(timing):
+        observed.append(timing)
+        raise RuntimeError("telemetry unavailable")
+
+    worker = alert_delivery_worker.AlertDeliveryWorker(
+        worker_count=1,
+        initial_delivery_observer=fail_observer,
+    )
+
+    worker._record_result(
+        claimed,
+        ProviderDeliveryResult(DeliveryDisposition.DELIVERED, "Delivered"),
+    )
+
+    assert len(observed) == 1
+    assert observed[0].alert_id == alert["id"]
+    assert alert_delivery_store.get_for_alert(alert["id"])[0]["state"] == "delivered"
+    assert alert_store.get_alert(alert["id"])["firstInitialDeliveryAt"] is not None
 
 
 def test_worker_restart_uses_persisted_deadline(monkeypatch):

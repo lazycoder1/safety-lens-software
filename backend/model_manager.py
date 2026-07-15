@@ -1668,6 +1668,39 @@ def _remote_post_raw_specialist_batch4(
     return response.json()
 
 
+def remote_frame_batch_route_may_run(
+    model_keys: list[str] | tuple[str, ...],
+    batch_size: int,
+) -> bool:
+    """Return whether one cross-camera frame route can execute this exact plan."""
+    if batch_size not in {2, 4}:
+        return False
+    normalized = tuple(str(model_key) for model_key in model_keys)
+    if normalized == ("coco_primary",):
+        return (
+            _remote_primary_batch4_route_may_run()
+            if batch_size == 4
+            else _remote_primary_batch2_route_may_run()
+        )
+    if normalized == ("ppe_specialist",):
+        return _remote_ppe_batch_route_may_run(batch_size)
+    if len(normalized) == 2 and set(normalized) == {
+        "coco_primary",
+        "ppe_specialist",
+    }:
+        return (
+            _remote_specialist_batch4_route_may_run()
+            if batch_size == 4
+            else _remote_specialist_batch2_route_may_run()
+        )
+    return False
+
+
+def remote_rtdetr_phone_batch_route_may_run(batch_size: int) -> bool:
+    """Expose non-sensitive RT-DETR fixed-route readiness to the scheduler."""
+    return _remote_rtdetr_phone_route_may_run(batch_size)
+
+
 def _now() -> float:
     return time.time()
 
@@ -3764,8 +3797,10 @@ class _RemotePrimaryFrameBatcher:
             "admission_overloads": 0,
             "batch2_requests": 0,
             "batch2_executed": 0,
+            "batch2_succeeded": 0,
             "batch4_requests": 0,
             "batch4_executed": 0,
+            "batch4_succeeded": 0,
             "singleton_bypasses": 0,
         }
 
@@ -3834,6 +3869,8 @@ class _RemotePrimaryFrameBatcher:
                         item["inference_shape"],
                     )
                     item["handled"] = True
+                with self._lock:
+                    self._counters[f"batch{batch_size}_succeeded"] += 1
         except Exception as exc:
             for item in items:
                 item["error"] = exc
@@ -3846,16 +3883,17 @@ class _RemotePrimaryFrameBatcher:
             raise current["error"]
         return current["handled"], current["records"]
 
-    def _eligible(self, request: dict[str, Any]) -> bool:
-        route_available = (
-            _remote_ppe_batch_route_may_run(self.batch_size)
-            if self.model_key == "ppe_specialist"
-            else (
-                _remote_primary_batch4_route_may_run()
-                if self.batch_size == 4
-                else _remote_primary_batch2_route_may_run()
-            )
+    def _route_may_run(self, batch_size: int) -> bool:
+        if self.model_key == "ppe_specialist":
+            return _remote_ppe_batch_route_may_run(batch_size)
+        return (
+            _remote_primary_batch4_route_may_run()
+            if batch_size == 4
+            else _remote_primary_batch2_route_may_run()
         )
+
+    def _eligible(self, request: dict[str, Any], batch_size: int) -> bool:
+        route_available = batch_size in {2, 4} and self._route_may_run(batch_size)
         classes_compatible = (
             bool(request["classes"])
             if self.model_key == "ppe_specialist"
@@ -3876,12 +3914,18 @@ class _RemotePrimaryFrameBatcher:
         *,
         frame_batch_size_hint: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
-        if not self._eligible(request):
-            return False, []
         if frame_batch_size_hint == 1:
+            if not self._eligible(request, self.batch_size):
+                return False, []
             with self._lock:
                 self._counters["eligible_requests"] += 1
                 self._counters["singleton_bypasses"] += 1
+            return False, []
+        hinted_batch_size = (
+            frame_batch_size_hint if frame_batch_size_hint in {2, 4} else None
+        )
+        target_batch_size = hinted_batch_size or self.batch_size
+        if not self._eligible(request, target_batch_size):
             return False, []
         inference_frame, inference_shape = _prepare_remote_inference_frame(
             frame,
@@ -3902,32 +3946,32 @@ class _RemotePrimaryFrameBatcher:
             request["device"],
             request["imgsz"],
             tuple(request["classes"]),
+            # Keep scheduler-coordinated cohorts isolated from legacy callers
+            # and from cohorts with a different exact size contract.
+            hinted_batch_size,
         )
         items = None
         with self._lock:
             self._counters["eligible_requests"] += 1
             pending = self._pending.setdefault(key, [])
             pending.append(current)
-            if len(pending) == self.batch_size:
+            if len(pending) == target_batch_size:
                 items = self._pending.pop(key)
-                self._counters["paired_requests"] += self.batch_size
-                self._counters[f"batch{self.batch_size}_requests"] += self.batch_size
+                self._counters["paired_requests"] += target_batch_size
+                self._counters[f"batch{target_batch_size}_requests"] += (
+                    target_batch_size
+                )
 
         if items is not None:
-            return self._execute_batch(items, self.batch_size, current)
+            return self._execute_batch(items, target_batch_size, current)
 
         wait_started = time.monotonic()
-        if self.batch2_early_flush_seconds > 0:
+        if target_batch_size == 4 and self.batch2_early_flush_seconds > 0:
             if current["event"].wait(self.batch2_early_flush_seconds):
                 if current["error"] is not None:
                     raise current["error"]
                 return current["handled"], current["records"]
-            batch2_available = (
-                _remote_ppe_batch_route_may_run(2)
-                if self.model_key == "ppe_specialist"
-                else _remote_primary_batch2_route_may_run()
-            )
-            if batch2_available:
+            if self._route_may_run(2):
                 items = self._claim_batch(key, current, 2)
                 if items is not None:
                     return self._execute_batch(items, 2, current)
@@ -4021,8 +4065,10 @@ class _RemoteSpecialistFrameBatcher:
             "admission_overloads": 0,
             "batch2_requests": 0,
             "batch2_executed": 0,
+            "batch2_succeeded": 0,
             "batch4_requests": 0,
             "batch4_executed": 0,
+            "batch4_succeeded": 0,
             "singleton_bypasses": 0,
         }
 
@@ -4100,6 +4146,8 @@ class _RemoteSpecialistFrameBatcher:
                         for model_key, records in frame_results.items()
                     }
                     item["handled"] = True
+                with self._lock:
+                    self._counters[f"batch{batch_size}_succeeded"] += 1
         except Exception as exc:
             for item in items:
                 item["error"] = exc
@@ -4112,9 +4160,18 @@ class _RemoteSpecialistFrameBatcher:
             raise current["error"]
         return current["handled"], current["records"]
 
+    @staticmethod
+    def _route_may_run(batch_size: int) -> bool:
+        return (
+            _remote_specialist_batch4_route_may_run()
+            if batch_size == 4
+            else _remote_specialist_batch2_route_may_run()
+        )
+
     def _request_map(
         self,
         requests: list[dict[str, Any]],
+        batch_size: int,
     ) -> dict[str, dict[str, Any]] | None:
         if len(requests) != 2:
             return None
@@ -4123,11 +4180,7 @@ class _RemoteSpecialistFrameBatcher:
             return None
         primary = mapped["coco_primary"]
         ppe = mapped["ppe_specialist"]
-        route_available = (
-            _remote_specialist_batch4_route_may_run()
-            if self.batch_size == 4
-            else _remote_specialist_batch2_route_may_run()
-        )
+        route_available = batch_size in {2, 4} and self._route_may_run(batch_size)
         if (
             self.wait_seconds <= 0
             or primary["imgsz"] != _REMOTE_PRIMARY_BATCH_IMGSZ
@@ -4146,13 +4199,20 @@ class _RemoteSpecialistFrameBatcher:
         *,
         frame_batch_size_hint: int | None = None,
     ) -> tuple[bool, dict[str, list[dict[str, Any]]]]:
-        mapped = self._request_map(requests)
-        if mapped is None:
-            return False, {}
         if frame_batch_size_hint == 1:
+            mapped = self._request_map(requests, self.batch_size)
+            if mapped is None:
+                return False, {}
             with self._lock:
                 self._counters["eligible_requests"] += 1
                 self._counters["singleton_bypasses"] += 1
+            return False, {}
+        hinted_batch_size = (
+            frame_batch_size_hint if frame_batch_size_hint in {2, 4} else None
+        )
+        target_batch_size = hinted_batch_size or self.batch_size
+        mapped = self._request_map(requests, target_batch_size)
+        if mapped is None:
             return False, {}
         primary = mapped["coco_primary"]
         ppe = mapped["ppe_specialist"]
@@ -4178,27 +4238,31 @@ class _RemoteSpecialistFrameBatcher:
             ppe["device"],
             ppe["imgsz"],
             tuple(ppe["classes"]),
+            # Hinted calls belong only to their scheduler-selected cohort.
+            hinted_batch_size,
         )
         items = None
         with self._lock:
             self._counters["eligible_requests"] += 1
             pending = self._pending.setdefault(key, [])
             pending.append(current)
-            if len(pending) == self.batch_size:
+            if len(pending) == target_batch_size:
                 items = self._pending.pop(key)
-                self._counters["paired_requests"] += self.batch_size
-                self._counters[f"batch{self.batch_size}_requests"] += self.batch_size
+                self._counters["paired_requests"] += target_batch_size
+                self._counters[f"batch{target_batch_size}_requests"] += (
+                    target_batch_size
+                )
 
         if items is not None:
-            return self._execute_batch(items, self.batch_size, current)
+            return self._execute_batch(items, target_batch_size, current)
 
         wait_started = time.monotonic()
-        if self.batch2_early_flush_seconds > 0:
+        if target_batch_size == 4 and self.batch2_early_flush_seconds > 0:
             if current["event"].wait(self.batch2_early_flush_seconds):
                 if current["error"] is not None:
                     raise current["error"]
                 return current["handled"], current["records"]
-            if _remote_specialist_batch2_route_may_run():
+            if self._route_may_run(2):
                 items = self._claim_batch(key, current, 2)
                 if items is not None:
                     return self._execute_batch(items, 2, current)

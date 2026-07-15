@@ -7,14 +7,13 @@ import threading
 from pathlib import Path
 
 import pytest
-import psycopg2
 
 TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://localhost:5432/rakshak_lens_test")
 
 # Set DATABASE_URL before importing alert_store
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
-import alert_store
+import alert_store  # noqa: E402
 
 _test_snapshots = Path(tempfile.mkdtemp()) / "snapshots"
 
@@ -83,6 +82,8 @@ def test_create_alert_returns_dict_with_expected_keys():
         "priority", "message", "metadata",
         "snapshotUrl", "acknowledgedBy", "acknowledgedAt",
         "resolvedAt", "snoozedUntil", "falsePositive",
+        "firstPositiveAt", "confirmedAt", "persistedAt",
+        "firstInitialDeliveryAt",
     }
     assert set(alert.keys()) == expected_keys
     assert alert["cameraId"] == "cam1"
@@ -100,6 +101,104 @@ def test_create_alert_returns_dict_with_expected_keys():
     assert alert["metadata"] == {}
     assert alert["acknowledgedBy"] is None
     assert alert["falsePositive"] is False
+    assert alert["firstPositiveAt"] is None
+    assert alert["confirmedAt"] is None
+    assert alert["persistedAt"] is not None
+    assert alert["firstInitialDeliveryAt"] is None
+
+
+def test_init_db_adds_nullable_timestamptz_timing_columns():
+    with alert_store._get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_name = 'alerts'
+                  AND column_name IN (
+                    'first_positive_at', 'confirmed_at', 'persisted_at',
+                    'first_initial_delivery_at'
+                  )
+                """
+            )
+            columns = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+
+    assert columns == {
+        "first_positive_at": ("timestamp with time zone", "YES"),
+        "confirmed_at": ("timestamp with time zone", "YES"),
+        "persisted_at": ("timestamp with time zone", "YES"),
+        "first_initial_delivery_at": ("timestamp with time zone", "YES"),
+    }
+
+
+def test_create_alert_persists_utc_timing_anchors():
+    first_positive = datetime(2026, 7, 15, 9, 10, 11, tzinfo=timezone.utc)
+    alert = alert_store.create_alert(
+        camera_id="cam1",
+        camera_name="C",
+        zone="Z",
+        rule="R",
+        severity="P2",
+        confidence=0.9,
+        first_positive_at=first_positive,
+        confirmed_at="2026-07-15T14:40:12+05:30",
+    )
+
+    assert alert["firstPositiveAt"] == "2026-07-15T09:10:11+00:00"
+    assert alert["confirmedAt"] == "2026-07-15T09:10:12+00:00"
+    assert alert["persistedAt"] is not None
+    assert datetime.fromisoformat(alert["persistedAt"]).tzinfo is not None
+    assert alert_store.get_alert(alert["id"]) == alert
+
+
+def test_create_alert_rejects_non_wall_clock_timing_values():
+    with pytest.raises(TypeError, match="first_positive_at"):
+        alert_store.create_alert(
+            camera_id="cam1",
+            camera_name="C",
+            zone="Z",
+            rule="R",
+            severity="P2",
+            confidence=0.9,
+            first_positive_at=123456789,  # type: ignore[arg-type]
+        )
+
+
+def test_mark_first_initial_delivery_at_is_atomic_and_write_once():
+    alert = alert_store.create_alert(
+        camera_id="cam1",
+        camera_name="C",
+        zone="Z",
+        rule="R",
+        severity="P2",
+        confidence=0.9,
+        first_positive_at="2026-07-15T09:10:11Z",
+        confirmed_at="2026-07-15T09:10:12Z",
+    )
+
+    first = alert_store.mark_first_initial_delivery_at(
+        alert["id"],
+        "2026-07-15T09:10:13Z",
+    )
+    replay = alert_store.mark_first_initial_delivery_at(
+        alert["id"],
+        "2026-07-15T09:11:13Z",
+    )
+
+    assert first == replay
+    assert first == {
+        "firstPositiveAt": "2026-07-15T09:10:11+00:00",
+        "confirmedAt": "2026-07-15T09:10:12+00:00",
+        "persistedAt": alert["persistedAt"],
+        "firstInitialDeliveryAt": "2026-07-15T09:10:13+00:00",
+    }
+    assert alert_store.get_alert(alert["id"])["firstInitialDeliveryAt"] == (
+        "2026-07-15T09:10:13+00:00"
+    )
+
+
+def test_mark_first_initial_delivery_at_unknown_alert_returns_none():
+    assert alert_store.mark_first_initial_delivery_at("missing") is None
 
 
 def test_create_alert_id_is_full_uuid():
@@ -399,6 +498,8 @@ def test_output_uses_camel_case():
         "priority", "message", "metadata",
         "snapshotUrl", "acknowledgedBy", "acknowledgedAt",
         "resolvedAt", "snoozedUntil", "falsePositive",
+        "firstPositiveAt", "confirmedAt", "persistedAt",
+        "firstInitialDeliveryAt",
     }
     assert set(alert.keys()) == camel_keys
 

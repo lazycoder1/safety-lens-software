@@ -407,6 +407,71 @@ def test_old_camera_and_vlm_exits_cannot_remove_new_owners(
     assert state.vlm_threads["cam-1"] is new_vlm_ownership
 
 
+def test_legacy_punctuation_camera_id_cannot_stop_video_worker_telemetry(
+    monkeypatch,
+):
+    from pipeline_telemetry import PipelineTelemetry
+
+    camera_id = "Front Gate #1 / ಗೇಟ್"
+    calls = []
+    registry = PipelineTelemetry()
+    monkeypatch.setattr(video_processing, "pipeline_telemetry", registry)
+    monkeypatch.setattr(
+        video_processing,
+        "_video_processor_loop",
+        lambda received_id, _stop: calls.append(received_id),
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "_finalize_camera_worker_exit",
+        lambda *_args: None,
+    )
+
+    video_processing.video_processor(camera_id, threading.Event())
+
+    assert calls == [camera_id]
+    camera_snapshot = registry.public_camera_snapshot(camera_id)
+    assert camera_snapshot is not None
+    assert camera_snapshot["active"] is False
+    public_ids = list(registry.public_snapshot()["cameras"])
+    assert len(public_ids) == 1
+    assert public_ids[0].startswith("telemetry-opaque-")
+    assert camera_id not in public_ids
+
+
+def test_camera_worker_fails_open_when_optional_telemetry_is_at_capacity(
+    monkeypatch,
+):
+    from pipeline_telemetry import TelemetryCapacityError
+
+    loop_calls = []
+    finalized = []
+
+    def capacity_reached(_camera_id):
+        raise TelemetryCapacityError("full")
+
+    monkeypatch.setattr(
+        video_processing.pipeline_telemetry,
+        "reset_camera",
+        capacity_reached,
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "_video_processor_loop",
+        lambda camera_id, _stop: loop_calls.append(camera_id),
+    )
+    monkeypatch.setattr(
+        video_processing,
+        "_finalize_camera_worker_exit",
+        lambda camera_id, _stop: finalized.append(camera_id),
+    )
+
+    video_processing.video_processor("cam-257", threading.Event())
+
+    assert loop_calls == ["cam-257"]
+    assert finalized == ["cam-257"]
+
+
 def test_exact_camera_owner_exit_clears_stale_connection_outage(
     monkeypatch,
     lifecycle_state,

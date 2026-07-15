@@ -60,7 +60,31 @@ _CAMERA_CONNECTION_TRANSITIONS = {
     "recovered",
     "unknown",
 }
-_CAMERA_CAPTURE_BACKENDS = {"unknown", "ffmpeg", "gstreamer_nvdec"}
+_CAMERA_CAPTURE_BACKENDS = {
+    "unknown",
+    "ffmpeg",
+    "gstreamer_unknown",
+    "gstreamer_software",
+    "gstreamer_nvdec",
+}
+_CAPTURE_DROP_ACCOUNTING = {
+    "unavailable",
+    "application-drain-only",
+    "videorate-only",
+    "videorate-plus-appsink",
+}
+_DECODER_POLICY_DROP_ACCOUNTING = {
+    "unknown",
+    "not-applicable",
+    "not-configured",
+    "requested-not-applied",
+    "configured-not-observable",
+}
+_APPSINK_DROP_METHODS = {
+    "unavailable",
+    "native-counter",
+    "sink-pad-probe-lower-bound",
+}
 camera_connection_health: dict[str, dict[str, Any]] = {}
 camera_connection_health_lock = threading.Lock()
 camera_inference_health: dict[str, dict[str, Any]] = {}
@@ -100,6 +124,11 @@ def update_camera_connection_health(
     last_transition: str,
     last_transition_monotonic: float | None,
     capture_backend: str = "unknown",
+    appsink_latest_buffer_drops_observable: bool = False,
+    appsink_latest_buffer_drop_method: str = "unavailable",
+    capture_drop_accounting: str = "unavailable",
+    capture_drop_count_is_lower_bound: bool = True,
+    decoder_policy_drop_accounting: str = "unknown",
 ) -> None:
     """Publish a credential-safe, bounded connection telemetry snapshot."""
     transition = str(last_transition)
@@ -108,6 +137,15 @@ def update_camera_connection_health(
     backend = str(capture_backend)
     if backend not in _CAMERA_CAPTURE_BACKENDS:
         backend = "unknown"
+    drop_accounting = str(capture_drop_accounting)
+    if drop_accounting not in _CAPTURE_DROP_ACCOUNTING:
+        drop_accounting = "unavailable"
+    decoder_drop_accounting = str(decoder_policy_drop_accounting)
+    if decoder_drop_accounting not in _DECODER_POLICY_DROP_ACCOUNTING:
+        decoder_drop_accounting = "unknown"
+    appsink_drop_method = str(appsink_latest_buffer_drop_method)
+    if appsink_drop_method not in _APPSINK_DROP_METHODS:
+        appsink_drop_method = "unavailable"
     snapshot = {
         "outage_active": bool(outage_active),
         "outage_started_monotonic": _safe_monotonic(outage_started_monotonic),
@@ -119,6 +157,13 @@ def update_camera_connection_health(
         "last_transition": transition,
         "last_transition_monotonic": _safe_monotonic(last_transition_monotonic),
         "capture_backend": backend,
+        "appsink_latest_buffer_drops_observable": bool(
+            appsink_latest_buffer_drops_observable
+        ),
+        "appsink_latest_buffer_drop_method": appsink_drop_method,
+        "capture_drop_accounting": drop_accounting,
+        "capture_drop_count_is_lower_bound": bool(capture_drop_count_is_lower_bound),
+        "decoder_policy_drop_accounting": decoder_drop_accounting,
     }
     with camera_connection_health_lock:
         camera_connection_health[camera_id] = snapshot
@@ -211,6 +256,11 @@ def get_camera_connection_health(
             "lastTransition": "unknown",
             "lastTransitionAgeSeconds": None,
             "captureBackend": "unknown",
+            "appsinkLatestBufferDropsObservable": False,
+            "appsinkLatestBufferDropMethod": "unavailable",
+            "captureDropAccounting": "unavailable",
+            "captureDropCountIsLowerBound": True,
+            "decoderPolicyDropAccounting": "unknown",
         }
 
     now = _safe_monotonic(now_monotonic)
@@ -241,6 +291,21 @@ def get_camera_connection_health(
             snapshot["last_transition_monotonic"]
         ),
         "captureBackend": snapshot.get("capture_backend", "unknown"),
+        "appsinkLatestBufferDropsObservable": bool(
+            snapshot.get("appsink_latest_buffer_drops_observable", False)
+        ),
+        "appsinkLatestBufferDropMethod": snapshot.get(
+            "appsink_latest_buffer_drop_method", "unavailable"
+        ),
+        "captureDropAccounting": snapshot.get(
+            "capture_drop_accounting", "unavailable"
+        ),
+        "captureDropCountIsLowerBound": bool(
+            snapshot.get("capture_drop_count_is_lower_bound", True)
+        ),
+        "decoderPolicyDropAccounting": snapshot.get(
+            "decoder_policy_drop_accounting", "unknown"
+        ),
     }
 
 
