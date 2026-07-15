@@ -6,6 +6,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import uuid4
 
 from psycopg2.extras import Json, RealDictCursor
@@ -15,6 +16,7 @@ from db import get_conn
 
 _get_conn = get_conn
 _NOTIFY_CHANNEL = "safetylens_alert_delivery"
+LeaseRenewalStatus = Literal["renewed", "inactive", "lost"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,25 +623,75 @@ def begin_send(
     }
 
 
-def renew_lease(delivery_id: str, lease_token: str, *, lease_seconds: float) -> bool:
+def renew_lease_with_status(
+    delivery_id: str,
+    lease_token: str,
+    *,
+    lease_seconds: float,
+) -> LeaseRenewalStatus:
+    """Renew a lease and distinguish normal completion from fencing loss."""
     lease_seconds = _safe_seconds(lease_seconds, default=60.0, minimum=0.1, maximum=3600.0)
     with _get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                UPDATE alert_delivery_outbox
-                SET lease_expires_at = clock_timestamp() + (%s * interval '1 second'),
-                    updated_at = clock_timestamp()
+                SELECT state,
+                       lease_token::text AS lease_token,
+                       expires_at > clock_timestamp() AS within_lifetime
+                FROM alert_delivery_outbox
                 WHERE id = %s
-                  AND lease_token = %s
-                  AND state = 'pending'
-                  AND expires_at > clock_timestamp()
+                FOR UPDATE
                 """,
-                (lease_seconds, delivery_id, lease_token),
+                (delivery_id,),
             )
-            updated = cur.rowcount == 1
+            row = cur.fetchone()
+            status: LeaseRenewalStatus
+            if row is None:
+                status = "lost"
+            elif row["state"] != "pending":
+                status = "inactive"
+            elif not row["within_lifetime"]:
+                status = "lost"
+            elif row["lease_token"] is None:
+                # Normal retry/release transitions keep the work pending but
+                # atomically clear its lease before the process-local active
+                # tuple is removed.
+                status = "inactive"
+            elif str(row["lease_token"]) != str(lease_token):
+                status = "lost"
+            else:
+                # The row lock keeps completion and competing claimers from
+                # changing the lifecycle classification between inspection and
+                # renewal. An elapsed renewable lease can still be extended if
+                # no competitor has replaced its token, preserving prior
+                # behavior for a delayed renewer.
+                cur.execute(
+                    """
+                    UPDATE alert_delivery_outbox
+                    SET lease_expires_at = clock_timestamp() + (%s * interval '1 second'),
+                        updated_at = clock_timestamp()
+                    WHERE id = %s
+                      AND lease_token = %s
+                      AND state = 'pending'
+                      AND expires_at > clock_timestamp()
+                    """,
+                    (lease_seconds, delivery_id, lease_token),
+                )
+                status = "renewed" if cur.rowcount == 1 else "lost"
         conn.commit()
-    return updated
+    return status
+
+
+def renew_lease(delivery_id: str, lease_token: str, *, lease_seconds: float) -> bool:
+    """Preserve the original boolean API for callers that only need success."""
+    return (
+        renew_lease_with_status(
+            delivery_id,
+            lease_token,
+            lease_seconds=lease_seconds,
+        )
+        == "renewed"
+    )
 
 
 def mark_delivered(

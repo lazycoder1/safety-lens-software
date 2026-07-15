@@ -499,6 +499,100 @@ def test_retry_due_time_survives_worker_recreation(monkeypatch):
         assert worker.stop(timeout=2)
 
 
+def test_lease_renewal_status_distinguishes_owned_and_lost_rows():
+    alert = _create_alert(targets=[_target()])
+    unclaimed = alert_delivery_store.get_for_alert(alert["id"])[0]
+
+    assert alert_delivery_store.renew_lease_with_status(
+        str(unclaimed["id"]),
+        "00000000-0000-0000-0000-000000000001",
+        lease_seconds=30,
+    ) == "inactive"
+    assert alert_delivery_store.renew_lease_with_status(
+        "00000000-0000-0000-0000-000000000002",
+        "00000000-0000-0000-0000-000000000003",
+        lease_seconds=30,
+    ) == "lost"
+
+    claimed = alert_delivery_store.claim_due(worker_id="worker", lease_seconds=30)
+    lease = (str(claimed["id"]), str(claimed["lease_token"]))
+    assert alert_delivery_store.renew_lease_with_status(
+        *lease,
+        lease_seconds=30,
+    ) == "renewed"
+    assert alert_delivery_store.renew_lease_with_status(
+        lease[0],
+        "00000000-0000-0000-0000-000000000004",
+        lease_seconds=30,
+    ) == "lost"
+
+
+def test_absolute_delivery_expiry_is_a_lost_lease():
+    _create_alert(targets=[_target()])
+    claimed = alert_delivery_store.claim_due(worker_id="worker", lease_seconds=30)
+    lease = (str(claimed["id"]), str(claimed["lease_token"]))
+    with alert_store._get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE alert_delivery_outbox
+                SET expires_at = clock_timestamp() - interval '1 second'
+                WHERE id = %s
+                """,
+                (lease[0],),
+            )
+        conn.commit()
+
+    assert alert_delivery_store.renew_lease_with_status(
+        *lease,
+        lease_seconds=30,
+    ) == "lost"
+
+
+def test_retry_release_is_inactive_for_lease_renewal():
+    _create_alert(targets=[_target()])
+    claimed = alert_delivery_store.claim_due(worker_id="worker", lease_seconds=30)
+    lease = (str(claimed["id"]), str(claimed["lease_token"]))
+    assert alert_delivery_store.begin_send(*lease, max_attempts=5)["started"]
+    assert alert_delivery_store.schedule_retry(
+        *lease,
+        delay_seconds=1,
+        max_attempts=5,
+        error_code="test_retry",
+        error_message="retry test",
+        acceptance_unknown=False,
+    ) == "pending"
+
+    assert alert_delivery_store.renew_lease_with_status(
+        *lease,
+        lease_seconds=30,
+    ) == "inactive"
+
+
+@pytest.mark.parametrize("final_state", ["delivered", "terminal", "cancelled"])
+def test_final_delivery_state_is_inactive_for_lease_renewal(final_state):
+    kind = "escalation" if final_state == "cancelled" else "initial"
+    alert = _create_alert(targets=[_target(kind=kind)])
+    claimed = alert_delivery_store.claim_due(worker_id="worker", lease_seconds=30)
+    lease = (str(claimed["id"]), str(claimed["lease_token"]))
+
+    if final_state == "delivered":
+        assert alert_delivery_store.mark_delivered(*lease)
+    elif final_state == "terminal":
+        assert alert_delivery_store.mark_terminal(
+            *lease,
+            error_code="test_terminal",
+            error_message="test terminal",
+        )
+    else:
+        assert alert_delivery_store.cancel_escalations(alert["id"]) == 1
+
+    assert alert_delivery_store.renew_lease_with_status(
+        *lease,
+        lease_seconds=30,
+    ) == "inactive"
+
+
 def test_lease_renewal_prevents_second_worker_during_slow_provider(monkeypatch):
     alert = _create_alert(targets=[_target()])
     entered = threading.Event()
@@ -527,6 +621,112 @@ def test_lease_renewal_prevents_second_worker_during_slow_provider(monkeypatch):
     finally:
         release.set()
         assert worker.stop(timeout=2)
+
+
+def test_lease_renewer_ignores_early_condition_notifications(monkeypatch):
+    worker = alert_delivery_worker.AlertDeliveryWorker(
+        worker_count=1,
+        lease_seconds=0.3,
+    )
+    worker._active_leases.add(("delivery", "lease-token"))
+    now = [100.0]
+    waits = []
+    renewals = []
+
+    monkeypatch.setattr(alert_delivery_worker.time, "monotonic", lambda: now[0])
+
+    def early_wake_then_advance(seconds):
+        waits.append(seconds)
+        if len(waits) == 4:
+            now[0] += seconds
+        elif len(waits) == 5:
+            worker._active_leases.clear()
+            worker._stop_claiming.set()
+
+    def renew_lease(delivery_id, lease_token, *, lease_seconds):
+        renewals.append((delivery_id, lease_token, lease_seconds, now[0]))
+        return "renewed"
+
+    monkeypatch.setattr(worker, "_wait", early_wake_then_advance)
+    monkeypatch.setattr(alert_delivery_store, "renew_lease_with_status", renew_lease)
+
+    worker._renew_loop()
+
+    assert len(waits) == 5
+    assert renewals == [("delivery", "lease-token", 0.3, pytest.approx(100.1))]
+    assert worker.stats()["renewal_failures"] == 0
+
+
+def test_completed_delivery_is_not_reported_as_renewal_failure(monkeypatch):
+    _create_alert(targets=[_target()])
+    claimed = alert_delivery_store.claim_due(worker_id="worker", lease_seconds=30)
+    assert alert_delivery_store.begin_send(
+        str(claimed["id"]), str(claimed["lease_token"]), max_attempts=5
+    )["started"]
+    assert alert_delivery_store.mark_delivered(
+        str(claimed["id"]), str(claimed["lease_token"])
+    )
+
+    worker = alert_delivery_worker.AlertDeliveryWorker(
+        worker_count=1,
+        lease_seconds=0.3,
+    )
+    lease = (str(claimed["id"]), str(claimed["lease_token"]))
+    worker._active_leases.add(lease)
+    now = [100.0]
+    waits = []
+
+    monkeypatch.setattr(alert_delivery_worker.time, "monotonic", lambda: now[0])
+
+    def finish_after_renewal(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            now[0] += seconds
+        else:
+            worker._active_leases.clear()
+            worker._stop_claiming.set()
+
+    monkeypatch.setattr(worker, "_wait", finish_after_renewal)
+
+    worker._renew_loop()
+
+    assert len(waits) == 2
+    assert worker.stats()["renewal_failures"] == 0
+    assert alert_delivery_store.renew_lease_with_status(
+        *lease,
+        lease_seconds=0.3,
+    ) == "inactive"
+
+
+def test_live_lease_fencing_loss_is_reported(monkeypatch):
+    worker = alert_delivery_worker.AlertDeliveryWorker(
+        worker_count=1,
+        lease_seconds=0.3,
+    )
+    worker._active_leases.add(("delivery", "old-token"))
+    now = [100.0]
+    waits = []
+
+    monkeypatch.setattr(alert_delivery_worker.time, "monotonic", lambda: now[0])
+
+    def finish_after_renewal(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            now[0] += seconds
+        else:
+            worker._active_leases.clear()
+            worker._stop_claiming.set()
+
+    monkeypatch.setattr(worker, "_wait", finish_after_renewal)
+    monkeypatch.setattr(
+        alert_delivery_store,
+        "renew_lease_with_status",
+        lambda *_args, **_kwargs: "lost",
+    )
+
+    worker._renew_loop()
+
+    assert worker.stats()["renewal_failures"] == 1
 
 
 def test_huge_retry_after_is_terminal_without_killing_worker(monkeypatch):

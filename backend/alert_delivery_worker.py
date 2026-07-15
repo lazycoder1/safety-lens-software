@@ -594,22 +594,31 @@ class AlertDeliveryWorker:
 
     def _renew_loop(self) -> None:
         interval = max(0.1, self._lease_seconds / 3)
+        next_renewal_at = time.monotonic() + interval
         while True:
             with self._active_lock:
                 leases = list(self._active_leases)
             if self._stop_claiming.is_set() and not leases:
                 return
-            self._wait(interval)
+
+            remaining = next_renewal_at - time.monotonic()
+            if remaining > 0:
+                # Claim, completion, and shutdown notifications share this
+                # condition. A notification must re-check lifecycle state, but
+                # it must not renew leases before their scheduled interval.
+                self._wait(remaining)
+                continue
+
             with self._active_lock:
                 leases = list(self._active_leases)
             for delivery_id, lease_token in leases:
                 try:
-                    renewed = alert_delivery_store.renew_lease(
+                    status = alert_delivery_store.renew_lease_with_status(
                         delivery_id,
                         lease_token,
                         lease_seconds=self._lease_seconds,
                     )
-                    if not renewed:
+                    if status == "lost" and self._lease_is_active(delivery_id, lease_token):
                         self._increment_metric("renewal_failures")
                         logger.warning(
                             "Outbox lease was cancelled or lost",
@@ -625,6 +634,11 @@ class AlertDeliveryWorker:
                             "error_type": type(exc).__name__,
                         },
                     )
+            next_renewal_at = time.monotonic() + interval
+
+    def _lease_is_active(self, delivery_id: str, lease_token: str) -> bool:
+        with self._active_lock:
+            return (delivery_id, lease_token) in self._active_leases
 
     def _wait(self, seconds: float) -> None:
         with self._condition:
